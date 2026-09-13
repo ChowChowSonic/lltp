@@ -1,0 +1,12 @@
+[package]
+name = "lltp"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "lltp"
+path = "src/lib.rs"
+[dependencies]
+inkwell = { version = "0.9.0", features = ["llvm22-1"]}
+rayon = "1.12.0"
+tracing = "0.1.44"
