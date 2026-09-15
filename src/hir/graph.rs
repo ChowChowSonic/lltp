@@ -1,17 +1,8 @@
-use inkwell::{
-    basic_block::BasicBlock,
-    context::Context,
-    module::Module,
-    values::{GlobalValue, Operand},
-};
-use std::{
-    collections::{BTreeSet, HashMap, HashSet, VecDeque},
-    option,
-};
+use inkwell::{basic_block::BasicBlock, module::Module, values::Operand};
+use std::collections::{HashMap, HashSet, VecDeque};
 use tracing::warn;
 
 pub fn build_graph<'ctx>(
-    context: &Context,
     module: &Module<'ctx>,
 ) -> Result<HashMap<BasicBlock<'ctx>, Vec<BasicBlock<'ctx>>>, &'ctx str> {
     let mut graph: HashMap<BasicBlock, Vec<BasicBlock>> = HashMap::new();
@@ -122,7 +113,7 @@ CF80:                                             ; preds = %CF86
             .create_module_from_ir(mem_buf)
             .expect("Failed to create module from IR");
         let graph_res: Result<HashMap<BasicBlock<'_>, Vec<BasicBlock<'_>>>, &str> =
-            build_graph(&ctxt, &res);
+            build_graph(&res);
         if let Ok(graph) = graph_res {
             let mut loops: Vec<BasicBlock> = Vec::new();
             for (k, _) in graph.clone() {
@@ -151,7 +142,7 @@ CF80:                                             ; preds = %CF86
             .create_module_from_ir(mem_buf)
             .expect("Failed to create module from IR");
         let graph_res: Result<HashMap<BasicBlock<'_>, Vec<BasicBlock<'_>>>, &str> =
-            build_graph(&ctxt, &res);
+            build_graph(&res);
         if let Ok(graph) = graph_res {
             for (k, v) in graph {
                 match k.get_name().to_str().unwrap() {
