@@ -1,6 +1,7 @@
 use inkwell::{context::Context, module::Module, values::GlobalValue};
+pub mod backend;
 pub mod hir;
-pub mod language;
+pub mod passes;
 
 pub fn get_globals<'ctx>(module: &Module<'ctx>) -> Vec<GlobalValue<'ctx>> {
     let mut ret: Vec<GlobalValue<'ctx>> = Vec::new();

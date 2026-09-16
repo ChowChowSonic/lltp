@@ -1,8 +1,13 @@
-use inkwell::values::InstructionOpcode::{self, *};
-use inkwell::values::{BasicValueEnum, InstructionValue, Operand};
+use crate::hir::expr::Expr;
+use inkwell::values::{BasicValueEnum, Operand};
+pub mod expr;
+pub mod func;
 pub mod graph;
+pub mod stmt;
 
-#[derive(Debug)]
+pub use func::Function;
+
+#[derive(Debug, Clone)]
 pub enum Ty {
     Void,
     Bool,
@@ -12,7 +17,7 @@ pub enum Ty {
     Array(Box<Ty>, usize),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum Lit {
     Int {
         value: u64,
@@ -26,58 +31,6 @@ pub enum Lit {
     },
     NullPtr,
     Void,
-}
-
-/// Stmts are not value producing code
-#[derive(Debug)]
-pub enum Stmt {
-    Branch {
-        cond: Option<Expr>,
-        then_block: String,
-        else_block: Option<String>,
-    },
-    Ret {
-        value: Option<Expr>,
-    },
-}
-/// Exprs are value producing code
-#[derive(Debug)]
-pub enum Expr {
-    Literal(Lit),
-    Var {
-        name: String,
-        dtype: Ty,
-    },
-    UnaryOp {
-        op: InstructionOpcode,
-        arg: Box<Expr>,
-    },
-    BinaryOp {
-        op: InstructionOpcode,
-        arg1: Box<Expr>,
-        arg2: Box<Expr>,
-    },
-    Call {
-        name: String,
-        args: Vec<Expr>,
-    },
-    Assignment {
-        dest: Box<Expr>,
-        src: Box<Expr>,
-    },
-    Index {
-        base: Box<Expr>,
-        index: Box<Expr>,
-    },
-    Field {
-        base: Box<Expr>,
-        name: String,
-    },
-    Cast {
-        data: Box<Expr>,
-        dtype: Box<Expr>,
-    },
-    Nop,
 }
 
 fn ty_from<'c>(bve: BasicValueEnum<'c>) -> Result<Ty, &'static str> {
@@ -161,103 +114,11 @@ fn value_to_expr<'c>(operand: Operand<'c>) -> Result<Expr, &'static str> {
     }
 }
 
-impl Expr {
-    pub fn build(op: InstructionValue) -> Result<Self, &'static str> {
-        match op.get_opcode() {
-            Add | FAdd | Sub | FSub | Mul | FMul | SDiv | UDiv | FDiv | SRem | URem | FRem
-            | Shl | LShr | AShr | And | Or | Xor => {
-                let mut ops = op.get_operands();
-                let op1 = ops
-                    .next()
-                    .and_then(|o| o)
-                    .ok_or("BinaryOp: missing operand 1")?;
-                let op2 = ops
-                    .next()
-                    .and_then(|o| o)
-                    .ok_or("BinaryOp: missing operand 2")?;
-                let op1_expr = value_to_expr(op1)?;
-                let op2_expr = value_to_expr(op2)?;
-                Ok(Expr::BinaryOp {
-                    op: op.get_opcode(),
-                    arg1: Box::new(op1_expr),
-                    arg2: Box::new(op2_expr),
-                })
-            }
-            Br | Switch | IndirectBr | CallBr | Return | Unreachable => {
-                Err("Terminator: not an expression")
-            }
-            _ => Err("Instruction opcode not implemented yet!"),
-        }
-    }
-}
-
-impl Stmt {
-    pub fn build(op: InstructionValue) -> Result<Self, &'static str> {
-        match op.get_opcode() {
-            Add | FAdd | Sub | FSub | Mul | FMul | SDiv | UDiv | FDiv | SRem | URem | FRem
-            | Shl | LShr | AShr | And | Or | Xor => {
-                Err("Instruction opcode not supported by Stmt, use Expr instead!")
-            }
-            AddrSpaceCast => Err("Instruction opcode not implemented yet!"),
-            Alloca => Err("Instruction opcode not implemented yet!"),
-            AtomicCmpXchg => Err("Instruction opcode not implemented yet!"),
-            AtomicRMW => Err("Instruction opcode not implemented yet!"),
-            BitCast => Err("Instruction opcode not implemented yet!"),
-            Br => {
-                let mut ops = op.get_operands();
-                let op1 = ops
-                    .next()
-                    .and_then(|o| o)
-                    .ok_or("BinaryOp: missing operand 1")?;
-                if op1.is_block()
-                    && let blockval = op1.unwrap_block()
-                {
-                    Ok(Stmt::Branch {
-                        cond: None,
-                        then_block: blockval.get_name().to_string_lossy().to_string(),
-                        else_block: None,
-                    })
-                } else {
-                    let opval = value_to_expr(op1)?;
-                    let else_block = ops
-                        .next()
-                        .and_then(|o| o)
-                        .ok_or("Branch: missing false target")?
-                        .block()
-                        .ok_or("Branch: expected block for false target")?;
-                    let then_block = ops
-                        .next()
-                        .and_then(|o| o)
-                        .ok_or("Branch: missing true target")?
-                        .block()
-                        .ok_or("Branch: expected block for true target")?;
-                    Ok(Stmt::Branch {
-                        cond: Some(opval),
-                        then_block: then_block.get_name().to_string_lossy().to_string(),
-                        else_block: Some(else_block.get_name().to_string_lossy().to_string()),
-                    })
-                }
-            }
-            Return => {
-                let mut ops = op.get_operands();
-                let op1 = ops.next().and_then(|o| o);
-                if op1.is_none() {
-                    Ok(Stmt::Ret { value: None })
-                } else {
-                    let value = value_to_expr(op1.unwrap())?;
-                    Ok(Stmt::Ret { value: Some(value) })
-                }
-            }
-            _ => Err("Instruction opcode not implemented yet!"),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use inkwell::context::Context;
 
-    use super::{Expr, Lit, Stmt};
+    use super::{Lit, expr::Expr, stmt::Stmt};
 
     fn parse<'a>(ctxt: &'a Context, ir: &str) -> inkwell::module::Module<'a> {
         let mut bytes = ir.as_bytes().to_vec();

@@ -41,25 +41,37 @@ Brittleness of AST-to-AST porters under: type-system divergence, memory-manageme
 
 LLM-based transpilation flaws this design avoids: token-cost scaling (sometimes quadratic in project size), non-determinism and inaccuracy, low-quality or unsafe output, and wall-clock slowness versus a deterministic transpiler.
 
-## 3. Repo Layout (target)
+### Lowering vs capability (sorted, as built)
+
+**Capability** is what a target language can natively express — declared by the `Language` `allows_*` flags. **Lowering** is what the middle-end does to HIR when the target cannot express a node. The contract, encoded in the trait docs: when a flag is `false`, the driver/passes MUST rewrite the corresponding HIR into an expressible form before emission; a backend may assume its flags hold (its `emit_*` may be `unreachable!()` if the contract is violated).
+
+Lowering splits into two kinds:
+
+- **Structural** (target-agnostic, library-owned): `switch` → if/else chain, `goto` → structured CFG, closure → records. Driven purely by flags.
+- **Semantic** (target-shaped, user-owned): ownership mapping (`malloc/free` → `Box`/`Rc`/`Arc`), error propagation (→ `Result<T, E>`). Requires an inference pass from the library plus a per-target *decision* only the backend author can supply.
+
+The `Language` trait is an **A-veneer over a B-core**: `Language::lower` (default, overridable) runs a backend's `pipeline()` of `Lowering` passes (default: the library structural passes selected by the backend's flags). Fancier backends supply their own passes; bespoke ones override `lower` directly. Modeled on LLVM's `TargetLowering` + shared legalization machinery.
+
+## 3. Repo Layout (current → target)
 
 ```
 src/
-  cli.rs            # lltp <in> -S <lang>: pipeline driver
-  frontend/         # toolchain drivers per source language
-  ir/               # inkwell wrappers, CFG, normalization
-  hir/              # func.rs, expr.rs, stmt.rs, ty.rs — recovered program model
-  passes/           # type recovery, de-SSA, structuring, memory mapping, idiom rules
-  backend/          # c.rs, rust.rs, … impl Language
-  language.rs       # Language trait (exists; extend with type/stmt emission methods)
+  lib.rs            # module glue; LLVM helpers (build_module, get_globals)
+  cli.rs            # [planned] lltp <in> -S <lang>: pipeline driver
+  frontend/         # [planned] toolchain drivers per source language
+  ir/               # [planned] inkwell wrappers, CFG, normalization
+  hir/              # mod.rs: Ty/Lit/Stmt/Expr; func.rs: Function; graph.rs: CFG utilities
+  passes/           # Lowering trait + run_pipeline (B-core); SwitchToIfElse (structural pass)
+  backend/          # Language = ExprEmitter + StmtEmitter (+ flags), A-veneer lower()
+examples/           # compilable usage walkthroughs (ingest, lowering)
 tests/
-  golden/           # input → expected target source
-  differential/     # run original vs transpiled on shared inputs
+  golden/           # [planned] input → expected target source
+  differential/     # [planned] run original vs transpiled on shared inputs
 ```
 
 ## 4. Milestones
 
-- **M0 — Scaffold repair:** fix `mod` declarations (`hir` undeclared in `lib.rs`, `transpiler` module missing), CLI that ingests `.ll`/`.bc` and dumps a module summary; CI with `cargo fmt` / `clippy` / `test`.
+- **M0 — Scaffold repair:** *(partial — done:* `hir`/`backend`/`passes` modules wired, `Language` split into `ExprEmitter` + `StmtEmitter`, `Lowering` pass core + `SwitchToIfElse`, LLVM-module helpers; *pending:* CLI ingesting `.ll`/`.bc` and dumping a module summary; CI with `cargo fmt` / `clippy` / `test`*)*.
 - **M1 — IR → HIR for straight-line code & simple loops:** de-SSA + control-flow structuring; emit back to **C** as an internal sanity stage (transpiled C must compile and match original behavior) before touching Rust.
 - **M2 — Type recovery + fidelity:** full round-trip on toy programs; differential harness green.
 - **M3 — Rust backend v0 (flagship):** ownership mapping (`Box`/`&mut`), `unsafe` fallback for pointer arithmetic, manual-clean pass.
