@@ -1,21 +1,12 @@
 use crate::hir::expr::Expr;
-use inkwell::values::{BasicValueEnum, Operand};
+use crate::hir::ty::Ty;
+use inkwell::values::Operand;
 pub mod expr;
 pub mod func;
 pub mod graph;
 pub mod stmt;
-
+pub mod ty;
 pub use func::Function;
-
-#[derive(Debug, Clone)]
-pub enum Ty {
-    Void,
-    Bool,
-    Int(usize /*# of bits*/, bool /*is_signed*/),
-    Float(usize /*bits*/),
-    Ptr(Box<Ty>),
-    Array(Box<Ty>, usize),
-}
 
 #[derive(Debug, Clone)]
 pub enum Lit {
@@ -31,24 +22,6 @@ pub enum Lit {
     },
     NullPtr,
     Void,
-}
-
-fn ty_from<'c>(bve: BasicValueEnum<'c>) -> Result<Ty, &'static str> {
-    let ty = bve.get_type();
-    if ty.is_int_type() {
-        let bits = ty.into_int_type().get_bit_width() as usize;
-        if bits == 1 {
-            Ok(Ty::Bool)
-        } else {
-            Ok(Ty::Int(bits, true))
-        }
-    } else if ty.is_float_type() {
-        Ok(Ty::Float(ty.into_float_type().get_bit_width() as usize))
-    } else if ty.is_pointer_type() {
-        Ok(Ty::Ptr(Box::new(Ty::Void)))
-    } else {
-        Err("Unsupported LLVM operand type")
-    }
 }
 
 fn value_to_expr<'c>(operand: Operand<'c>) -> Result<Expr, &'static str> {
@@ -76,7 +49,7 @@ fn value_to_expr<'c>(operand: Operand<'c>) -> Result<Expr, &'static str> {
             let name = int.get_name().to_string_lossy().into_owned();
             Ok(Expr::Var {
                 name,
-                dtype: ty_from(bve)?,
+                dtype: Ty::from(bve),
             })
         }
     } else if bve.is_float_value() {
@@ -93,7 +66,7 @@ fn value_to_expr<'c>(operand: Operand<'c>) -> Result<Expr, &'static str> {
             let name = float.get_name().to_string_lossy().into_owned();
             Ok(Expr::Var {
                 name,
-                dtype: ty_from(bve)?,
+                dtype: Ty::from(bve),
             })
         }
     } else if bve.is_pointer_value() {
@@ -106,7 +79,7 @@ fn value_to_expr<'c>(operand: Operand<'c>) -> Result<Expr, &'static str> {
             let name = ptr.get_name().to_string_lossy().into_owned();
             Ok(Expr::Var {
                 name,
-                dtype: ty_from(bve)?,
+                dtype: Ty::from(bve),
             })
         }
     } else {

@@ -1,5 +1,5 @@
 use crate::hir::value_to_expr;
-use crate::hir::{Lit, Ty};
+use crate::hir::{Lit, ty::Ty};
 use inkwell::values::InstructionOpcode::{self, *};
 use inkwell::values::InstructionValue;
 /// Exprs are value producing code
@@ -22,10 +22,6 @@ pub enum Expr {
     Call {
         name: String,
         args: Vec<Expr>,
-    },
-    Assignment {
-        dest: Box<Expr>,
-        src: Box<Expr>,
     },
     Index {
         base: Box<Expr>,

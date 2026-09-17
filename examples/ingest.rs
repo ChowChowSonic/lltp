@@ -54,6 +54,8 @@ CF80:                                             ; preds = %CF86
 "#;
 
 fn main() {
+    tracing_subscriber::fmt().init();
+
     // 1. Ingest IR text into an in-memory LLVM module.
     let ctxt = Context::create();
     let module = build_module(&ctxt, IR);

@@ -10,7 +10,7 @@ use std::fmt::{self, Formatter};
 use inkwell::values::InstructionOpcode;
 
 use lltp::backend::{ExprEmitter, Language, StmtEmitter};
-use lltp::hir::{Function, Lit, Stmt, Ty, expr::Expr};
+use lltp::hir::{Function, Lit, expr::Expr, stmt::Stmt, ty::Ty};
 use lltp::passes::SwitchToIfElse;
 
 /// A toy C-like backend that can print the small HIR subset this example
@@ -55,6 +55,7 @@ impl StmtEmitter for ToyBackend {
             Stmt::Ret { .. } => self.emit_return(stmt, out),
             Stmt::If { .. } => self.emit_if(stmt, out),
             Stmt::Switch { .. } => self.emit_switch(stmt, out),
+            Stmt::Let { .. } => unreachable!("Assignment statements not supported!"),
             Stmt::Branch { .. } => unreachable!("raw IR branches are not emitted"),
         }
     }
@@ -270,6 +271,8 @@ fn render(backend: &ToyBackend, func: &Function) -> String {
 }
 
 fn main() {
+    tracing_subscriber::fmt().init();
+
     let backend = ToyBackend;
 
     let mut func = recovered_switch();

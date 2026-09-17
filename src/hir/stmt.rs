@@ -25,6 +25,13 @@ pub enum Stmt {
         cases: Vec<(Lit, Vec<Stmt>)>,
         default: Vec<Stmt>,
     },
+    /// Represents a new SSA binding (not a mutable variable use)
+    /// Alternatively could be called "Assign", but that
+    /// technically implies mutability, which would be wrong
+    Let {
+        dest: Box<Expr>,
+        src: Box<Expr>,
+    },
 }
 impl Stmt {
     pub fn build(op: InstructionValue) -> Result<Self, &'static str> {

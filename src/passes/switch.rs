@@ -1,4 +1,5 @@
 use inkwell::values::InstructionOpcode::ICmp;
+use tracing::info;
 
 use crate::backend::Language;
 use crate::hir::{Function, Lit, expr::Expr, stmt::Stmt};
@@ -18,6 +19,7 @@ impl Lowering for SwitchToIfElse {
         if target.allows_switch() {
             return Ok(());
         }
+        info!(func = %func.name, "switch -> if/else lowering");
         func.body = lower_stmts(std::mem::take(&mut func.body));
         Ok(())
     }
@@ -69,7 +71,7 @@ fn eq(value: Expr, case: Lit) -> Expr {
 #[cfg(test)]
 mod tests {
     use crate::backend::{ExprEmitter, Language, StmtEmitter};
-    use crate::hir::{Function, Lit, Stmt, Ty, expr::Expr};
+    use crate::hir::{Function, Lit, expr::Expr, stmt::Stmt, ty::Ty};
     use crate::passes::{Lowering, SwitchToIfElse};
 
     struct TestLang {
