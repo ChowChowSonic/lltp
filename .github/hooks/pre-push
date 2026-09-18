@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+#
+# Git pre-push hook: runs .github/scripts/pre-push.sh before every push.
+#
+# Git invokes this script with the refs being pushed on stdin and
+#   <remote-name> <remote-url> <number-of-refs>
+# as arguments. They are intentionally ignored: the same checks run for any
+# remote (see .github/scripts/pre-push.sh to change that).
+
+set -euo pipefail
+
+REPO_ROOT="$(git rev-parse --show-toplevel)"
+exec "$REPO_ROOT/.github/scripts/pre-push.sh"
