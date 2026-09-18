@@ -25,7 +25,7 @@ impl<'c> From<BasicTypeEnum<'c>> for Ty {
                 }
             }
             BasicTypeEnum::FloatType(f) => Ty::Float(f.get_bit_width() as usize),
-            BasicTypeEnum::PointerType(p) => {
+            BasicTypeEnum::PointerType(_p) => {
                 Ty::Ptr(Box::new(Ty::Opaque("unresolved pointee".to_string())))
             }
             BasicTypeEnum::ArrayType(a) => {

@@ -1,0 +1,102 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Install LLVM 22 (llvm-sys 221 / inkwell llvm22-1)
+        uses: ZhongRuoyu/setup-llvm@v0
+        with:
+          llvm-version: "22"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-targets
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy
+      - name: Install LLVM 22 (llvm-sys 221 / inkwell llvm22-1)
+        uses: ZhongRuoyu/setup-llvm@v0
+        with:
+          llvm-version: "22"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets -- -D warnings
+
+  unit-test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Install LLVM 22 (llvm-sys 221 / inkwell llvm22-1)
+        uses: ZhongRuoyu/setup-llvm@v0
+        with:
+          llvm-version: "22"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --all-targets
+
+  integration-test:
+    name: Integration / Example Smoke Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Install LLVM 22 (llvm-sys 221 / inkwell llvm22-1)
+        uses: ZhongRuoyu/setup-llvm@v0
+        with:
+          llvm-version: "22"
+      - uses: Swatinem/rust-cache@v2
+      - name: Run ingest example (IR -> CFG -> HIR)
+        run: cargo run --example ingest
+      - name: Run lowering example (lowering pipeline -> emission)
+        run: cargo run --example lowering
+
+  build-release:
+    name: Build Release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+      - name: Install LLVM 22 (llvm-sys 221 / inkwell llvm22-1)
+        uses: ZhongRuoyu/setup-llvm@v0
+        with:
+          llvm-version: "22"
+      - uses: Swatinem/rust-cache@v2
+      # Lib-only crate today; revisit artifact upload when the M0 CLI (`lltp`) lands.
+      - run: cargo build --release
