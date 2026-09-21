@@ -1,50 +1,123 @@
-use inkwell::{basic_block::BasicBlock, module::Module, values::Operand};
+#![allow(dead_code)]
+use inkwell::{
+    basic_block::BasicBlock,
+    values::{FunctionValue, Operand},
+};
 use std::collections::{HashMap, HashSet, VecDeque};
-use tracing::warn;
 
-pub fn build_graph<'ctx>(
-    module: &Module<'ctx>,
-) -> Result<HashMap<BasicBlock<'ctx>, Vec<BasicBlock<'ctx>>>, &'ctx str> {
-    let mut graph: HashMap<BasicBlock, Vec<BasicBlock>> = HashMap::new();
-    for x in module.get_functions() {
-        let blockslist = x.get_basic_blocks();
-        blockslist.iter().for_each(|item: &BasicBlock| {
-            graph.entry(*item).or_default().extend(get_neighbors(item));
-        });
+use crate::hir::cfg::Cfg;
+
+enum BlockClass<'c> {
+    Exit(BasicBlock<'c>),
+    Entry(BasicBlock<'c>),
+    Unreachable(BasicBlock<'c>),
+    Intermediate(BasicBlock<'c>),
+}
+
+pub fn build_graph(func: &FunctionValue) -> Result<Cfg, String> {
+    let mut res: Vec<BlockClass> = Vec::new();
+    let blockslist = func.get_basic_blocks();
+    let mut successors: HashMap<String, Vec<String>> = HashMap::new();
+    for &x in &blockslist {
+        let successor_list: Vec<String> = get_neighbors(&x)
+            .iter()
+            .map(|x| x.get_name().to_string_lossy().to_string())
+            .collect();
+        successors
+            .entry(x.get_name().to_string_lossy().to_string())
+            .or_default()
+            .extend(successor_list);
     }
-    Ok(graph)
+    let mut preds: HashMap<String, Vec<String>> = HashMap::new();
+    for x in &blockslist {
+        let name = x.get_name().to_string_lossy().to_string();
+        let preds_list: Vec<String> = successors.iter().fold(Vec::new(), |mut a, (k, v)| {
+            if v.contains(&name) {
+                a.push(k.clone());
+            }
+            a
+        });
+        preds.entry(name).or_default().extend(preds_list);
+    }
+    // The entry block is ALWAYS the first-listed block in LLVM IR. Any other
+    // block without predecessors is unreachable code, regardless of whether it
+    // has successors. Only the first block may be classified `Entry`.
+    let first = func
+        .get_first_basic_block()
+        .expect("Failed to get first basic block of function");
+    blockslist.iter().for_each(|item: &BasicBlock| {
+        let name = item.get_name().to_string_lossy().to_string();
+        let has_pred = preds.get(&name).is_some_and(|p| !p.is_empty());
+        let has_succ = successors.get(&name).is_some_and(|s| !s.is_empty());
+        let is_first = *item == first;
+        match (has_pred, has_succ) {
+            // Unreachable code that happens to branch somewhere.
+            (false, true) if !is_first => res.push(BlockClass::Unreachable(*item)),
+            (false, true) => res.push(BlockClass::Entry(*item)),
+            // Terminates the function (ret, unreachable, ...): no successors.
+            (true, false) => res.push(BlockClass::Exit(*item)),
+            // A single-block function is both entry and exit.
+            (false, false) if is_first => {
+                res.push(BlockClass::Entry(*item));
+                res.push(BlockClass::Exit(*item));
+            }
+            (false, false) => res.push(BlockClass::Unreachable(*item)),
+            // Has both predecessors and successors: an interior block.
+            (true, true) => res.push(BlockClass::Intermediate(*item)),
+        }
+    });
+    let entry_block = res
+        .iter()
+        .filter_map(|x| match x {
+            BlockClass::Entry(y) => Some(y),
+            _ => None,
+        })
+        .next()
+        .ok_or("Failed to retrieve first block of function")?;
+    let exits: Vec<String> = res
+        .iter()
+        .filter_map(|x| match x {
+            BlockClass::Exit(i) => Some(i.get_name().to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect();
+    Ok(Cfg::new(
+        entry_block.get_name().to_string_lossy().to_string(),
+        successors,
+        preds,
+        exits,
+    ))
 }
 
 pub fn get_neighbors<'ctx>(bb: &BasicBlock<'ctx>) -> Vec<BasicBlock<'ctx>> {
     let mut ret: Vec<BasicBlock<'ctx>> = Vec::new();
     if let Some(terminator) = bb.get_terminator() {
         for i in 0..terminator.get_num_operands() {
-            if let Some(Operand::Block(op)) = terminator.get_operand(i) {
-                ret.push(op);
-            } else {
-                warn!("No terminator operand found (malformed BasicBlock)");
+            match terminator.get_operand(i) {
+                Some(Operand::Block(op)) => ret.push(op),
+                Some(Operand::Value(_)) => {}
+                None => {
+                    tracing::error!("Malformed BasicBlock")
+                }
             }
         }
     }
     ret
 }
 
-pub fn has_self_referential_loop<'ctx>(
-    graph: &HashMap<BasicBlock<'ctx>, Vec<BasicBlock<'ctx>>>,
-    start: BasicBlock<'ctx>,
-) -> bool {
-    let mut visited: HashSet<BasicBlock> = HashSet::new();
-    let mut queue: VecDeque<BasicBlock> = VecDeque::new();
-    queue.push_back(start);
+pub fn has_self_referential_loop(graph: &Cfg, start: &String) -> bool {
+    let mut visited: HashSet<String> = HashSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    queue.push_back(start.clone());
 
     while let Some(item) = queue.pop_front() {
-        if let Some(neighbors) = graph.get(&item) {
-            for &n in neighbors {
-                if n == start {
+        if let Some(neighbors) = graph.successors.get(&item) {
+            for n in neighbors.clone() {
+                if n == *start {
                     return true; // found a path back to start
                 }
-                if visited.insert(n) {
-                    queue.push_back(n);
+                if visited.insert(n.clone()) {
+                    queue.push_back(n.clone());
                 }
             }
         }
@@ -54,11 +127,35 @@ pub fn has_self_referential_loop<'ctx>(
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use crate::hir::{
+        cfg::Cfg,
+        graph::{build_graph, has_self_referential_loop},
+    };
 
-    use inkwell::basic_block::BasicBlock;
+    /// Parse module and build a Cfg per function.
+    fn build_cfgs(ir: &str) -> Vec<Cfg> {
+        let mut bytes = ir.as_bytes().to_vec();
+        bytes.push(b'\0');
+        let mem =
+            inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(&bytes, "test_module");
+        let ctxt = inkwell::context::Context::create();
+        let module = ctxt
+            .create_module_from_ir(mem)
+            .expect("Failed to create module from IR");
+        module
+            .get_functions()
+            .map(|f| build_graph(&f).expect("CFG build should succeed"))
+            .collect()
+    }
 
-    use crate::hir::graph::{build_graph, has_self_referential_loop};
+    /// Build the Cfg of the (single) function in `ir`.
+    fn build_cfg(ir: &str) -> Cfg {
+        build_cfgs(ir)
+            .into_iter()
+            .next()
+            .expect("module has no functions")
+    }
+
     const IR: &str = r#"; ModuleID = '/tmp/autogen.bc'
 source_filename = "/tmp/autogen.bc"
 
@@ -99,117 +196,198 @@ CF80:                                             ; preds = %CF86
   ret void
 }
 "#;
+
     #[test]
     fn test_find_loop() {
-        let ctxt = inkwell::context::Context::create();
-        let mut tmp_byte_arr = IR.to_string();
-        tmp_byte_arr.push('\0');
-        let tmp_byte_arr = tmp_byte_arr.into_bytes();
-        let mem_buf = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(
-            &tmp_byte_arr,
-            "test_module",
-        );
-        let res = ctxt
-            .create_module_from_ir(mem_buf)
-            .expect("Failed to create module from IR");
-        let graph_res: Result<HashMap<BasicBlock<'_>, Vec<BasicBlock<'_>>>, &str> =
-            build_graph(&res);
-        if let Ok(graph) = graph_res {
-            let mut loops: Vec<BasicBlock> = Vec::new();
-            for (k, _) in graph.clone() {
-                if has_self_referential_loop(&graph, k) {
-                    loops.push(k);
+        let graph_res = build_cfgs(IR);
+        for graph in &graph_res {
+            let mut loops: Vec<String> = Vec::new();
+            for k in graph.successors.keys() {
+                if has_self_referential_loop(graph, k) {
+                    loops.push(k.clone());
                 }
             }
-            assert!(loops.iter().all(|x| {
-                ["CF", "CF82", "CF83", "CF84", "CF86", "CF81"]
-                    .contains(&x.get_name().to_str().unwrap_or_default())
-            }))
+            assert!(
+                loops.iter().all(|x| {
+                    ["CF", "CF82", "CF83", "CF84", "CF86", "CF81"].contains(&x.as_str())
+                })
+            )
         }
     }
 
     #[test]
     fn test_build_graph() {
-        let ctxt = inkwell::context::Context::create();
-        let mut tmp_byte_arr = IR.to_string();
-        tmp_byte_arr.push('\0');
-        let tmp_byte_arr = tmp_byte_arr.into_bytes();
-        let mem_buf = inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(
-            &tmp_byte_arr,
-            "test_module",
-        );
-        let res = ctxt
-            .create_module_from_ir(mem_buf)
-            .expect("Failed to create module from IR");
-        let graph_res: Result<HashMap<BasicBlock<'_>, Vec<BasicBlock<'_>>>, &str> =
-            build_graph(&res);
-        if let Ok(graph) = graph_res {
-            for (k, v) in graph {
-                match k.get_name().to_str().unwrap() {
+        let graph_res = build_cfgs(IR);
+        for graph in graph_res {
+            for (k, v) in graph.successors {
+                match k.as_str() {
                     "CF80" => {
                         assert!(v.is_empty());
                     }
-                    "CF86" => {
-                        let mut tmp: Vec<String> = Vec::new();
-                        v.iter().for_each(|item| {
-                            tmp.push(item.get_name().to_string_lossy().into());
-                        });
-                        assert!(tmp.iter().all(|x| ["CF", "CF80"].contains(&x.as_str())))
-                    }
-                    "BB" => {
-                        let mut tmp: Vec<String> = Vec::new();
-                        v.iter().for_each(|item| {
-                            tmp.push(item.get_name().to_string_lossy().into());
-                        });
-                        assert!(tmp.iter().all(|x| ["CF85"].contains(&x.as_str())))
-                    }
-                    "CF85" => {
-                        let mut tmp: Vec<String> = Vec::new();
-                        v.iter().for_each(|item| {
-                            tmp.push(item.get_name().to_string_lossy().into());
-                        });
-                        assert!(tmp.iter().all(|x| ["CF"].contains(&x.as_str())))
-                    }
-                    "CF" => {
-                        let mut tmp: Vec<String> = Vec::new();
-                        v.iter().for_each(|item| {
-                            tmp.push(item.get_name().to_string_lossy().into());
-                        });
-                        assert!(tmp.iter().all(|x| ["CF", "CF82"].contains(&x.as_str())));
-                    }
-                    "CF82" => {
-                        let mut tmp: Vec<String> = Vec::new();
-                        v.iter().for_each(|item| {
-                            tmp.push(item.get_name().to_string_lossy().into());
-                        });
-                        assert!(tmp.iter().all(|x| ["CF83", "CF82"].contains(&x.as_str())));
-                    }
-                    "CF83" => {
-                        let mut tmp: Vec<String> = Vec::new();
-                        v.iter().for_each(|item| {
-                            tmp.push(item.get_name().to_string_lossy().into());
-                        });
-                        assert!(tmp.iter().all(|x| ["CF83", "CF84"].contains(&x.as_str())));
-                    }
-                    "CF84" => {
-                        let mut tmp: Vec<String> = Vec::new();
-                        v.iter().for_each(|item| {
-                            tmp.push(item.get_name().to_string_lossy().into());
-                        });
-                        assert!(tmp.iter().all(|x| ["CF", "CF81"].contains(&x.as_str())));
-                    }
-                    "CF81" => {
-                        let mut tmp: Vec<String> = Vec::new();
-                        v.iter().for_each(|item| {
-                            tmp.push(item.get_name().to_string_lossy().into());
-                        });
-                        assert!(tmp.iter().all(|x| ["CF86", "CF81"].contains(&x.as_str())));
-                    }
-                    _ => {
-                        panic!("Unknown basicblock name");
-                    }
+                    "CF86" => assert!(v.iter().all(|x| ["CF", "CF80"].contains(&x.as_str()))),
+                    "BB" => assert!(v.iter().all(|x| ["CF85"].contains(&x.as_str()))),
+                    "CF85" => assert!(v.iter().all(|x| ["CF"].contains(&x.as_str()))),
+                    "CF" => assert!(v.iter().all(|x| ["CF", "CF82"].contains(&x.as_str()))),
+                    "CF82" => assert!(v.iter().all(|x| ["CF83", "CF82"].contains(&x.as_str()))),
+                    "CF83" => assert!(v.iter().all(|x| ["CF83", "CF84"].contains(&x.as_str()))),
+                    "CF84" => assert!(v.iter().all(|x| ["CF", "CF81"].contains(&x.as_str()))),
+                    "CF81" => assert!(v.iter().all(|x| ["CF86", "CF81"].contains(&x.as_str()))),
+                    _ => panic!("Unknown basicblock name"),
                 }
             }
         }
+    }
+
+    /// Spec: per-function CFGs. Two functions sharing block names must yield two
+    /// isolated graphs — no edge or block leaks across functions.
+    #[test]
+    fn per_function_cfgs_are_isolated() {
+        let ir = r#"
+define void @alpha() {
+entry:
+  br label %body
+body:
+  br label %exit
+exit:
+  ret void
+}
+define void @beta() {
+entry:
+  br label %done
+done:
+  ret void
+}
+"#;
+        let cfgs = build_cfgs(ir);
+        assert_eq!(cfgs.len(), 2);
+
+        let alpha = cfgs
+            .iter()
+            .find(|c| c.exits == vec!["exit".to_string()])
+            .expect("alpha cfg");
+        let beta = cfgs
+            .iter()
+            .find(|c| c.exits == vec!["done".to_string()])
+            .expect("beta cfg");
+
+        assert_eq!(alpha.entry, "entry");
+        assert_eq!(alpha.successors["entry"], vec!["body".to_string()]);
+        assert_eq!(alpha.successors["body"], vec!["exit".to_string()]);
+        assert!(alpha.successors["exit"].is_empty());
+        assert_eq!(alpha.preds["body"], vec!["entry".to_string()]);
+        assert_eq!(alpha.preds["exit"], vec!["body".to_string()]);
+
+        assert_eq!(beta.entry, "entry");
+        assert_eq!(beta.successors["entry"], vec!["done".to_string()]);
+        assert!(beta.successors["done"].is_empty());
+
+        // No cross-function bleed.
+        assert!(!alpha.successors.contains_key("done"));
+        assert!(!beta.successors.contains_key("body"));
+    }
+
+    /// A function whose exit lives mid-list must classify that block as Exit.
+    #[test]
+    fn exit_in_middle_of_function() {
+        let ir = r#"
+define void @f() {
+entry:
+  br label %mid
+mid:
+  ret void
+tail:
+  unreachable
+}
+"#;
+        let cfg = build_cfg(ir);
+        assert_eq!(cfg.entry, "entry");
+        assert_eq!(cfg.exits, vec!["mid".to_string()]);
+        assert_eq!(cfg.successors["entry"], vec!["mid".to_string()]);
+        assert!(cfg.successors["mid"].is_empty());
+        assert_eq!(cfg.preds["mid"], vec!["entry".to_string()]);
+    }
+
+    /// A single block is both entry and exit.
+    #[test]
+    fn single_block_function_is_entry_and_exit() {
+        let ir = "define void @f() {\nentry:\n  ret void\n}\n";
+        let cfg = build_cfg(ir);
+        assert_eq!(cfg.entry, "entry");
+        assert_eq!(cfg.exits, vec!["entry".to_string()]);
+        assert!(cfg.successors["entry"].is_empty());
+        assert!(cfg.preds["entry"].is_empty());
+    }
+
+    /// Switch terminators: every case label plus the default becomes a successor.
+    /// Note: LLVM assembly rejects a comma after `label %dest` between cases —
+    /// entries separate on whitespace only.
+    #[test]
+    fn switch_terminator_edges() {
+        let ir = r#"
+define void @f(i32 %x) {
+entry:
+  switch i32 %x, label %dflt [ i32 0, label %zero
+    i32 1, label %one ]
+zero:
+  ret void
+one:
+  ret void
+dflt:
+  ret void
+}
+"#;
+        let cfg = build_cfg(ir);
+        let succs = &cfg.successors["entry"];
+        assert_eq!(succs.len(), 3);
+        assert!(succs.contains(&"zero".to_string()));
+        assert!(succs.contains(&"one".to_string()));
+        assert!(succs.contains(&"dflt".to_string()));
+        for target in ["zero", "one", "dflt"] {
+            assert_eq!(cfg.preds[target], vec!["entry".to_string()]);
+            assert!(cfg.successors[target].is_empty());
+        }
+    }
+
+    /// Conditional branch: condition operand is a value, not a block — must not
+    /// appear in successor list or trigger the old malformed-block warning.
+    /// inkwell exposes `br` operands in order [cond, iffalse, iftrue], so the
+    /// false target comes first in the successor list.
+    #[test]
+    fn conditional_branch_edges() {
+        let ir = r#"
+define void @f(i1 %c) {
+entry:
+  br i1 %c, label %t, label %f
+t:
+  ret void
+f:
+  ret void
+}
+"#;
+        let cfg = build_cfg(ir);
+        assert_eq!(
+            cfg.successors["entry"],
+            vec!["f".to_string(), "t".to_string()]
+        );
+        assert_eq!(cfg.preds["t"], vec!["entry".to_string()]);
+        assert_eq!(cfg.preds["f"], vec!["entry".to_string()]);
+    }
+
+    /// Unreachable blocks (no preds, not entry) still appear as nodes.
+    #[test]
+    fn unreachable_block_is_a_node() {
+        let ir = r#"
+define void @f() {
+entry:
+  ret void
+ghost:
+  ret void
+}
+"#;
+        let cfg = build_cfg(ir);
+        assert!(cfg.successors.contains_key("ghost"));
+        assert!(cfg.successors["ghost"].is_empty());
+        assert!(cfg.preds["ghost"].is_empty());
+        assert_eq!(cfg.exits, vec!["entry".to_string()]);
     }
 }

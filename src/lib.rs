@@ -25,3 +25,42 @@ pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Module<'ctx> {
     ctxt.create_module_from_ir(mem_buf)
         .expect("Failed to create module from IR")
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::hir::graph::build_graph;
+    use crate::{build_module, hir::cfg::Cfg};
+    use inkwell::context::Context;
+
+    const IR: &str = r#"define void @f(i32 %x) {
+entry:
+  %c = icmp sgt i32 %x, 0
+  br i1 %c, label %pos, label %nonpos
+pos:
+  ret void
+nonpos:
+  ret void
+}
+"#;
+
+    /// Spec: ingest IR through the public `build_module` seam, then build a
+    /// per-function CFG from the resulting module.
+    #[test]
+    fn cfgs_build_from_ingested_module() {
+        let ctxt = Context::create();
+        let module = build_module(&ctxt, IR);
+        let func = module.get_first_function().expect("IR contains a function");
+        let cfg: Cfg = build_graph(&func).expect("CFG build should succeed");
+
+        assert_eq!(cfg.entry, "entry");
+        assert_eq!(
+            cfg.successors["entry"],
+            vec!["nonpos".to_string(), "pos".to_string()]
+        );
+        assert_eq!(cfg.preds["pos"], vec!["entry".to_string()]);
+        assert_eq!(cfg.preds["nonpos"], vec!["entry".to_string()]);
+        assert!(cfg.successors["pos"].is_empty());
+        assert!(cfg.successors["nonpos"].is_empty());
+        assert_eq!(cfg.exits, vec!["pos".to_string(), "nonpos".to_string()]);
+    }
+}

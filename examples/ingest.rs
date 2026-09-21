@@ -7,6 +7,7 @@
 use inkwell::context::Context;
 
 use lltp::build_module;
+use lltp::hir::cfg::Cfg;
 use lltp::hir::graph::{build_graph, has_self_referential_loop};
 use lltp::hir::{expr::Expr, stmt::Stmt};
 
@@ -64,16 +65,18 @@ fn main() {
     // 2. Enumerate module-level globals.
     let globals = lltp::get_globals(&module);
     println!("{} global(s) in module", globals.len());
-
+    let first_fn = module
+        .get_first_function()
+        .expect("Failed to find function in IR!");
     // 3. Build a per-function CFG over basic blocks.
-    let graph = build_graph(&module).expect("failed to build CFG");
-    println!("{} basic blocks in CFG", graph.len());
+    let graph: Cfg = build_graph(&first_fn).expect("Failed to build function!");
+    println!("{} basic blocks in CFG", graph.successors.len());
 
     // 4. Find loop headers: blocks reachable from themselves.
     let loop_headers: Vec<_> = graph
+        .successors
         .keys()
-        .filter(|bb| has_self_referential_loop(&graph, **bb))
-        .map(|bb| bb.get_name().to_str().unwrap_or_default().to_owned())
+        .filter(|bb| has_self_referential_loop(&graph, bb))
         .collect();
     println!("loop-header candidates: {loop_headers:?}");
 
