@@ -1,5 +1,6 @@
 use inkwell::{context::Context, module::Module, values::GlobalValue};
 pub mod backend;
+pub mod frontend; // New directory
 pub mod hir;
 pub mod passes;
 
