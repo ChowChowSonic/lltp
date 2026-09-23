@@ -70,11 +70,11 @@ fn main() {
         .expect("Failed to find function in IR!");
     // 3. Build a per-function CFG over basic blocks.
     let graph: Cfg = build_graph(&first_fn).expect("Failed to build function!");
-    println!("{} basic blocks in CFG", graph.successors.len());
+    println!("{} basic blocks in CFG", graph.blocks.len());
 
     // 4. Find loop headers: blocks reachable from themselves.
     let loop_headers: Vec<_> = graph
-        .successors
+        .blocks
         .keys()
         .filter(|bb| has_self_referential_loop(&graph, bb))
         .collect();

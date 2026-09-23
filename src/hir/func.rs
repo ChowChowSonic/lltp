@@ -1,5 +1,3 @@
-use std::collections::BTreeMap;
-
 use inkwell::{module::Module, values::FunctionValue};
 use tracing::{debug, warn};
 
@@ -54,7 +52,7 @@ impl Function {
                 }
             })
             .collect();
-        match build_graph(&val) {
+        match build_graph(val) {
             Ok(cfg) => Function {
                 name,
                 params: param_types,

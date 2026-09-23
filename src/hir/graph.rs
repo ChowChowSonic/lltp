@@ -354,7 +354,7 @@ dflt:
         assert!(succs.contains(&"one".to_string()));
         assert!(succs.contains(&"dflt".to_string()));
         for target in ["zero", "one", "dflt"] {
-            assert_eq!(cfg.blocks[target].succ, vec!["entry".to_string()]);
+            assert_eq!(cfg.blocks[target].pred, vec!["entry".to_string()]);
             assert!(cfg.blocks[target].succ.is_empty());
         }
     }

@@ -71,6 +71,7 @@ fn eq(value: Expr, case: Lit) -> Expr {
 #[cfg(test)]
 mod tests {
     use crate::backend::{ExprEmitter, Language, StmtEmitter};
+    use crate::hir::cfg::Cfg;
     use crate::hir::{Function, Lit, expr::Expr, stmt::Stmt, ty::Ty};
     use crate::passes::{Lowering, SwitchToIfElse};
 
@@ -145,6 +146,7 @@ mod tests {
             name: "f".to_string(),
             params: vec![Ty::Int(64, true)],
             return_ty: Ty::Int(64, true),
+            blocks: Cfg::default(),
             body: vec![Stmt::Switch {
                 value: Expr::Var {
                     name: "x".to_string(),
