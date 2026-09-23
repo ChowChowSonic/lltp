@@ -1,13 +1,18 @@
+use std::collections::BTreeMap;
+
 use inkwell::{module::Module, values::FunctionValue};
 use tracing::{debug, warn};
 
+use crate::hir::{cfg::Cfg, graph::build_graph};
+
 use super::{stmt::Stmt, ty::Ty};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Function {
     pub name: String,
     pub params: Vec<Ty>,
     pub return_ty: Ty,
+    pub blocks: Cfg,
     pub body: Vec<Stmt>,
 }
 
@@ -49,11 +54,15 @@ impl Function {
                 }
             })
             .collect();
-        Function {
-            name,
-            params: param_types,
-            return_ty: Ty::from(ret_ty),
-            body: stmt_blocks,
+        match build_graph(&val) {
+            Ok(cfg) => Function {
+                name,
+                params: param_types,
+                return_ty: Ty::from(ret_ty),
+                blocks: cfg,
+                body: stmt_blocks,
+            },
+            _ => unreachable!("Unable to build function call graph"),
         }
     }
 }

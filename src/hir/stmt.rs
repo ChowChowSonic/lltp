@@ -32,6 +32,18 @@ pub enum Stmt {
         dest: Box<Expr>,
         src: Box<Expr>,
     },
+    Loop {
+        cond: Option<Expr>,
+        body: Vec<Stmt>,
+    },
+    Break,
+    Continue,
+    Goto {
+        target: String,
+    },
+    Label {
+        name: String,
+    },
 }
 impl Stmt {
     pub fn build(op: InstructionValue) -> Result<Self, &'static str> {

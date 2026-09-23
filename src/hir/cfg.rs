@@ -1,11 +1,19 @@
 use std::collections::{BTreeMap, HashMap};
 
+use crate::hir::stmt::Stmt;
+
+#[derive(Default, Debug)]
+pub struct Block {
+    pub name: String,
+    pub stmts: Vec<Stmt>,
+    pub succ: Vec<String>,
+    pub pred: Vec<String>,
+}
+
 #[derive(Default, Debug)]
 pub struct Cfg {
     pub entry: String,
-    pub blocks: BTreeMap<String, Vec<String>>,
-    pub successors: HashMap<String, Vec<String>>,
-    pub preds: HashMap<String, Vec<String>>,
+    pub blocks: BTreeMap<String, Block>,
     pub exits: Vec<String>,
 }
 
@@ -16,15 +24,18 @@ impl Cfg {
         preds: HashMap<String, Vec<String>>,
         exits: Vec<String>,
     ) -> Self {
-        let mut blocks: BTreeMap<String, Vec<String>> = BTreeMap::new();
-        for (k, v) in &successors {
-            blocks.entry(k.clone()).or_default().extend(v.clone());
+        let mut blocks: BTreeMap<String, Block> = BTreeMap::new();
+        for (k, v) in successors {
+            let blk = blocks.entry(k.to_string()).or_default();
+            blk.succ.extend(v);
+            blk.name = k;
+        }
+        for (k, v) in preds {
+            blocks.entry(k).or_default().pred.extend(v);
         }
         Cfg {
             entry,
             blocks,
-            successors,
-            preds,
             exits,
         }
     }

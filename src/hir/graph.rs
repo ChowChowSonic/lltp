@@ -111,14 +111,13 @@ pub fn has_self_referential_loop(graph: &Cfg, start: &String) -> bool {
     queue.push_back(start.clone());
 
     while let Some(item) = queue.pop_front() {
-        if let Some(neighbors) = graph.successors.get(&item) {
-            for n in neighbors.clone() {
-                if n == *start {
-                    return true; // found a path back to start
-                }
-                if visited.insert(n.clone()) {
-                    queue.push_back(n.clone());
-                }
+        let neighbors = &graph.blocks[&item].succ;
+        for n in neighbors.clone() {
+            if n == *start {
+                return true; // found a path back to start
+            }
+            if visited.insert(n.clone()) {
+                queue.push_back(n.clone());
             }
         }
     }
@@ -202,7 +201,7 @@ CF80:                                             ; preds = %CF86
         let graph_res = build_cfgs(IR);
         for graph in &graph_res {
             let mut loops: Vec<String> = Vec::new();
-            for k in graph.successors.keys() {
+            for k in graph.blocks.keys() {
                 if has_self_referential_loop(graph, k) {
                     loops.push(k.clone());
                 }
@@ -219,19 +218,31 @@ CF80:                                             ; preds = %CF86
     fn test_build_graph() {
         let graph_res = build_cfgs(IR);
         for graph in graph_res {
-            for (k, v) in graph.successors {
+            for (k, v) in graph.blocks {
                 match k.as_str() {
                     "CF80" => {
-                        assert!(v.is_empty());
+                        assert!(v.succ.is_empty());
                     }
-                    "CF86" => assert!(v.iter().all(|x| ["CF", "CF80"].contains(&x.as_str()))),
-                    "BB" => assert!(v.iter().all(|x| ["CF85"].contains(&x.as_str()))),
-                    "CF85" => assert!(v.iter().all(|x| ["CF"].contains(&x.as_str()))),
-                    "CF" => assert!(v.iter().all(|x| ["CF", "CF82"].contains(&x.as_str()))),
-                    "CF82" => assert!(v.iter().all(|x| ["CF83", "CF82"].contains(&x.as_str()))),
-                    "CF83" => assert!(v.iter().all(|x| ["CF83", "CF84"].contains(&x.as_str()))),
-                    "CF84" => assert!(v.iter().all(|x| ["CF", "CF81"].contains(&x.as_str()))),
-                    "CF81" => assert!(v.iter().all(|x| ["CF86", "CF81"].contains(&x.as_str()))),
+                    "CF86" => assert!(v.succ.iter().all(|x| ["CF", "CF80"].contains(&x.as_str()))),
+                    "BB" => assert!(v.succ.iter().all(|x| ["CF85"].contains(&x.as_str()))),
+                    "CF85" => assert!(v.succ.iter().all(|x| ["CF"].contains(&x.as_str()))),
+                    "CF" => assert!(v.succ.iter().all(|x| ["CF", "CF82"].contains(&x.as_str()))),
+                    "CF82" => assert!(
+                        v.succ
+                            .iter()
+                            .all(|x| ["CF83", "CF82"].contains(&x.as_str()))
+                    ),
+                    "CF83" => assert!(
+                        v.succ
+                            .iter()
+                            .all(|x| ["CF83", "CF84"].contains(&x.as_str()))
+                    ),
+                    "CF84" => assert!(v.succ.iter().all(|x| ["CF", "CF81"].contains(&x.as_str()))),
+                    "CF81" => assert!(
+                        v.succ
+                            .iter()
+                            .all(|x| ["CF86", "CF81"].contains(&x.as_str()))
+                    ),
                     _ => panic!("Unknown basicblock name"),
                 }
             }
@@ -271,19 +282,19 @@ done:
             .expect("beta cfg");
 
         assert_eq!(alpha.entry, "entry");
-        assert_eq!(alpha.successors["entry"], vec!["body".to_string()]);
-        assert_eq!(alpha.successors["body"], vec!["exit".to_string()]);
-        assert!(alpha.successors["exit"].is_empty());
-        assert_eq!(alpha.preds["body"], vec!["entry".to_string()]);
-        assert_eq!(alpha.preds["exit"], vec!["body".to_string()]);
+        assert_eq!(alpha.blocks["entry"].succ, vec!["body".to_string()]);
+        assert_eq!(alpha.blocks["body"].succ, vec!["exit".to_string()]);
+        assert!(alpha.blocks["exit"].succ.is_empty());
+        assert_eq!(alpha.blocks["body"].pred, vec!["entry".to_string()]);
+        assert_eq!(alpha.blocks["exit"].pred, vec!["body".to_string()]);
 
         assert_eq!(beta.entry, "entry");
-        assert_eq!(beta.successors["entry"], vec!["done".to_string()]);
-        assert!(beta.successors["done"].is_empty());
+        assert_eq!(beta.blocks["entry"].succ, vec!["done".to_string()]);
+        assert!(beta.blocks["done"].succ.is_empty());
 
         // No cross-function bleed.
-        assert!(!alpha.successors.contains_key("done"));
-        assert!(!beta.successors.contains_key("body"));
+        assert!(!alpha.blocks.contains_key("done"));
+        assert!(!beta.blocks.contains_key("body"));
     }
 
     /// A function whose exit lives mid-list must classify that block as Exit.
@@ -302,9 +313,9 @@ tail:
         let cfg = build_cfg(ir);
         assert_eq!(cfg.entry, "entry");
         assert_eq!(cfg.exits, vec!["mid".to_string()]);
-        assert_eq!(cfg.successors["entry"], vec!["mid".to_string()]);
-        assert!(cfg.successors["mid"].is_empty());
-        assert_eq!(cfg.preds["mid"], vec!["entry".to_string()]);
+        assert_eq!(cfg.blocks["entry"].succ, vec!["mid".to_string()]);
+        assert!(cfg.blocks["mid"].succ.is_empty());
+        assert_eq!(cfg.blocks["mid"].pred, vec!["entry".to_string()]);
     }
 
     /// A single block is both entry and exit.
@@ -314,8 +325,8 @@ tail:
         let cfg = build_cfg(ir);
         assert_eq!(cfg.entry, "entry");
         assert_eq!(cfg.exits, vec!["entry".to_string()]);
-        assert!(cfg.successors["entry"].is_empty());
-        assert!(cfg.preds["entry"].is_empty());
+        assert!(cfg.blocks["entry"].succ.is_empty());
+        assert!(cfg.blocks["entry"].pred.is_empty());
     }
 
     /// Switch terminators: every case label plus the default becomes a successor.
@@ -337,14 +348,14 @@ dflt:
 }
 "#;
         let cfg = build_cfg(ir);
-        let succs = &cfg.successors["entry"];
+        let succs = &cfg.blocks["entry"].succ;
         assert_eq!(succs.len(), 3);
         assert!(succs.contains(&"zero".to_string()));
         assert!(succs.contains(&"one".to_string()));
         assert!(succs.contains(&"dflt".to_string()));
         for target in ["zero", "one", "dflt"] {
-            assert_eq!(cfg.preds[target], vec!["entry".to_string()]);
-            assert!(cfg.successors[target].is_empty());
+            assert_eq!(cfg.blocks[target].succ, vec!["entry".to_string()]);
+            assert!(cfg.blocks[target].succ.is_empty());
         }
     }
 
@@ -366,11 +377,11 @@ f:
 "#;
         let cfg = build_cfg(ir);
         assert_eq!(
-            cfg.successors["entry"],
+            cfg.blocks["entry"].succ,
             vec!["f".to_string(), "t".to_string()]
         );
-        assert_eq!(cfg.preds["t"], vec!["entry".to_string()]);
-        assert_eq!(cfg.preds["f"], vec!["entry".to_string()]);
+        assert_eq!(cfg.blocks["t"].pred, vec!["entry".to_string()]);
+        assert_eq!(cfg.blocks["f"].pred, vec!["entry".to_string()]);
     }
 
     /// Unreachable blocks (no preds, not entry) still appear as nodes.
@@ -385,9 +396,9 @@ ghost:
 }
 "#;
         let cfg = build_cfg(ir);
-        assert!(cfg.successors.contains_key("ghost"));
-        assert!(cfg.successors["ghost"].is_empty());
-        assert!(cfg.preds["ghost"].is_empty());
+        assert!(cfg.blocks.contains_key("ghost"));
+        assert!(cfg.blocks["ghost"].succ.is_empty());
+        assert!(cfg.blocks["ghost"].pred.is_empty());
         assert_eq!(cfg.exits, vec!["entry".to_string()]);
     }
 }
