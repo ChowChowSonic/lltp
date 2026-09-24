@@ -111,8 +111,11 @@ pub fn has_self_referential_loop(graph: &Cfg, start: &String) -> bool {
     queue.push_back(start.clone());
 
     while let Some(item) = queue.pop_front() {
-        let neighbors = &graph.blocks[&item].succ;
-        for n in neighbors.clone() {
+        let neighbors = &graph.blocks.get(&item);
+        if neighbors.is_none() {
+            continue;
+        }
+        for n in neighbors.unwrap().succ.clone() {
             if n == *start {
                 return true; // found a path back to start
             }

@@ -41,7 +41,7 @@ impl Expr {
     pub fn build(op: InstructionValue) -> Result<Self, &'static str> {
         match op.get_opcode() {
             Add | FAdd | Sub | FSub | Mul | FMul | SDiv | UDiv | FDiv | SRem | URem | FRem
-            | Shl | LShr | AShr | And | Or | Xor => {
+            | Shl | LShr | AShr | And | Or | Xor | ICmp | FCmp => {
                 let mut ops = op.get_operands();
                 let op1 = ops
                     .next()
@@ -53,6 +53,7 @@ impl Expr {
                     .ok_or("BinaryOp: missing operand 2")?;
                 let op1_expr = value_to_expr(op1)?;
                 let op2_expr = value_to_expr(op2)?;
+                //TODO: Add support for the predicate in cmp-based operands
                 Ok(Expr::BinaryOp {
                     op: op.get_opcode(),
                     arg1: Box::new(op1_expr),

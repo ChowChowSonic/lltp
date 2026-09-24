@@ -31,7 +31,9 @@ impl Cfg {
             blk.name = k;
         }
         for (k, v) in preds {
-            blocks.entry(k).or_default().pred.extend(v);
+            let blk = blocks.entry(k.to_string()).or_default();
+            blk.pred.extend(v);
+            blk.name = k;
         }
         Cfg {
             entry,

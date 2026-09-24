@@ -146,7 +146,7 @@ mod tests {
             name: "f".to_string(),
             params: vec![Ty::Int(64, true)],
             return_ty: Ty::Int(64, true),
-            blocks: Cfg::default(),
+            cfg: Cfg::default(),
             body: vec![Stmt::Switch {
                 value: Expr::Var {
                     name: "x".to_string(),
