@@ -3,10 +3,13 @@ use crate::hir::ty::Ty;
 use inkwell::values::Operand;
 pub mod cfg;
 pub mod expr;
+pub mod flow;
 pub mod func;
 pub mod graph;
 pub mod stmt;
 pub mod ty;
+pub mod verify;
+
 pub use func::Function;
 
 #[derive(Debug, Clone)]
