@@ -58,6 +58,7 @@ impl ReBuilder {
         &mut self,
         stmts: &[Stmt],
         brk: Option<&String>,
+        cont: Option<&String>,
         labels: &HashMap<String, String>,
     ) -> (String, Option<String>) {
         let entry = self.fresh();
@@ -69,13 +70,6 @@ impl ReBuilder {
                 Stmt::Break => {
                     if let Some(c) = &cur {
                         let j: &str = brk.expect("Break outside any loop");
-                        self.edge(c, j);
-                    }
-                    cur = None;
-                }
-                Stmt::Continue => {
-                    if let Some(c) = &cur {
-                        let j = brk.expect("Continue outside any loop");
                         self.edge(c, j);
                     }
                     cur = None;
@@ -102,7 +96,7 @@ impl ReBuilder {
                     ..
                 } => {
                     let Some(c) = cur else { continue }; // dead code: skip
-                    let (te, tx) = self.region(then_stmts, brk, labels);
+                    let (te, tx) = self.region(then_stmts, brk, cont, labels);
                     self.edge(&c, &te);
                     let mut join: Option<String> = None;
                     if else_stmts.is_empty() {
@@ -110,7 +104,7 @@ impl ReBuilder {
                         self.edge(&c, &j);
                         join = Some(j);
                     } else {
-                        let (ee, ex) = self.region(else_stmts, brk, labels);
+                        let (ee, ex) = self.region(else_stmts, brk, cont, labels);
                         self.edge(&c, &ee);
                         if let Some(x) = ex {
                             let j = self.fresh();
@@ -125,12 +119,16 @@ impl ReBuilder {
                     }
                     cur = join; // None if both arms terminated
                 }
-                Stmt::Loop { body, .. } => {
+                Stmt::Loop {
+                    body, cond: lcond, ..
+                } => {
                     let Some(c) = cur else { continue };
                     let join = self.fresh(); // false-exit: cond fails → after loop
-                    let (be, bx) = self.region(body, Some(&join), labels);
+                    let (be, bx) = self.region(body, Some(&join), Some(&c), labels);
                     self.edge(&c, &be); // cond true → body
-                    self.edge(&c, &join); // cond false → after
+                    if lcond.is_some() {
+                        self.edge(&c, &join); // cond false → after
+                    }
                     if let Some(x) = bx {
                         self.edge(&x, &c);
                     } // body falls out → header (back edge)
@@ -141,7 +139,7 @@ impl ReBuilder {
                     let Some(c) = cur else { continue };
                     let mut join: Option<String> = None;
                     for (_, body) in cases {
-                        let (ae, ax) = self.region(body, brk, labels);
+                        let (ae, ax) = self.region(body, brk, cont, labels);
                         self.edge(&c, &ae);
                         if let Some(x) = ax {
                             let j = join.get_or_insert_with(|| self.fresh());
@@ -152,7 +150,7 @@ impl ReBuilder {
                         let j = join.get_or_insert_with(|| self.fresh());
                         self.edge(&c, j);
                     } else {
-                        let (de, dx) = self.region(default, brk, labels);
+                        let (de, dx) = self.region(default, brk, cont, labels);
                         self.edge(&c, &de);
                         if let Some(x) = dx {
                             let j = join.get_or_insert_with(|| self.fresh());
@@ -160,6 +158,13 @@ impl ReBuilder {
                         }
                     }
                     cur = join;
+                }
+                Stmt::Continue => {
+                    if let Some(c) = &cur {
+                        let j = cont.expect("Continue outside any loop");
+                        self.edge(c, j);
+                    }
+                    cur = None;
                 }
 
                 Stmt::Branch { .. } => unreachable!("structured input must not contain Branch"),
@@ -178,9 +183,8 @@ pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
     };
     let mut labels = HashMap::new();
     b.collect_labels(body, &mut labels);
-    let (entry, _) = b.region(body, None, &labels);
+    let (entry, _) = b.region(body, None, None, &labels);
     for n in &b.all {
-        b.succ.entry(n.clone()).or_default();
         b.succ.entry(n.clone()).or_default();
     }
     let exits: Vec<String> = b
@@ -247,30 +251,43 @@ pub fn collapse_chains(cfg: &Cfg) -> Cfg {
             if n == cfg.entry {
                 continue;
             }
-            if pred.get(&n).map(|p| p.len() != 1).unwrap_or(true) {
-                continue; //Can we collapse this down into a .filter() over the inner loop? 
+            // Fuse n into its single predecessor p, but only when p falls
+            // straight through into n (p's only successor is n). Branch arms
+            // (p has several successors) must survive as blocks; chain tails
+            // (n has no successors) are fine to fuse.
+            let Some(ps) = pred.get(&n) else {
+                continue;
+            };
+            if ps.len() != 1 {
+                continue;
             }
-            if succ.get(&n).map(|p| p.len() != 1).unwrap_or(true) {
+            let p = ps[0].clone();
+            if p == n {
+                continue;
+            }
+            if succ
+                .get(&p)
+                .map(|s| s.len() != 1 || s[0] != n)
+                .unwrap_or(true)
+            {
                 continue;
             }
 
-            let p = pred[&n][0].clone();
-            let s = succ[&n][0].clone();
-            if p == n || s == n || p == s {
-                continue;
-            } // dont fuse cycles 
-
-            succ.remove(&n);
+            let out: Vec<String> = succ.remove(&n).unwrap_or_default();
             pred.remove(&n);
-            let sl = succ.entry(p.clone()).or_default();
-            if !sl.contains(&s) {
-                sl.push(s.clone());
+            for s in &out {
+                if s != &p {
+                    let sl = succ.entry(p.clone()).or_default();
+                    if !sl.contains(s) {
+                        sl.push(s.clone());
+                    }
+                    let ps = pred.entry(s.clone()).or_default();
+                    ps.retain(|x| x != &n);
+                    if !ps.contains(&p) {
+                        ps.push(p.clone());
+                    }
+                } // s's pred: n → p
             }
-            let ps = pred.entry(s.clone()).or_default();
-            ps.retain(|x| x != &n);
-            if p != s && !ps.contains(&p) {
-                ps.push(p.clone());
-            } // s's pred: n → p
             succ.get_mut(&p).unwrap().retain(|x| x != &n); // drop the p→n edge
             merged = true;
         }
@@ -331,14 +348,149 @@ pub fn are_equivalent(a: &Cfg, b: &Cfg) -> bool {
 
 // Returns the block the path continues from (Some), or None when the path
 // terminated (Ret / Break / Continue / Goto).
-/*
-fn walk(
-    stmts: &[Stmt],
-    b: &mut ReBuilder,
-    mut cur: String,
-    brk: Option<&str>,
-    cont: Option<&str>,
-    labels: &HashMap<String, String>,
-) -> Option<String> {
-    None
-}*/
+#[cfg(test)]
+mod tests {
+    use super::{are_equivalent, structured_to_cfg};
+    use crate::hir::Lit;
+    use crate::hir::cfg::Cfg;
+    use crate::hir::expr::Expr;
+    use crate::hir::stmt::Stmt;
+    use std::collections::{BTreeSet, HashMap};
+
+    fn cond() -> Expr {
+        Expr::Literal(Lit::Bool(true))
+    }
+
+    /// Build a `Cfg` from an entry name and an edge list. Every named node
+    /// gets a block; nodes without successors become exits.
+    fn cfg_from(entry: &str, edges: &[(&str, &str)]) -> Cfg {
+        let mut nodes: BTreeSet<String> = BTreeSet::new();
+        nodes.insert(entry.to_string());
+        for (a, b) in edges {
+            nodes.insert((*a).to_string());
+            nodes.insert((*b).to_string());
+        }
+        let mut succ: HashMap<String, Vec<String>> = HashMap::new();
+        let mut pred: HashMap<String, Vec<String>> = HashMap::new();
+        for n in &nodes {
+            succ.entry(n.clone()).or_default();
+            pred.entry(n.clone()).or_default();
+        }
+        for (a, b) in edges {
+            succ.entry((*a).to_string())
+                .or_default()
+                .push((*b).to_string());
+            pred.entry((*b).to_string())
+                .or_default()
+                .push((*a).to_string());
+        }
+        let exits: Vec<String> = nodes
+            .iter()
+            .filter(|n| succ.get(*n).is_some_and(|s| s.is_empty()))
+            .cloned()
+            .collect();
+        Cfg::new(entry.to_string(), succ, pred, exits)
+    }
+
+    /// `if c { ret } else { ret }`: header + two arms, nothing after the if,
+    /// so no join block is created.
+    #[test]
+    fn if_with_both_arms_ret_has_no_join() {
+        let body = [Stmt::If {
+            cond: cond(),
+            then_stmts: vec![Stmt::Ret { value: None }],
+            else_stmts: vec![Stmt::Ret { value: None }],
+        }];
+        let cfg = structured_to_cfg(&body);
+        assert_eq!(cfg.blocks.len(), 3);
+        assert_eq!(cfg.blocks[&cfg.entry].succ.len(), 2);
+        // no block has two preds → nothing joined
+        assert!(cfg.blocks.values().all(|b| b.pred.len() <= 1));
+        // both arms are exits
+        assert_eq!(cfg.exits.len(), 2);
+    }
+
+    /// `while c { break } ret`: header branches to body and exit, break jumps
+    /// to the exit, the ret lives in the exit block.
+    #[test]
+    fn loop_with_break_shape() {
+        let body = [
+            Stmt::Loop {
+                cond: Some(cond()),
+                body: vec![Stmt::Break],
+            },
+            Stmt::Ret { value: None },
+        ];
+        let cfg = structured_to_cfg(&body);
+        // b0 header, b1 join (holds the ret), b2 body entry (holds the break)
+        assert_eq!(cfg.blocks.len(), 3);
+        assert_eq!(
+            cfg.blocks[&cfg.entry].succ,
+            vec!["b2".to_string(), "b1".to_string()]
+        );
+        assert_eq!(cfg.blocks["b2"].succ, vec!["b1".to_string()]);
+        assert!(cfg.blocks["b1"].succ.is_empty());
+        assert_eq!(cfg.exits.len(), 1);
+    }
+
+    /// `while c { if d { continue } ret }`: the continue block must jump back
+    /// to the loop header (re-evaluating the condition), not to the exit.
+    #[test]
+    fn continue_targets_the_loop_header() {
+        let body = [Stmt::Loop {
+            cond: Some(cond()),
+            body: vec![
+                Stmt::If {
+                    cond: cond(),
+                    then_stmts: vec![Stmt::Continue],
+                    else_stmts: vec![],
+                },
+                Stmt::Ret { value: None },
+            ],
+        }];
+        let cfg = structured_to_cfg(&body);
+        // b0 header, b1 join, b2 body entry, b3 then arm (continue), b4 after the if (ret)
+        assert_eq!(cfg.blocks.len(), 5);
+        assert_eq!(cfg.blocks["b3"].succ, vec!["b0".to_string()]);
+        // header branches to body and exit
+        assert_eq!(cfg.blocks[&cfg.entry].succ.len(), 2);
+        assert_eq!(cfg.exits.len(), 2);
+    }
+
+    /// `loop { break }` (cond: None): the header has no false exit, the join
+    /// is reachable only through the break.
+    #[test]
+    fn infinite_loop_has_no_false_exit() {
+        let body = [Stmt::Loop {
+            cond: None,
+            body: vec![Stmt::Break],
+        }];
+        let cfg = structured_to_cfg(&body);
+        // b0 header, b1 join, b2 body entry (break)
+        assert_eq!(cfg.blocks.len(), 3);
+        assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b2".to_string()]);
+        assert_eq!(cfg.blocks["b2"].succ, vec!["b1".to_string()]);
+        assert!(cfg.blocks["b1"].succ.is_empty());
+    }
+
+    /// Same shapes with different block names must compare equal; different
+    /// shapes must not.
+    #[test]
+    fn are_equivalent_ignores_block_names() {
+        let d1 = cfg_from("E", &[("E", "x"), ("E", "y"), ("x", "J"), ("y", "J")]);
+        let d2 = cfg_from("e", &[("e", "a"), ("e", "b"), ("a", "j"), ("b", "j")]);
+        assert!(are_equivalent(&d1, &d2));
+        // diamond where both arms terminate vs diamond with a real join
+        let d3 = cfg_from("e", &[("e", "a"), ("e", "b"), ("a", "ret1"), ("b", "ret2")]);
+        assert!(!are_equivalent(&d2, &d3));
+    }
+
+    /// A straight-line chain collapses down to a single block: the fused
+    /// version must compare equal to the un-fused one.
+    #[test]
+    fn are_equivalent_tolerates_chain_fusion() {
+        let line = cfg_from("e", &[("e", "a"), ("a", "b"), ("b", "c"), ("c", "d")]);
+        let fused = cfg_from("z", &[]);
+        assert!(are_equivalent(&line, &fused));
+    }
+}

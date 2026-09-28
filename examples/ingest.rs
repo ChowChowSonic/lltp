@@ -8,11 +8,12 @@ use inkwell::context::Context;
 
 use lltp::build_module;
 use lltp::hir::cfg::Cfg;
-use lltp::hir::graph::{build_graph, has_self_referential_loop};
+use lltp::hir::flow::{dominators, natural_loops};
+use lltp::hir::graph::build_graph;
 use lltp::hir::{expr::Expr, stmt::Stmt};
 
-/// A small unoptimized-function IR, YARPGen-style: an irreducible jumble of
-/// basic blocks with several self-referential loops.
+/// A small unoptimized-function IR, YARPGen-style: a jumble of basic blocks
+/// with several self-referential loops.
 const IR: &str = r#"; ModuleID = '/tmp/autogen.bc'
 source_filename = "/tmp/autogen.bc"
 
@@ -72,13 +73,13 @@ fn main() {
     let graph: Cfg = build_graph(&first_fn).expect("Failed to build function!");
     println!("{} basic blocks in CFG", graph.blocks.len());
 
-    // 4. Find loop headers: blocks reachable from themselves.
-    let loop_headers: Vec<_> = graph
-        .blocks
-        .keys()
-        .filter(|bb| has_self_referential_loop(&graph, bb))
+    // 4. Find loop headers via natural loops (dominance-based back edges).
+    let dom = dominators(&graph);
+    let loop_headers: Vec<_> = natural_loops(&graph, &dom)
+        .iter()
+        .map(|l| l.header.clone())
         .collect();
-    println!("loop-header candidates: {loop_headers:?}");
+    println!("loop headers: {loop_headers:?}");
 
     // 5. Recover HIR statements/expressions from each block's instructions.
     let func = module.get_first_function().unwrap();

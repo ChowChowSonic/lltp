@@ -133,6 +133,7 @@ pub fn sccs(cfg: &Cfg) -> Vec<Vec<String>> {
 pub fn reachable(cfg: &Cfg) -> BTreeSet<String> {
     let mut seen = BTreeSet::new();
     let mut stack: VecDeque<String> = VecDeque::new();
+    stack.push_back(cfg.entry.clone());
     while let Some(n) = stack.pop_front() {
         if seen.insert(n.clone()) {
             for s in &cfg.blocks[&n].succ {
@@ -159,7 +160,7 @@ pub fn natural_loops(cfg: &Cfg, dom: &DomInfo) -> Vec<NaturalLoop> {
             continue;
         }
         for s in &blk.succ {
-            if dom.dom.get(s).is_some_and(|d| d.contains(name)) {
+            if dom.dom.get(name).is_some_and(|d| d.contains(s)) {
                 by_header
                     .entry(s.clone())
                     .or_default()
@@ -210,15 +211,16 @@ pub fn reducible(cfg: &Cfg) -> bool {
         }
     }
     loop {
-        let mut changed = false;
+        // T1: drop self-edges (T2 merges can create new ones)
         for n in &reach {
-            if succ.get_mut(n).unwrap().remove(n) {
-                changed = true;
+            if let Some(s) = succ.get_mut(n) {
+                s.remove(n);
             }
         }
-        let mut merges: Vec<(String, String)> = Vec::new();
+        // T2: fold one single-predecessor node into its predecessor
+        let mut single: Option<(String, String)> = None;
         for n in &reach {
-            if *n == cfg.entry {
+            if *n == cfg.entry || !succ.contains_key(n) {
                 continue;
             }
             let preds: Vec<String> = succ
@@ -227,27 +229,156 @@ pub fn reducible(cfg: &Cfg) -> bool {
                 .map(|(k, _)| k.clone())
                 .collect();
             if preds.len() == 1 {
-                merges.push((preds[0].clone(), n.clone()));
+                single = Some((preds[0].clone(), n.clone()));
+                break;
             }
         }
-        for (p, n) in merges {
-            let out: Vec<String> = succ.get(&n).unwrap().iter().cloned().collect();
-            succ.remove(&n);
-            for s in out {
-                if s != p && n != s {
-                    succ.get_mut(&p).unwrap().insert(s);
-                }
+        let Some((p, n)) = single else { break };
+        let out: BTreeSet<String> = succ.remove(&n).unwrap_or_default();
+        for s in &out {
+            if s != &p && s != &n {
+                succ.get_mut(&p).unwrap().insert(s.clone());
             }
-            for k in &reach {
-                if let Some(set) = succ.get_mut(k) {
-                    set.remove(&n);
-                }
-            }
-            changed = true;
         }
-        if !changed {
-            break;
+        for k in &reach {
+            if let Some(set) = succ.get_mut(k) {
+                set.remove(&n);
+            }
         }
     }
-    false
+    succ.len() == 1
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hir::cfg::Cfg;
+    use std::collections::{BTreeSet, HashMap};
+
+    /// Build a `Cfg` from an entry name and an edge list. Every named node
+    /// gets a block; nodes without successors become exits.
+    fn cfg_from(entry: &str, edges: &[(&str, &str)]) -> Cfg {
+        let mut nodes: BTreeSet<String> = BTreeSet::new();
+        nodes.insert(entry.to_string());
+        for (a, b) in edges {
+            nodes.insert((*a).to_string());
+            nodes.insert((*b).to_string());
+        }
+        let mut succ: HashMap<String, Vec<String>> = HashMap::new();
+        let mut pred: HashMap<String, Vec<String>> = HashMap::new();
+        for n in &nodes {
+            succ.entry(n.clone()).or_default();
+            pred.entry(n.clone()).or_default();
+        }
+        for (a, b) in edges {
+            succ.entry((*a).to_string())
+                .or_default()
+                .push((*b).to_string());
+            pred.entry((*b).to_string())
+                .or_default()
+                .push((*a).to_string());
+        }
+        let exits: Vec<String> = nodes
+            .iter()
+            .filter(|n| succ.get(*n).is_some_and(|s| s.is_empty()))
+            .cloned()
+            .collect();
+        Cfg::new(entry.to_string(), succ, pred, exits)
+    }
+
+    #[test]
+    fn idom_in_a_diamond() {
+        let cfg = cfg_from(
+            "entry",
+            &[("entry", "a"), ("entry", "b"), ("a", "join"), ("b", "join")],
+        );
+        let info = dominators(&cfg);
+        // every non-entry node's immediate dominator is the entry
+        for n in ["a", "b", "join"] {
+            assert_eq!(info.idom.get(n), Some(&"entry".to_string()));
+        }
+        // every node dominates itself
+        for n in ["entry", "a", "b", "join"] {
+            assert!(info.dom[n].contains(n));
+        }
+    }
+
+    #[test]
+    fn sccs_on_a_two_node_cycle() {
+        let cfg = cfg_from("entry", &[("entry", "a"), ("a", "b"), ("b", "a")]);
+        let sccs = sccs(&cfg);
+        assert_eq!(sccs.len(), 2);
+        assert!(sccs.contains(&vec!["a".to_string(), "b".to_string()]));
+        assert!(sccs.contains(&vec!["entry".to_string()]));
+    }
+
+    #[test]
+    fn reducible_shapes() {
+        // self loop: entry → a → a
+        assert!(reducible(&cfg_from("entry", &[("entry", "a"), ("a", "a")])));
+        // straight-line chain
+        assert!(reducible(&cfg_from("entry", &[("entry", "a"), ("a", "b")])));
+        // while loop: entry → h, h → {body, exit}, body → h
+        assert!(reducible(&cfg_from(
+            "entry",
+            &[("entry", "h"), ("h", "body"), ("h", "exit"), ("body", "h")]
+        )));
+        // irreducible: two headers, each entered from outside the cycle
+        assert!(!reducible(&cfg_from(
+            "entry",
+            &[("entry", "a"), ("entry", "b"), ("a", "b"), ("b", "a")]
+        )));
+    }
+
+    #[test]
+    fn natural_loop_of_a_while() {
+        let cfg = cfg_from(
+            "entry",
+            &[("entry", "h"), ("h", "body"), ("h", "exit"), ("body", "h")],
+        );
+        let dom = dominators(&cfg);
+        let loops = natural_loops(&cfg, &dom);
+        assert_eq!(loops.len(), 1);
+        let l = &loops[0];
+        assert_eq!(l.header, "h");
+        assert!(
+            l.back_edges
+                .contains(&("body".to_string(), "h".to_string()))
+        );
+        assert_eq!(
+            l.body,
+            BTreeSet::from(["h".to_string(), "body".to_string()])
+        );
+    }
+
+    #[test]
+    fn natural_loop_of_a_self_loop() {
+        let cfg = cfg_from("entry", &[("entry", "a"), ("a", "a")]);
+        let dom = dominators(&cfg);
+        let loops = natural_loops(&cfg, &dom);
+        assert_eq!(loops.len(), 1);
+        let l = &loops[0];
+        assert_eq!(l.header, "a");
+        assert!(l.back_edges.contains(&("a".to_string(), "a".to_string())));
+        assert_eq!(l.body, BTreeSet::from(["a".to_string()]));
+    }
+
+    #[test]
+    fn natural_loops_absent_without_cycles() {
+        // diamond: no cycle, no loops
+        let cfg = cfg_from(
+            "entry",
+            &[("entry", "a"), ("entry", "b"), ("a", "join"), ("b", "join")],
+        );
+        let dom = dominators(&cfg);
+        assert!(natural_loops(&cfg, &dom).is_empty());
+        // irreducible two-header cycle: dominance-based detection finds no
+        // single-header loop
+        let cfg = cfg_from(
+            "entry",
+            &[("entry", "a"), ("entry", "b"), ("a", "b"), ("b", "a")],
+        );
+        let dom = dominators(&cfg);
+        assert!(natural_loops(&cfg, &dom).is_empty());
+    }
 }

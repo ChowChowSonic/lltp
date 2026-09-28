@@ -3,7 +3,7 @@ use inkwell::{
     basic_block::BasicBlock,
     values::{FunctionValue, Operand},
 };
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
 use crate::hir::cfg::Cfg;
 
@@ -105,33 +105,12 @@ pub fn get_neighbors<'ctx>(bb: &BasicBlock<'ctx>) -> Vec<BasicBlock<'ctx>> {
     ret
 }
 
-pub fn has_self_referential_loop(graph: &Cfg, start: &String) -> bool {
-    let mut visited: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<String> = VecDeque::new();
-    queue.push_back(start.clone());
-
-    while let Some(item) = queue.pop_front() {
-        let neighbors = &graph.blocks.get(&item);
-        if neighbors.is_none() {
-            continue;
-        }
-        for n in neighbors.unwrap().succ.clone() {
-            if n == *start {
-                return true; // found a path back to start
-            }
-            if visited.insert(n.clone()) {
-                queue.push_back(n.clone());
-            }
-        }
-    }
-    false
-}
-
 #[cfg(test)]
 mod tests {
     use crate::hir::{
         cfg::Cfg,
-        graph::{build_graph, has_self_referential_loop},
+        flow::{dominators, natural_loops},
+        graph::build_graph,
     };
 
     /// Parse module and build a Cfg per function.
@@ -203,17 +182,22 @@ CF80:                                             ; preds = %CF86
     fn test_find_loop() {
         let graph_res = build_cfgs(IR);
         for graph in &graph_res {
-            let mut loops: Vec<String> = Vec::new();
-            for k in graph.blocks.keys() {
-                if has_self_referential_loop(graph, k) {
-                    loops.push(k.clone());
-                }
-            }
-            assert!(
-                loops.iter().all(|x| {
-                    ["CF", "CF82", "CF83", "CF84", "CF86", "CF81"].contains(&x.as_str())
-                })
-            )
+            let dom = dominators(graph);
+            let mut headers: Vec<String> = natural_loops(graph, &dom)
+                .into_iter()
+                .map(|l| l.header)
+                .collect();
+            headers.sort();
+            // Dominance-based loop detection: these are the natural-loop
+            // headers of the IR. CF84/CF86 lie on cycles but never dominate
+            // one, so they are loop members, not headers.
+            assert_eq!(
+                headers,
+                ["CF", "CF81", "CF82", "CF83"]
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect::<Vec<_>>()
+            );
         }
     }
 
