@@ -7,9 +7,14 @@ pub struct DomInfo {
 ///dom(n) = {n} ∪ ⋂ { dom(p) : p ∈ preds(n) }, iterate until fixpoint
 pub fn dominators(cfg: &Cfg) -> DomInfo {
     let reach = reachable(cfg);
+    // Seed every node with the full reachable set and iterate downward: the
+    // *least* fixed point of the equations (seeding from ∅) is not the
+    // dominator relation on cyclic graphs — the intersection over the
+    // back-edge preds cuts the path from the entry into the loop, so the
+    // header's dominators silently lose `entry` and its loop never appears.
     let mut dom: HashMap<String, BTreeSet<String>> =
-        reach.iter().map(|n| (n.clone(), BTreeSet::new())).collect();
-    dom.get_mut(&cfg.entry).unwrap().insert(cfg.entry.clone());
+        reach.iter().map(|n| (n.clone(), reach.clone())).collect();
+    dom.insert(cfg.entry.clone(), BTreeSet::from([cfg.entry.clone()]));
     loop {
         let mut changed = false;
         for n in &reach {

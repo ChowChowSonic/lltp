@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, HashMap};
 
 use crate::hir::stmt::Stmt;
 
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Block {
     pub name: String,
     pub stmts: Vec<Stmt>,

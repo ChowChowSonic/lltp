@@ -7,6 +7,7 @@ pub mod flow;
 pub mod func;
 pub mod graph;
 pub mod stmt;
+pub mod structurize;
 pub mod ty;
 pub mod verify;
 
