@@ -15,6 +15,16 @@ pub struct LoopTree {
 /// Reduce a reducible CFG to structured statements. Irreducible graphs,
 /// multi-exit / multi-entry loops, and parallel acyclic joins are rejected
 /// here; Task 5 (node splitting + differential execution) lifts those.
+#[derive(Clone, Debug)]
+struct LoopContext {
+    header: String,
+    exit: Option<String>,
+    latch: Option<String>,
+}
+
+/// Reduce a reducible CFG to structured statements. Irreducible graphs,
+/// multi-exit / multi-entry loops, and parallel acyclic joins are rejected
+/// here; Task 5 (node splitting + differential execution) lifts those.
 pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, &'static str> {
     if !reducible(cfg) {
         return Err("irreducible control flow (node splitting is Task 5)");
@@ -22,27 +32,252 @@ pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, &'static str> {
     let dom = dominators(cfg);
     let reach = reachable(cfg);
     let tree = LoopTree::build(cfg, &dom, &reach)?;
-    if !tree.loops.is_empty() {
-        return Err("structurizer: loops not yet implemented");
-    }
-    structure_frame(cfg, &dom, &reach, &cfg.entry, &BTreeSet::new())
+    structure_region(cfg, &dom, &tree, &reach, &cfg.entry, &BTreeSet::new(), None)
 }
 
-/// Structure one single-entry acyclic region `nodes` into statements.
-///
-/// `frame_exits` names the successor blocks that live outside the region. A
-/// block inside the region may branch straight to one of them (it becomes an
-/// empty If arm / a fall-through), but leaving toward anything else is an
-/// error. At the top level there are no frame exits.
-fn structure_frame(
+fn structure_loop(
     cfg: &Cfg,
     dom: &DomInfo,
+    tree: &LoopTree,
+    loop_idx: usize,
+) -> Result<Stmt, &'static str> {
+    let l = &tree.loops[loop_idx];
+    let header = &l.header;
+    let exit_target = tree.exit[loop_idx].as_ref();
+
+    let (prefix, branch) = split_block(cfg, header)?;
+    let succs = &cfg.blocks[header].succ;
+
+    let has_exit_edge = if let Some(exit_name) = exit_target {
+        succs.contains(exit_name)
+    } else {
+        false
+    };
+
+    let back_edge_srcs: Vec<String> = l.back_edges.iter().map(|(src, _)| src.clone()).collect();
+    let latch = if back_edge_srcs.len() == 1 {
+        Some(back_edge_srcs[0].clone())
+    } else {
+        None
+    };
+
+    let ctx = LoopContext {
+        header: header.clone(),
+        exit: exit_target.cloned(),
+        latch,
+    };
+
+    let mut body_frame_exits = BTreeSet::from([header.clone()]);
+    if let Some(e) = exit_target {
+        body_frame_exits.insert(e.clone());
+    }
+
+    if has_exit_edge {
+        let body_succs: Vec<String> = succs
+            .iter()
+            .filter(|s| l.body.contains(*s))
+            .cloned()
+            .collect();
+        if body_succs.is_empty() {
+            return Err("loop header has no successors in loop body");
+        }
+        let body_entry = &body_succs[0];
+
+        let cond = if branch
+            .as_ref()
+            .is_none_or(|(_, then_b, _)| then_b == body_entry)
+        {
+            branch
+                .as_ref()
+                .and_then(|(c, _, _)| c.clone())
+                .unwrap_or(Expr::Nop)
+        } else {
+            let c = branch
+                .as_ref()
+                .and_then(|(c, _, _)| c.clone())
+                .unwrap_or(Expr::Nop);
+            Expr::BinaryOp {
+                op: inkwell::values::InstructionOpcode::Xor,
+                arg1: Box::new(c),
+                arg2: Box::new(Expr::Literal(crate::hir::Lit::Bool(true))),
+            }
+        };
+
+        let mut body_nodes = l.body.clone();
+        body_nodes.remove(header);
+
+        let mut body_stmts = prefix;
+        if body_nodes.is_empty() {
+            if body_stmts.is_empty() {
+                body_stmts.push(placeholder());
+            }
+        } else {
+            body_stmts.extend(structure_region(
+                cfg,
+                dom,
+                tree,
+                &body_nodes,
+                body_entry,
+                &body_frame_exits,
+                Some(&ctx),
+            )?);
+            if body_stmts.is_empty() {
+                body_stmts.push(placeholder());
+            }
+        }
+
+        Ok(Stmt::Loop {
+            cond: Some(cond),
+            body: body_stmts,
+        })
+    } else {
+        let body_succs: Vec<String> = succs
+            .iter()
+            .filter(|s| l.body.contains(*s))
+            .cloned()
+            .collect();
+        if body_succs.is_empty() {
+            return Err("loop header has no successors in loop body");
+        }
+
+        if body_succs.len() == 1 && body_succs[0] != *header {
+            let body_entry = &body_succs[0];
+            let mut body_nodes = l.body.clone();
+            body_nodes.remove(header);
+
+            let mut body_stmts = prefix;
+            body_stmts.extend(structure_region(
+                cfg,
+                dom,
+                tree,
+                &body_nodes,
+                body_entry,
+                &body_frame_exits,
+                Some(&ctx),
+            )?);
+            if body_stmts.is_empty() {
+                body_stmts.push(placeholder());
+            }
+
+            Ok(Stmt::Loop {
+                cond: None,
+                body: body_stmts,
+            })
+        } else if body_succs.len() == 2 {
+            let cond = branch
+                .as_ref()
+                .and_then(|(c, _, _)| c.clone())
+                .unwrap_or(Expr::Nop);
+            let then_is_first = branch
+                .as_ref()
+                .is_none_or(|(_, then_b, _)| *then_b == body_succs[0]);
+            let (first_b, second_b) = if then_is_first {
+                (&body_succs[0], &body_succs[1])
+            } else {
+                (&body_succs[1], &body_succs[0])
+            };
+
+            let mut body_nodes = l.body.clone();
+            body_nodes.remove(header);
+
+            let a_then = reachable_from(cfg, first_b, &body_nodes);
+            let a_else = reachable_from(cfg, second_b, &body_nodes);
+
+            let mut region_then = structure_region(
+                cfg,
+                dom,
+                tree,
+                &a_then,
+                first_b,
+                &body_frame_exits,
+                Some(&ctx),
+            )?;
+            let mut region_else = structure_region(
+                cfg,
+                dom,
+                tree,
+                &a_else,
+                second_b,
+                &body_frame_exits,
+                Some(&ctx),
+            )?;
+
+            if region_then.is_empty() {
+                region_then.push(placeholder());
+            }
+            if region_else.is_empty() {
+                region_else.push(placeholder());
+            }
+
+            let mut body_stmts = prefix;
+            body_stmts.push(Stmt::If {
+                cond,
+                then_stmts: region_then,
+                else_stmts: region_else,
+            });
+
+            Ok(Stmt::Loop {
+                cond: None,
+                body: body_stmts,
+            })
+        } else {
+            let mut body_stmts = prefix;
+            if body_stmts.is_empty() {
+                body_stmts.push(placeholder());
+            }
+
+            Ok(Stmt::Loop {
+                cond: None,
+                body: body_stmts,
+            })
+        }
+    }
+}
+
+/// Structure a region of `nodes` starting from `entry`.
+fn structure_region(
+    cfg: &Cfg,
+    dom: &DomInfo,
+    tree: &LoopTree,
     nodes: &BTreeSet<String>,
     entry: &str,
     frame_exits: &BTreeSet<String>,
+    loop_ctx: Option<&LoopContext>,
 ) -> Result<Vec<Stmt>, &'static str> {
+    if nodes.is_empty() || frame_exits.contains(entry) || !nodes.contains(entry) {
+        return Ok(Vec::new());
+    }
+
+    if let Some(loop_idx) = tree.get_loop_for_header(entry)
+        && loop_ctx.is_none_or(|ctx| ctx.header != entry)
+    {
+        let loop_stmt = structure_loop(cfg, dom, tree, loop_idx)?;
+        let mut stmts = vec![loop_stmt];
+
+        if let Some(exit_node) = &tree.exit[loop_idx]
+            && !frame_exits.contains(exit_node)
+        {
+            let remaining_nodes: BTreeSet<String> = nodes
+                .difference(&tree.loops[loop_idx].body)
+                .cloned()
+                .collect();
+            if remaining_nodes.contains(exit_node) {
+                let cont_stmts = structure_region(
+                    cfg,
+                    dom,
+                    tree,
+                    &remaining_nodes,
+                    exit_node,
+                    frame_exits,
+                    loop_ctx,
+                )?;
+                stmts.extend(cont_stmts);
+            }
+        }
+        return Ok(stmts);
+    }
+
     let blk = &cfg.blocks[entry];
-    // Successors inside the region vs. those leaving it.
     let mut s_in: Vec<String> = Vec::new();
     let mut s_out: Vec<String> = Vec::new();
     for s in &blk.succ {
@@ -54,42 +289,109 @@ fn structure_frame(
     }
     for x in &s_out {
         if !frame_exits.contains(x) {
+            if let Some(ctx) = loop_ctx
+                && (ctx.exit.as_ref() == Some(x) || &ctx.header == x)
+            {
+                continue;
+            }
             return Err("abnormal exit into an enclosing region");
         }
     }
-    // Straight-line prefix (everything before the trailing Branch) plus the
-    // stripped Branch, whose cond and arm order shape the emitted If.
+
     let (mut prefix, branch) = split_block(cfg, entry)?;
 
     if s_in.is_empty() {
-        // No successors inside the region: either terminate here or fall out
-        // of the region. A bare exit block still needs a terminating Ret so
-        // the rebuild knows the path ends here.
-        if s_out.is_empty() && prefix.is_empty() {
-            prefix.push(Stmt::Ret { value: None });
+        if s_out.is_empty() {
+            if prefix.is_empty() {
+                prefix.push(Stmt::Ret { value: None });
+            }
+            return Ok(prefix);
         }
+
+        if s_out.len() == 1 {
+            let target = &s_out[0];
+            if let Some(ctx) = loop_ctx {
+                if ctx.exit.as_ref() == Some(target) {
+                    prefix.push(Stmt::Break);
+                    return Ok(prefix);
+                }
+                if &ctx.header == target {
+                    if ctx.latch.as_ref() == Some(&entry.to_string()) {
+                        return Ok(prefix);
+                    } else {
+                        prefix.push(Stmt::Continue);
+                        return Ok(prefix);
+                    }
+                }
+            }
+            return Ok(prefix);
+        }
+
+        if s_out.len() == 2
+            && let Some(ctx) = loop_ctx
+        {
+            let cond = branch
+                .as_ref()
+                .and_then(|(c, _, _)| c.clone())
+                .unwrap_or(Expr::Nop);
+            let then_is_first = branch
+                .as_ref()
+                .is_none_or(|(_, then_b, _)| *then_b == s_out[0]);
+            let (tb, eb) = if then_is_first {
+                (&s_out[0], &s_out[1])
+            } else {
+                (&s_out[1], &s_out[0])
+            };
+
+            let emit_target = |target: &String| -> Option<Stmt> {
+                if ctx.exit.as_ref() == Some(target) {
+                    Some(Stmt::Break)
+                } else if &ctx.header == target {
+                    if ctx.latch.as_ref() == Some(&entry.to_string()) {
+                        None
+                    } else {
+                        Some(Stmt::Continue)
+                    }
+                } else {
+                    None
+                }
+            };
+
+            prefix.push(Stmt::If {
+                cond,
+                then_stmts: emit_target(tb).into_iter().collect(),
+                else_stmts: emit_target(eb).into_iter().collect(),
+            });
+            return Ok(prefix);
+        }
+
         return Ok(prefix);
     }
 
     let mut rest = nodes.clone();
     rest.remove(entry);
 
-    // Join peeling: pick the outermost join (largest dominator set, name as
-    // tie-break) and split the region into the tree-shaped `preset` that
-    // drains into it and the `tail` that continues from it.
     let joins: BTreeSet<String> = nodes
         .iter()
         .filter(|n| **n != *entry)
         .filter(|n| {
-            cfg.blocks[*n]
+            let preds_in_nodes = cfg.blocks[*n]
                 .pred
                 .iter()
                 .filter(|p| nodes.contains(*p))
-                .count()
-                >= 2
+                .filter(|p| {
+                    if let Some(l_idx) = tree.get_loop_for_header(n) {
+                        !tree.loops[l_idx].body.contains(*p)
+                    } else {
+                        true
+                    }
+                })
+                .count();
+            preds_in_nodes >= 2
         })
         .cloned()
         .collect();
+
     if !joins.is_empty() {
         let j = joins
             .iter()
@@ -107,17 +409,30 @@ fn structure_frame(
         let tail = reachable_from(cfg, j, nodes);
         let preset: BTreeSet<String> = nodes.difference(&tail).cloned().collect();
         let preset_exits: BTreeSet<String> = BTreeSet::from([(*j).clone()]);
-        let mut out = structure_frame(cfg, dom, &preset, entry, &preset_exits)?;
-        out.extend(structure_frame(cfg, dom, &tail, j, frame_exits)?);
+        let mut out = structure_region(cfg, dom, tree, &preset, entry, &preset_exits, loop_ctx)?;
+        out.extend(structure_region(
+            cfg,
+            dom,
+            tree,
+            &tail,
+            j,
+            frame_exits,
+            loop_ctx,
+        )?);
         return Ok(out);
     }
 
-    // Tree case (no joins): the region is a plain if/else/chain shape. With
-    // no joins the two (2,0) arms never reconverge, and a block hands off to
-    // at most one in-set successor.
     match (s_in.len(), s_out.len()) {
         (1, 0) => {
-            prefix.extend(structure_frame(cfg, dom, &rest, &s_in[0], frame_exits)?);
+            prefix.extend(structure_region(
+                cfg,
+                dom,
+                tree,
+                &rest,
+                &s_in[0],
+                frame_exits,
+                loop_ctx,
+            )?);
             Ok(prefix)
         }
         (2, 0) => {
@@ -130,12 +445,11 @@ fn structure_frame(
             let then_is_first = branch
                 .as_ref()
                 .is_none_or(|(_, then_block, _)| *then_block == s_in[0]);
-            let region_then = structure_frame(cfg, dom, &a_then, &s_in[0], frame_exits)?;
-            let mut region_else = structure_frame(cfg, dom, &a_else, &s_in[1], frame_exits)?;
+            let region_then =
+                structure_region(cfg, dom, tree, &a_then, &s_in[0], frame_exits, loop_ctx)?;
+            let mut region_else =
+                structure_region(cfg, dom, tree, &a_else, &s_in[1], frame_exits, loop_ctx)?;
             if region_else.is_empty() {
-                // A bare (statement-free) block on the else side needs a
-                // statement so the rebuild materializes it; ReBuilder creates
-                // blocks for empty then arms on its own.
                 region_else.push(placeholder());
             }
             let (then_stmts, else_stmts) = if then_is_first {
@@ -156,10 +470,53 @@ fn structure_frame(
                 .and_then(|(c, _, _)| c.clone())
                 .unwrap_or(Expr::Nop);
             let in_arm = reachable_from(cfg, &s_in[0], &rest);
-            // The exit arm is emitted as ReBuilder's empty-else side: it
-            // falls straight into the join without introducing a block, which
-            // is exactly the original edge to the frame exit.
-            let then_stmts = structure_frame(cfg, dom, &in_arm, &s_in[0], frame_exits)?;
+            let exit_target = &s_out[0];
+
+            let then_is_exit = branch
+                .as_ref()
+                .is_some_and(|(_, then_b, _)| then_b == exit_target);
+
+            if let Some(ctx) = loop_ctx {
+                if ctx.exit.as_ref() == Some(exit_target) {
+                    let mut in_arm_stmts =
+                        structure_region(cfg, dom, tree, &in_arm, &s_in[0], frame_exits, loop_ctx)?;
+                    if in_arm_stmts.is_empty() {
+                        in_arm_stmts.push(placeholder());
+                    }
+                    let (then_stmts, else_stmts) = if then_is_exit {
+                        (vec![Stmt::Break], in_arm_stmts)
+                    } else {
+                        (in_arm_stmts, vec![Stmt::Break])
+                    };
+                    prefix.push(Stmt::If {
+                        cond,
+                        then_stmts,
+                        else_stmts,
+                    });
+                    return Ok(prefix);
+                }
+                if &ctx.header == exit_target {
+                    let mut in_arm_stmts =
+                        structure_region(cfg, dom, tree, &in_arm, &s_in[0], frame_exits, loop_ctx)?;
+                    if in_arm_stmts.is_empty() {
+                        in_arm_stmts.push(placeholder());
+                    }
+                    let (then_stmts, else_stmts) = if then_is_exit {
+                        (vec![Stmt::Continue], in_arm_stmts)
+                    } else {
+                        (in_arm_stmts, vec![Stmt::Continue])
+                    };
+                    prefix.push(Stmt::If {
+                        cond,
+                        then_stmts,
+                        else_stmts,
+                    });
+                    return Ok(prefix);
+                }
+            }
+
+            let then_stmts =
+                structure_region(cfg, dom, tree, &in_arm, &s_in[0], frame_exits, loop_ctx)?;
             prefix.push(Stmt::If {
                 cond,
                 then_stmts,
@@ -227,6 +584,10 @@ fn placeholder() -> Stmt {
 }
 
 impl LoopTree {
+    pub fn get_loop_for_header(&self, header: &str) -> Option<usize> {
+        self.loops.iter().position(|l| l.header == header)
+    }
+
     fn build(cfg: &Cfg, dom: &DomInfo, reach: &BTreeSet<String>) -> Result<LoopTree, &'static str> {
         let mut loops = natural_loops(cfg, dom);
         loops.sort_by(|a, b| (a.body.len(), &a.header).cmp(&(b.body.len(), &b.header)));
@@ -480,15 +841,112 @@ mod test {
     }
 
     #[test]
-    fn reducible_cfg_hits_the_temporary_seam() {
+    fn while_loop_round_trips() {
         let cfg = cfg_from(
             "entry",
             &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "h")],
         );
-        assert!(matches!(
-            structurize(&cfg),
-            Err(e) if e.contains("not yet implemented")
-        ));
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+    }
+
+    #[test]
+    fn while_loop_with_break_round_trips() {
+        let cfg = cfg_from(
+            "entry",
+            &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "ex")],
+        );
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+    }
+
+    #[test]
+    fn while_loop_with_continue_round_trips() {
+        let cfg = cfg_from(
+            "entry",
+            &[
+                ("entry", "h"),
+                ("h", "b"),
+                ("h", "ex"),
+                ("b", "cont"),
+                ("b", "latch"),
+                ("cont", "h"),
+                ("latch", "h"),
+            ],
+        );
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+    }
+
+    #[test]
+    fn nested_while_loops_round_trip() {
+        let cfg = cfg_from(
+            "entry",
+            &[
+                ("entry", "oh"),
+                ("oh", "B"),
+                ("oh", "OEX"),
+                ("B", "ih"),
+                ("ih", "C"),
+                ("ih", "IEX"),
+                ("C", "ih"),
+                ("IEX", "T"),
+                ("T", "oh"),
+            ],
+        );
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+    }
+
+    #[test]
+    fn sequential_loops_round_trip() {
+        let cfg = cfg_from(
+            "entry",
+            &[
+                ("entry", "h1"),
+                ("h1", "b1"),
+                ("h1", "e1"),
+                ("b1", "h1"),
+                ("e1", "h2"),
+                ("h2", "b2"),
+                ("h2", "e2"),
+                ("b2", "h2"),
+            ],
+        );
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+    }
+
+    #[test]
+    fn infinite_loop_with_break_round_trips() {
+        let cfg = cfg_from(
+            "entry",
+            &[
+                ("entry", "h"),
+                ("h", "b"),
+                ("b", "ex"),
+                ("b", "latch"),
+                ("latch", "h"),
+            ],
+        );
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+    }
+
+    #[test]
+    fn dispatch_loop_round_trips() {
+        let cfg = cfg_from(
+            "entry",
+            &[
+                ("entry", "h"),
+                ("h", "b"),
+                ("h", "c"),
+                ("b", "h"),
+                ("c", "h"),
+            ],
+        );
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
     // --- acyclic round-trips (Task 3 fixtures) -----------------------------
