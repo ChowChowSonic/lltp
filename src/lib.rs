@@ -28,8 +28,7 @@ pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Module<'ctx> {
 
 #[cfg(test)]
 mod tests {
-    use crate::hir::graph::build_graph;
-    use crate::{build_module, hir::cfg::Cfg};
+    use crate::{build_module, hir::Cfg};
     use inkwell::context::Context;
 
     const IR: &str = r#"define void @f(i32 %x) {
@@ -50,7 +49,7 @@ nonpos:
         let ctxt = Context::create();
         let module = build_module(&ctxt, IR);
         let func = module.get_first_function().expect("IR contains a function");
-        let cfg: Cfg = build_graph(&func).expect("CFG build should succeed");
+        let cfg: Cfg = Cfg::try_from(&func).expect("CFG build should succeed");
 
         assert_eq!(cfg.entry, "entry");
         assert_eq!(

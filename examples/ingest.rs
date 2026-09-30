@@ -7,10 +7,8 @@
 use inkwell::context::Context;
 
 use lltp::build_module;
-use lltp::hir::cfg::Cfg;
 use lltp::hir::flow::{dominators, natural_loops};
-use lltp::hir::graph::build_graph;
-use lltp::hir::{expr::Expr, stmt::Stmt};
+use lltp::hir::{Cfg, Expr, Stmt};
 
 /// A small unoptimized-function IR, YARPGen-style: a jumble of basic blocks
 /// with several self-referential loops.
@@ -70,7 +68,7 @@ fn main() {
         .get_first_function()
         .expect("Failed to find function in IR!");
     // 3. Build a per-function CFG over basic blocks.
-    let graph: Cfg = build_graph(&first_fn).expect("Failed to build function!");
+    let graph: Cfg = Cfg::try_from(&first_fn).expect("Failed to build function!");
     println!("{} basic blocks in CFG", graph.blocks.len());
 
     // 4. Find loop headers via natural loops (dominance-based back edges).
@@ -88,10 +86,10 @@ fn main() {
         let mut exprs = 0usize;
         let mut stmts = 0usize;
         for inst in bb.get_instructions() {
-            if Expr::build(inst).is_ok() {
+            if Expr::try_from(inst).is_ok() {
                 exprs += 1;
             }
-            if Stmt::build(inst).is_ok() {
+            if Stmt::try_from(inst).is_ok() {
                 stmts += 1;
             }
         }

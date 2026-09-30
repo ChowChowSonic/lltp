@@ -1,8 +1,29 @@
-use crate::hir::{Lit, expr::Expr, value_to_expr};
-use inkwell::values::InstructionOpcode::*;
-use inkwell::values::InstructionValue;
-/// Stmts are not value producing code
-#[derive(Debug, Clone)]
+use crate::hir::{Expr, Lit};
+
+/// Information extracted from a basic block's terminating branch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct BranchInfo {
+    pub cond: Option<Expr>,
+    pub then_block: String,
+    pub else_block: Option<String>,
+}
+
+impl BranchInfo {
+    pub fn is_conditional(&self) -> bool {
+        self.cond.is_some()
+    }
+
+    pub fn then_target(&self) -> &str {
+        &self.then_block
+    }
+
+    pub fn else_target(&self) -> Option<&str> {
+        self.else_block.as_deref()
+    }
+}
+
+/// Pure HIR statement AST node.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
     Branch {
         cond: Option<Expr>,
@@ -12,7 +33,7 @@ pub enum Stmt {
     Ret {
         value: Option<Expr>,
     },
-    /// Structured if/else, produced by recovery passes and lowering.
+    /// Structured if/else, produced by recovery passes and structurization.
     If {
         cond: Expr,
         then_stmts: Vec<Stmt>,
@@ -25,13 +46,12 @@ pub enum Stmt {
         cases: Vec<(Lit, Vec<Stmt>)>,
         default: Vec<Stmt>,
     },
-    /// Represents a new SSA binding (not a mutable variable use)
-    /// Alternatively could be called "Assign", but that
-    /// technically implies mutability, which would be wrong
+    /// Represents a new SSA binding.
     Let {
         dest: Box<Expr>,
         src: Box<Expr>,
     },
+    /// Structured loop with an optional pre-condition (`while (cond)` or infinite `loop`).
     Loop {
         cond: Option<Expr>,
         body: Vec<Stmt>,
@@ -45,64 +65,32 @@ pub enum Stmt {
         name: String,
     },
 }
+
 impl Stmt {
-    pub fn build(op: InstructionValue) -> Result<Self, &'static str> {
-        match op.get_opcode() {
-            Add | FAdd | Sub | FSub | Mul | FMul | SDiv | UDiv | FDiv | SRem | URem | FRem
-            | Shl | LShr | AShr | And | Or | Xor => {
-                Err("Instruction opcode not supported by Stmt, use Expr instead!")
-            }
-            AddrSpaceCast => Err("Instruction opcode not implemented yet!"),
-            Alloca => Err("Instruction opcode not implemented yet!"),
-            AtomicCmpXchg => Err("Instruction opcode not implemented yet!"),
-            AtomicRMW => Err("Instruction opcode not implemented yet!"),
-            BitCast => Err("Instruction opcode not implemented yet!"),
-            Br => {
-                let mut ops = op.get_operands();
-                let op1 = ops
-                    .next()
-                    .and_then(|o| o)
-                    .ok_or("BinaryOp: missing operand 1")?;
-                if op1.is_block()
-                    && let blockval = op1.unwrap_block()
-                {
-                    Ok(Stmt::Branch {
-                        cond: None,
-                        then_block: blockval.get_name().to_string_lossy().to_string(),
-                        else_block: None,
-                    })
-                } else {
-                    let opval = value_to_expr(op1)?;
-                    let else_block = ops
-                        .next()
-                        .and_then(|o| o)
-                        .ok_or("Branch: missing false target")?
-                        .block()
-                        .ok_or("Branch: expected block for false target")?;
-                    let then_block = ops
-                        .next()
-                        .and_then(|o| o)
-                        .ok_or("Branch: missing true target")?
-                        .block()
-                        .ok_or("Branch: expected block for true target")?;
-                    Ok(Stmt::Branch {
-                        cond: Some(opval),
-                        then_block: then_block.get_name().to_string_lossy().to_string(),
-                        else_block: Some(else_block.get_name().to_string_lossy().to_string()),
-                    })
-                }
-            }
-            Return => {
-                let mut ops = op.get_operands();
-                let op1 = ops.next().and_then(|o| o);
-                if let Some(op1) = op1 {
-                    let value = value_to_expr(op1)?;
-                    Ok(Stmt::Ret { value: Some(value) })
-                } else {
-                    Ok(Stmt::Ret { value: None })
-                }
-            }
-            _ => Err("Instruction opcode not implemented yet!"),
+    /// Helper to construct a `Stmt::Ret` with a value.
+    pub fn ret(val: Expr) -> Self {
+        Stmt::Ret { value: Some(val) }
+    }
+
+    /// Helper to construct a void `Stmt::Ret`.
+    pub fn ret_void() -> Self {
+        Stmt::Ret { value: None }
+    }
+
+    /// Helper to construct a `Stmt::If`.
+    pub fn if_then_else(cond: Expr, then_stmts: Vec<Stmt>, else_stmts: Vec<Stmt>) -> Self {
+        Stmt::If {
+            cond,
+            then_stmts,
+            else_stmts,
+        }
+    }
+
+    /// Helper to construct a `Stmt::Let` binding.
+    pub fn let_binding(dest: Expr, src: Expr) -> Self {
+        Stmt::Let {
+            dest: Box::new(dest),
+            src: Box::new(src),
         }
     }
 }

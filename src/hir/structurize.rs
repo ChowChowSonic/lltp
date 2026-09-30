@@ -1,9 +1,10 @@
 use std::collections::BTreeSet;
 
-use crate::hir::cfg::Cfg;
-use crate::hir::expr::Expr;
-use crate::hir::flow::{DomInfo, NaturalLoop, dominators, natural_loops, reachable, reducible};
-use crate::hir::stmt::Stmt;
+pub use crate::hir::flow::reducible;
+use crate::hir::flow::{
+    DomInfo, NaturalLoop, dominators, natural_loops, reachable, reachable_from,
+};
+use crate::hir::{Cfg, Expr, Lit, Stmt, StructurizeError, Ty};
 
 pub struct LoopTree {
     pub loops: Vec<NaturalLoop>,
@@ -12,9 +13,8 @@ pub struct LoopTree {
     pub exit: Vec<Option<String>>,
 }
 
-/// Reduce a reducible CFG to structured statements. Irreducible graphs,
-/// multi-exit / multi-entry loops, and parallel acyclic joins are rejected
-/// here; Task 5 (node splitting + differential execution) lifts those.
+/// Context passed down during recursive region structuring to track the
+/// enclosing loop boundary and fallouts.
 #[derive(Clone, Debug)]
 struct LoopContext {
     header: String,
@@ -25,9 +25,9 @@ struct LoopContext {
 /// Reduce a reducible CFG to structured statements. Irreducible graphs,
 /// multi-exit / multi-entry loops, and parallel acyclic joins are rejected
 /// here; Task 5 (node splitting + differential execution) lifts those.
-pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, &'static str> {
+pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
     if !reducible(cfg) {
-        return Err("irreducible control flow (node splitting is Task 5)");
+        return Err(StructurizeError::IrreducibleControlFlow);
     }
     let dom = dominators(cfg);
     let reach = reachable(cfg);
@@ -40,12 +40,12 @@ fn structure_loop(
     dom: &DomInfo,
     tree: &LoopTree,
     loop_idx: usize,
-) -> Result<Stmt, &'static str> {
+) -> Result<Stmt, StructurizeError> {
     let l = &tree.loops[loop_idx];
     let header = &l.header;
     let exit_target = tree.exit[loop_idx].as_ref();
 
-    let (prefix, branch) = split_block(cfg, header)?;
+    let (prefix, branch) = cfg.split_block(header)?;
     let succs = &cfg.blocks[header].succ;
 
     let has_exit_edge = if let Some(exit_name) = exit_target {
@@ -79,27 +79,27 @@ fn structure_loop(
             .cloned()
             .collect();
         if body_succs.is_empty() {
-            return Err("loop header has no successors in loop body");
+            return Err(StructurizeError::AbnormalLoopExit {
+                block: header.clone(),
+                target: "empty loop body".to_string(),
+            });
         }
         let body_entry = &body_succs[0];
 
-        let cond = if branch
-            .as_ref()
-            .is_none_or(|(_, then_b, _)| then_b == body_entry)
-        {
+        let cond = if branch.as_ref().is_none_or(|b| b.then_block == *body_entry) {
             branch
                 .as_ref()
-                .and_then(|(c, _, _)| c.clone())
+                .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop)
         } else {
             let c = branch
                 .as_ref()
-                .and_then(|(c, _, _)| c.clone())
+                .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop);
             Expr::BinaryOp {
                 op: inkwell::values::InstructionOpcode::Xor,
                 arg1: Box::new(c),
-                arg2: Box::new(Expr::Literal(crate::hir::Lit::Bool(true))),
+                arg2: Box::new(Expr::Literal(Lit::Bool(true))),
             }
         };
 
@@ -137,7 +137,10 @@ fn structure_loop(
             .cloned()
             .collect();
         if body_succs.is_empty() {
-            return Err("loop header has no successors in loop body");
+            return Err(StructurizeError::AbnormalLoopExit {
+                block: header.clone(),
+                target: "empty loop body".to_string(),
+            });
         }
 
         if body_succs.len() == 1 && body_succs[0] != *header {
@@ -166,11 +169,11 @@ fn structure_loop(
         } else if body_succs.len() == 2 {
             let cond = branch
                 .as_ref()
-                .and_then(|(c, _, _)| c.clone())
+                .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop);
             let then_is_first = branch
                 .as_ref()
-                .is_none_or(|(_, then_b, _)| *then_b == body_succs[0]);
+                .is_none_or(|b| b.then_block == body_succs[0]);
             let (first_b, second_b) = if then_is_first {
                 (&body_succs[0], &body_succs[1])
             } else {
@@ -243,7 +246,7 @@ fn structure_region(
     entry: &str,
     frame_exits: &BTreeSet<String>,
     loop_ctx: Option<&LoopContext>,
-) -> Result<Vec<Stmt>, &'static str> {
+) -> Result<Vec<Stmt>, StructurizeError> {
     if nodes.is_empty() || frame_exits.contains(entry) || !nodes.contains(entry) {
         return Ok(Vec::new());
     }
@@ -294,11 +297,14 @@ fn structure_region(
             {
                 continue;
             }
-            return Err("abnormal exit into an enclosing region");
+            return Err(StructurizeError::AbnormalLoopExit {
+                block: entry.to_string(),
+                target: x.to_string(),
+            });
         }
     }
 
-    let (mut prefix, branch) = split_block(cfg, entry)?;
+    let (mut prefix, branch) = cfg.split_block(entry)?;
 
     if s_in.is_empty() {
         if s_out.is_empty() {
@@ -332,11 +338,9 @@ fn structure_region(
         {
             let cond = branch
                 .as_ref()
-                .and_then(|(c, _, _)| c.clone())
+                .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop);
-            let then_is_first = branch
-                .as_ref()
-                .is_none_or(|(_, then_b, _)| *then_b == s_out[0]);
+            let then_is_first = branch.as_ref().is_none_or(|b| b.then_block == s_out[0]);
             let (tb, eb) = if then_is_first {
                 (&s_out[0], &s_out[1])
             } else {
@@ -387,7 +391,7 @@ fn structure_region(
                     }
                 })
                 .count();
-            preds_in_nodes >= 2
+            preds_in_nodes > 1
         })
         .cloned()
         .collect();
@@ -404,7 +408,7 @@ fn structure_region(
             .iter()
             .all(|q| dom.dom[j.as_str()].contains(q.as_str()))
         {
-            return Err("parallel joins need node splitting");
+            return Err(StructurizeError::ParallelJoinsNeedNodeSplitting);
         }
         let tail = reachable_from(cfg, j, nodes);
         let preset: BTreeSet<String> = nodes.difference(&tail).cloned().collect();
@@ -438,13 +442,11 @@ fn structure_region(
         (2, 0) => {
             let cond = branch
                 .as_ref()
-                .and_then(|(c, _, _)| c.clone())
+                .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop);
             let a_then = reachable_from(cfg, &s_in[0], &rest);
             let a_else = reachable_from(cfg, &s_in[1], &rest);
-            let then_is_first = branch
-                .as_ref()
-                .is_none_or(|(_, then_block, _)| *then_block == s_in[0]);
+            let then_is_first = branch.as_ref().is_none_or(|b| b.then_block == s_in[0]);
             let region_then =
                 structure_region(cfg, dom, tree, &a_then, &s_in[0], frame_exits, loop_ctx)?;
             let mut region_else =
@@ -467,14 +469,14 @@ fn structure_region(
         (1, 1) => {
             let cond = branch
                 .as_ref()
-                .and_then(|(c, _, _)| c.clone())
+                .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop);
             let in_arm = reachable_from(cfg, &s_in[0], &rest);
             let exit_target = &s_out[0];
 
             let then_is_exit = branch
                 .as_ref()
-                .is_some_and(|(_, then_b, _)| then_b == exit_target);
+                .is_some_and(|b| b.then_block == *exit_target);
 
             if let Some(ctx) = loop_ctx {
                 if ctx.exit.as_ref() == Some(exit_target) {
@@ -524,53 +526,10 @@ fn structure_region(
             });
             Ok(prefix)
         }
-        _ => Err("unsupported fan-out (node splitting is Task 5)"),
-    }
-}
-
-/// The set of blocks reachable from `src` following successors that stay
-/// inside `within`. Includes `src` itself.
-fn reachable_from(cfg: &Cfg, src: &str, within: &BTreeSet<String>) -> BTreeSet<String> {
-    let mut seen = BTreeSet::new();
-    let mut stack = vec![src.to_string()];
-    while let Some(n) = stack.pop() {
-        if !seen.insert(n.clone()) {
-            continue;
-        }
-        for s in &cfg.blocks[&n].succ {
-            if within.contains(s) {
-                stack.push(s.clone());
-            }
-        }
-    }
-    seen
-}
-
-/// A block's stripped `Branch` (cond, then target, optional else target).
-type BranchInfo = (Option<Expr>, String, Option<String>);
-
-/// The block's straight-line statements (all of it except the trailing
-/// `Branch`) plus the Branch itself, so callers can re-emit its cond and arm
-/// order as a structured `If`.
-#[allow(clippy::type_complexity)]
-fn split_block(cfg: &Cfg, name: &str) -> Result<(Vec<Stmt>, Option<BranchInfo>), &'static str> {
-    let mut body = cfg
-        .blocks
-        .get(name)
-        .ok_or("structurizer: unknown block")?
-        .stmts
-        .clone();
-    match body.last() {
-        Some(Stmt::Branch {
-            cond,
-            then_block,
-            else_block,
-        }) => {
-            let br = (cond.clone(), then_block.clone(), else_block.clone());
-            body.pop();
-            Ok((body, Some(br)))
-        }
-        _ => Ok((body, None)),
+        _ => Err(StructurizeError::UnsupportedFanOut {
+            block: entry.to_string(),
+            successors: s_in.len(),
+        }),
     }
 }
 
@@ -578,8 +537,15 @@ fn split_block(cfg: &Cfg, name: &str) -> Result<(Vec<Stmt>, Option<BranchInfo>),
 /// materialize bare (statement-free) arm blocks in the rebuilt CFG.
 fn placeholder() -> Stmt {
     Stmt::Let {
-        dest: Box::new(Expr::Nop),
-        src: Box::new(Expr::Nop),
+        dest: Box::new(Expr::Var {
+            name: "_unused".into(),
+            dtype: Ty::Void,
+        }),
+        src: Box::new(Expr::Literal(Lit::Int {
+            value: 0,
+            bits: 32,
+            signed: true,
+        })),
     }
 }
 
@@ -588,7 +554,11 @@ impl LoopTree {
         self.loops.iter().position(|l| l.header == header)
     }
 
-    fn build(cfg: &Cfg, dom: &DomInfo, reach: &BTreeSet<String>) -> Result<LoopTree, &'static str> {
+    fn build(
+        cfg: &Cfg,
+        dom: &DomInfo,
+        reach: &BTreeSet<String>,
+    ) -> Result<LoopTree, StructurizeError> {
         let mut loops = natural_loops(cfg, dom);
         loops.sort_by(|a, b| (a.body.len(), &a.header).cmp(&(b.body.len(), &b.header)));
         let parent: Vec<Option<usize>> = (0..loops.len())
@@ -603,9 +573,6 @@ impl LoopTree {
             })
             .collect();
         let mut exit = Vec::with_capacity(loops.len());
-        // `ancestors[i]`: every loop whose body strictly contains loop i. An
-        // edge from a body node of i to an ancestor's *header* is that
-        // ancestor's back edge (a "continue outer"), not an exit of i.
         let ancestors: Vec<Vec<usize>> = (0..loops.len())
             .map(|i| {
                 (0..loops.len())
@@ -623,7 +590,10 @@ impl LoopTree {
                     continue;
                 }
                 if cfg.blocks[x].pred.iter().any(|p| !l.body.contains(p)) {
-                    return Err("multi-entry loop");
+                    return Err(StructurizeError::MultiExitLoop {
+                        header: l.header.clone(),
+                        exits: vec![],
+                    });
                 }
             }
             let mut targets: BTreeSet<String> = BTreeSet::new();
@@ -640,18 +610,23 @@ impl LoopTree {
             exit.push(match targets.len() {
                 0 => None,
                 1 => targets.into_iter().next(),
-                _ => return Err("multi-exit loop"),
+                _ => {
+                    return Err(StructurizeError::MultiExitLoop {
+                        header: l.header.clone(),
+                        exits: targets.into_iter().collect(),
+                    });
+                }
             });
         }
-        // A nested loop's exit must land inside its parent's body. Exiting to
-        // the parent's own exit (skip past it) is unrepresentable with
-        // innermost-bound Break.
         for i in 0..loops.len() {
             let Some(e) = &exit[i] else { continue };
             if let Some(p) = parent[i]
                 && !loops[p].body.contains(e)
             {
-                return Err("abnormal exit into an enclosing region");
+                return Err(StructurizeError::NestedLoopEscapedParent {
+                    header: loops[i].header.clone(),
+                    exit: e.clone(),
+                });
             }
         }
 
@@ -671,6 +646,7 @@ mod test {
 
     use crate::hir::{
         cfg::Cfg,
+        error::StructurizeError,
         flow::{dominators, reachable},
         structurize::{LoopTree, structurize},
         verify::{are_equivalent, structured_to_cfg},
@@ -692,12 +668,8 @@ mod test {
             pred.entry(n.clone()).or_default();
         }
         for (a, b) in edges {
-            succ.entry((*a).to_string())
-                .or_default()
-                .push((*b).to_string());
-            pred.entry((*b).to_string())
-                .or_default()
-                .push((*a).to_string());
+            succ.get_mut(*a).unwrap().push((*b).to_string());
+            pred.get_mut(*b).unwrap().push((*a).to_string());
         }
         let exits: Vec<String> = nodes
             .iter()
@@ -724,10 +696,10 @@ mod test {
                 ("C", "B"),
             ],
         );
-        assert!(matches!(
+        assert_eq!(
             structurize(&cfg),
-            Err(e) if e.contains("irreducible")
-        ));
+            Err(StructurizeError::IrreducibleControlFlow)
+        );
     }
 
     #[test]
@@ -744,7 +716,7 @@ mod test {
         );
         assert!(matches!(
             LoopTree::build(&cfg, &dominators(&cfg), &reachable(&cfg)),
-            Err(e) if e.contains("multi-exit")
+            Err(StructurizeError::MultiExitLoop { .. })
         ));
     }
 
@@ -765,7 +737,6 @@ mod test {
             ],
         );
         let t = tree(&cfg);
-        // sorted by (body.len(), header): {ih, C} is index 0, the outer is 1
         assert_eq!(t.roots, vec![1]);
         assert_eq!(t.parent, vec![Some(1), None]);
         assert_eq!(t.exit, vec![Some("IEX".into()), Some("OEX".into())]);
@@ -819,8 +790,6 @@ mod test {
 
     #[test]
     fn nested_loop_jumping_out_of_its_parent_is_rejected() {
-        // inner loop (ih/C) exits to e, landing outside the outer loop's body
-        // and skipping past it — unrepresentable with innermost Break.
         let cfg = cfg_from(
             "entry",
             &[
@@ -836,7 +805,7 @@ mod test {
         );
         assert!(matches!(
             LoopTree::build(&cfg, &dominators(&cfg), &reachable(&cfg)),
-            Err(e) if e.contains("abnormal exit")
+            Err(StructurizeError::NestedLoopEscapedParent { .. })
         ));
     }
 
@@ -939,21 +908,19 @@ mod test {
             "entry",
             &[
                 ("entry", "h"),
-                ("h", "b"),
-                ("h", "c"),
-                ("b", "h"),
-                ("c", "h"),
+                ("h", "c1"),
+                ("h", "c2"),
+                ("c1", "h"),
+                ("c2", "h"),
             ],
         );
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
-    // --- acyclic round-trips (Task 3 fixtures) -----------------------------
-
     #[test]
     fn straight_line_round_trips() {
-        let cfg = cfg_from("e", &[("e", "a"), ("a", "b"), ("b", "c")]);
+        let cfg = cfg_from("a", &[("a", "b"), ("b", "c")]);
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
@@ -961,8 +928,14 @@ mod test {
     #[test]
     fn diamond_join_round_trips() {
         let cfg = cfg_from(
-            "e",
-            &[("e", "a"), ("e", "b"), ("a", "j"), ("b", "j"), ("j", "t")],
+            "entry",
+            &[
+                ("entry", "l"),
+                ("entry", "r"),
+                ("l", "join"),
+                ("r", "join"),
+                ("join", "exit"),
+            ],
         );
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
@@ -977,7 +950,6 @@ mod test {
 
     #[test]
     fn if_without_else_round_trips() {
-        // e branches to the body a and straight to the exit j; a falls into j.
         let cfg = cfg_from("e", &[("e", "a"), ("e", "j"), ("a", "j")]);
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
@@ -1005,7 +977,6 @@ mod test {
 
     #[test]
     fn parallel_joins_need_node_splitting() {
-        // two joins in different branches, neither dominating the other
         let cfg = cfg_from(
             "e",
             &[
@@ -1021,9 +992,9 @@ mod test {
                 ("j2", "y"),
             ],
         );
-        assert!(matches!(
+        assert_eq!(
             structurize(&cfg),
-            Err(e) if e.contains("parallel joins")
-        ));
+            Err(StructurizeError::ParallelJoinsNeedNodeSplitting)
+        );
     }
 }

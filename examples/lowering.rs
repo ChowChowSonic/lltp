@@ -10,8 +10,7 @@ use std::fmt::{self, Formatter};
 use inkwell::values::InstructionOpcode;
 
 use lltp::backend::{ExprEmitter, Language, StmtEmitter};
-use lltp::hir::cfg::Cfg;
-use lltp::hir::{Function, Lit, expr::Expr, stmt::Stmt, ty::Ty};
+use lltp::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
 use lltp::passes::SwitchToIfElse;
 
 /// A toy C-like backend that can print the small HIR subset this example

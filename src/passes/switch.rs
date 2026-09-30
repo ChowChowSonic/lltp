@@ -2,7 +2,7 @@ use inkwell::values::InstructionOpcode::ICmp;
 use tracing::info;
 
 use crate::backend::Language;
-use crate::hir::{Function, Lit, expr::Expr, stmt::Stmt};
+use crate::hir::{Expr, Function, Lit, Stmt};
 use crate::passes::{LowerError, Lowering};
 
 /// Library-owned structural pass: lowers `Stmt::Switch` into a nested
@@ -71,8 +71,7 @@ fn eq(value: Expr, case: Lit) -> Expr {
 #[cfg(test)]
 mod tests {
     use crate::backend::{ExprEmitter, Language, StmtEmitter};
-    use crate::hir::cfg::Cfg;
-    use crate::hir::{Function, Lit, expr::Expr, stmt::Stmt, ty::Ty};
+    use crate::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
     use crate::passes::{Lowering, SwitchToIfElse};
 
     struct TestLang {

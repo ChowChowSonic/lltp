@@ -3,7 +3,7 @@ use inkwell::{
     values::BasicValueEnum,
 };
 use tracing::warn;
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Void,
     Bool,

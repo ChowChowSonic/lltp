@@ -1,4 +1,4 @@
-use crate::hir::{cfg::Cfg, flow::reachable, stmt::Stmt};
+use crate::hir::{Cfg, Stmt};
 use std::collections::{BTreeSet, HashMap};
 
 struct ReBuilder {
@@ -198,113 +198,6 @@ pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
     Cfg::new(entry, b.succ, b.pred, exits)
 }
 
-fn keep_reachable(cfg: &Cfg) -> Cfg {
-    let reach = reachable(cfg);
-    let succ: HashMap<String, Vec<String>> = reach
-        .iter()
-        .map(|n| {
-            (
-                n.clone(),
-                cfg.blocks[n]
-                    .succ
-                    .iter()
-                    .filter(|x| reach.contains(*x))
-                    .cloned()
-                    .collect(),
-            )
-        })
-        .collect();
-    let pred: HashMap<String, Vec<String>> = reach
-        .iter()
-        .map(|n| {
-            (
-                n.clone(),
-                cfg.blocks[n]
-                    .pred
-                    .iter()
-                    .filter(|x| reach.contains(*x))
-                    .cloned()
-                    .collect(),
-            )
-        })
-        .collect();
-    let exits: Vec<String> = succ
-        .iter()
-        .filter(|(_, v)| v.is_empty())
-        .map(|(k, _)| k.clone())
-        .collect();
-    Cfg::new(cfg.entry.clone(), succ, pred, exits)
-}
-
-pub fn collapse_chains(cfg: &Cfg) -> Cfg {
-    let mut succ: HashMap<String, Vec<String>> = cfg
-        .blocks
-        .keys()
-        .map(|n| (n.clone(), cfg.blocks[n].succ.clone()))
-        .collect();
-    let mut pred: HashMap<String, Vec<String>> = cfg
-        .blocks
-        .keys()
-        .map(|n| (n.clone(), cfg.blocks[n].pred.clone()))
-        .collect();
-    loop {
-        let mut merged = false;
-        for n in succ.keys().cloned().collect::<Vec<_>>() {
-            if n == cfg.entry {
-                continue;
-            }
-            // Fuse n into its single predecessor p, but only when p falls
-            // straight through into n (p's only successor is n). Branch arms
-            // (p has several successors) must survive as blocks; chain tails
-            // (n has no successors) are fine to fuse.
-            let Some(ps) = pred.get(&n) else {
-                continue;
-            };
-            if ps.len() != 1 {
-                continue;
-            }
-            let p = ps[0].clone();
-            if p == n {
-                continue;
-            }
-            if succ
-                .get(&p)
-                .map(|s| s.len() != 1 || s[0] != n)
-                .unwrap_or(true)
-            {
-                continue;
-            }
-
-            let out: Vec<String> = succ.remove(&n).unwrap_or_default();
-            pred.remove(&n);
-            for s in &out {
-                if s != &p {
-                    let sl = succ.entry(p.clone()).or_default();
-                    if !sl.contains(s) {
-                        sl.push(s.clone());
-                    }
-                    let ps = pred.entry(s.clone()).or_default();
-                    ps.retain(|x| x != &n);
-                    if !ps.contains(&p) {
-                        ps.push(p.clone());
-                    }
-                } // s's pred: n → p
-            }
-            succ.get_mut(&p).unwrap().retain(|x| x != &n); // drop the p→n edge
-            merged = true;
-        }
-        if !merged {
-            break;
-        }
-    }
-    let exits: Vec<String> = succ
-        .iter()
-        .filter(|(_, v)| v.is_empty())
-        .map(|(k, _)| k.clone())
-        .collect();
-    Cfg::new(cfg.entry.clone(), succ, pred, exits)
-}
-
 pub fn color_fingerprint(cfg: &Cfg) -> String {
     let names: Vec<String> = cfg.blocks.keys().cloned().collect();
     let mut color: HashMap<String, usize> = names.iter().map(|n| (n.clone(), 0)).collect();
@@ -338,10 +231,10 @@ pub fn color_fingerprint(cfg: &Cfg) -> String {
     v.sort();
     format!("E{}|{:?}", color[&cfg.entry], v)
 }
-
+use crate::hir::flow::keep_reachable;
 pub fn are_equivalent(a: &Cfg, b: &Cfg) -> bool {
-    let a = collapse_chains(&keep_reachable(a));
-    let b = collapse_chains(&keep_reachable(b));
+    let a = keep_reachable(&a.collapse_chains());
+    let b = keep_reachable(&b.collapse_chains());
     a.blocks.len() == b.blocks.len() && color_fingerprint(&a) == color_fingerprint(&b)
 }
 
@@ -353,10 +246,7 @@ pub fn are_equivalent(a: &Cfg, b: &Cfg) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{are_equivalent, structured_to_cfg};
-    use crate::hir::Lit;
-    use crate::hir::cfg::Cfg;
-    use crate::hir::expr::Expr;
-    use crate::hir::stmt::Stmt;
+    use crate::hir::{Cfg, Expr, Lit, Stmt};
     use std::collections::{BTreeSet, HashMap};
 
     fn cond() -> Expr {

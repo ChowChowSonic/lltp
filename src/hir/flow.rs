@@ -1,9 +1,64 @@
-use crate::hir::cfg::Cfg;
+use crate::hir::Cfg;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 pub struct DomInfo {
     pub dom: HashMap<String, BTreeSet<String>>, // n -> dominators(n), incl. n itself
     pub idom: HashMap<String, String>,          // n -> immediate dominator
 }
+pub fn keep_reachable(cfg: &Cfg) -> Cfg {
+    let reach = reachable(cfg);
+    let succ: HashMap<String, Vec<String>> = reach
+        .iter()
+        .map(|n| {
+            (
+                n.clone(),
+                cfg.blocks[n]
+                    .succ
+                    .iter()
+                    .filter(|x| reach.contains(*x))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect();
+    let pred: HashMap<String, Vec<String>> = reach
+        .iter()
+        .map(|n| {
+            (
+                n.clone(),
+                cfg.blocks[n]
+                    .pred
+                    .iter()
+                    .filter(|x| reach.contains(*x))
+                    .cloned()
+                    .collect(),
+            )
+        })
+        .collect();
+    let exits: Vec<String> = succ
+        .iter()
+        .filter(|(_, v)| v.is_empty())
+        .map(|(k, _)| k.clone())
+        .collect();
+    Cfg::new(cfg.entry.clone(), succ, pred, exits)
+}
+/// The set of blocks reachable from `src` following successors that stay
+/// inside `within`. Includes `src` itself.
+pub fn reachable_from(cfg: &Cfg, src: &str, within: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut seen = BTreeSet::new();
+    let mut stack = vec![src.to_string()];
+    while let Some(n) = stack.pop() {
+        if !seen.insert(n.clone()) {
+            continue;
+        }
+        for s in &cfg.blocks[&n].succ {
+            if within.contains(s) {
+                stack.push(s.clone());
+            }
+        }
+    }
+    seen
+}
+
 ///dom(n) = {n} ∪ ⋂ { dom(p) : p ∈ preds(n) }, iterate until fixpoint
 pub fn dominators(cfg: &Cfg) -> DomInfo {
     let reach = reachable(cfg);
@@ -204,6 +259,7 @@ pub fn natural_loops(cfg: &Cfg, dom: &DomInfo) -> Vec<NaturalLoop> {
         })
         .collect()
 }
+
 pub fn reducible(cfg: &Cfg) -> bool {
     let reach = reachable(cfg);
     let mut succ: HashMap<String, BTreeSet<String>> =
@@ -257,7 +313,6 @@ pub fn reducible(cfg: &Cfg) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::cfg::Cfg;
     use std::collections::{BTreeSet, HashMap};
 
     /// Build a `Cfg` from an entry name and an edge list. Every named node

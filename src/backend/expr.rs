@@ -1,6 +1,6 @@
 use std::fmt::{self, Formatter};
 
-use crate::hir::expr::Expr;
+use crate::hir::Expr;
 
 pub trait ExprEmitter {
     /// Default: this backend cannot express the node. Panics on reach — a
