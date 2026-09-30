@@ -123,14 +123,16 @@ impl ReBuilder {
                     body, cond: lcond, ..
                 } => {
                     let Some(c) = cur else { continue };
+                    let header = self.fresh();
                     let join = self.fresh(); // false-exit: cond fails → after loop
-                    let (be, bx) = self.region(body, Some(&join), Some(&c), labels);
-                    self.edge(&c, &be); // cond true → body
+                    let (be, bx) = self.region(body, Some(&join), Some(&header), labels);
+                    self.edge(&c, &header);
+                    self.edge(&header, &be); // cond true → body
                     if lcond.is_some() {
-                        self.edge(&c, &join); // cond false → after
+                        self.edge(&header, &join); // cond false → after
                     }
                     if let Some(x) = bx {
-                        self.edge(&x, &c);
+                        self.edge(&x, &header);
                     } // body falls out → header (back edge)
                     cur = Some(join);
                 }
@@ -409,7 +411,29 @@ mod tests {
         // both arms are exits
         assert_eq!(cfg.exits.len(), 2);
     }
-
+    /// A loop body that falls out must return to the header via the bx edge;
+    /// only the cond-false edge may leave the loop.
+    #[test]
+    fn loop_body_fallout_returns_to_the_header() {
+        let body = [Stmt::Loop {
+            cond: Some(cond()),
+            body: vec![Stmt::Let {
+                dest: Box::new(Expr::Literal(Lit::Bool(false))),
+                src: Box::new(Expr::Literal(Lit::Bool(true))),
+            }],
+        }];
+        let cfg = structured_to_cfg(&body);
+        // b0 entry, b1 header, b2 join, b3 body (falls out)
+        assert_eq!(cfg.blocks.len(), 4);
+        assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b1".to_string()]);
+        assert_eq!(
+            cfg.blocks["b1"].succ,
+            vec!["b3".to_string(), "b2".to_string()]
+        );
+        assert_eq!(cfg.blocks["b3"].succ, vec!["b1".to_string()]); // back to header
+        assert!(cfg.blocks["b2"].succ.is_empty());
+        assert_eq!(cfg.exits.len(), 1);
+    }
     /// `while c { break } ret`: header branches to body and exit, break jumps
     /// to the exit, the ret lives in the exit block.
     #[test]
@@ -422,14 +446,15 @@ mod tests {
             Stmt::Ret { value: None },
         ];
         let cfg = structured_to_cfg(&body);
-        // b0 header, b1 join (holds the ret), b2 body entry (holds the break)
-        assert_eq!(cfg.blocks.len(), 3);
+        // b0 entry, b1 header, b2 join (holds the ret), b3 body entry (break)
+        assert_eq!(cfg.blocks.len(), 4);
+        assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b1".to_string()]);
         assert_eq!(
-            cfg.blocks[&cfg.entry].succ,
-            vec!["b2".to_string(), "b1".to_string()]
+            cfg.blocks["b1"].succ,
+            vec!["b3".to_string(), "b2".to_string()]
         );
-        assert_eq!(cfg.blocks["b2"].succ, vec!["b1".to_string()]);
-        assert!(cfg.blocks["b1"].succ.is_empty());
+        assert_eq!(cfg.blocks["b3"].succ, vec!["b2".to_string()]);
+        assert!(cfg.blocks["b2"].succ.is_empty());
         assert_eq!(cfg.exits.len(), 1);
     }
 
@@ -449,11 +474,23 @@ mod tests {
             ],
         }];
         let cfg = structured_to_cfg(&body);
-        // b0 header, b1 join, b2 body entry, b3 then arm (continue), b4 after the if (ret)
-        assert_eq!(cfg.blocks.len(), 5);
-        assert_eq!(cfg.blocks["b3"].succ, vec!["b0".to_string()]);
+        // b0 entry, b1 header, b2 join, b3 body entry, b4 then arm (continue),
+        // b5 after the if (ret)
+        assert_eq!(cfg.blocks.len(), 6);
+        // the continue must target the header, re-evaluating the condition
+        assert_eq!(cfg.blocks["b4"].succ, vec!["b1".to_string()]);
+        // the if dispatches from the body entry to the then arm and false path
+        assert_eq!(
+            cfg.blocks["b3"].succ,
+            vec!["b4".to_string(), "b5".to_string()]
+        );
+        // the entry has a single unconditional edge into the header
+        assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b1".to_string()]);
         // header branches to body and exit
-        assert_eq!(cfg.blocks[&cfg.entry].succ.len(), 2);
+        assert_eq!(
+            cfg.blocks["b1"].succ,
+            vec!["b3".to_string(), "b2".to_string()]
+        );
         assert_eq!(cfg.exits.len(), 2);
     }
 
@@ -466,11 +503,15 @@ mod tests {
             body: vec![Stmt::Break],
         }];
         let cfg = structured_to_cfg(&body);
-        // b0 header, b1 join, b2 body entry (break)
-        assert_eq!(cfg.blocks.len(), 3);
-        assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b2".to_string()]);
-        assert_eq!(cfg.blocks["b2"].succ, vec!["b1".to_string()]);
-        assert!(cfg.blocks["b1"].succ.is_empty());
+        // b0 entry, b1 header, b2 join, b3 body entry (break)
+        assert_eq!(cfg.blocks.len(), 4);
+        assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b1".to_string()]);
+        assert_eq!(cfg.blocks["b1"].succ, vec!["b3".to_string()]);
+        assert_eq!(cfg.blocks["b3"].succ, vec!["b2".to_string()]);
+        // no false edge from the header means the join is only reachable
+        // through the break
+        assert_eq!(cfg.blocks["b2"].pred, vec!["b3".to_string()]);
+        assert_eq!(cfg.exits.len(), 1);
     }
 
     /// Same shapes with different block names must compare equal; different
