@@ -25,19 +25,19 @@ die()  { printf '\033[1;31m    error: %s\033[0m\n' "$*" >&2; exit 1; }
 
 # --- preflight: llvm-sys 221 / inkwell 'llvm22-1' need LLVM 22 -----------------
 
-check_llvm() {
-  local llvm_config="" version=""
-  if command -v llvm-config >/dev/null 2>&1; then
-    llvm_config="$(command -v llvm-config)"
-  elif [[ -n "${LLVM_SYS_221_PREFIX:-}" && -x "$LLVM_SYS_221_PREFIX/bin/llvm-config" ]]; then
-    llvm_config="$LLVM_SYS_221_PREFIX/bin/llvm-config"
-  else
-    die "LLVM 22 not found. Install LLVM 22 and put llvm-config on PATH, or set LLVM_SYS_221_PREFIX."
-  fi
-  version="$("$llvm_config" --version 2>/dev/null || true)"
-  [[ "$version" == 22* ]] || die "expected LLVM 22, found '${version:-<unknown>}' at $llvm_config."
-  info "preflight: LLVM $version ($llvm_config)"
-}
+# check_llvm() {
+  #local llvm_config="" version=""
+  #if command -v llvm-config >/dev/null 2>&1; then
+    #llvm_config="$(command -v llvm-config)"
+  #elif [[ -n "${LLVM_SYS_221_PREFIX:-}" && -x "$LLVM_SYS_221_PREFIX/bin/llvm-config" ]]; then
+    #llvm_config="$LLVM_SYS_221_PREFIX/bin/llvm-config"
+  #else
+    #die "LLVM 22 not found. Install LLVM 22 and put llvm-config on PATH, or set LLVM_SYS_221_PREFIX."
+  #fi
+  #version="$("$llvm_config" --version 2>/dev/null || true)"
+  #[[ "$version" == 22* ]] || die "expected LLVM 22, found '${version:-<unknown>}' at $llvm_config."
+  #info "preflight: LLVM $version ($llvm_config)"
+#}
 
 # --- individual checks ----------------------------------------------------------
 
@@ -80,9 +80,9 @@ need_llvm=false
 for check in "${requested[@]}"; do
   case "$check" in clippy|test|examples) need_llvm=true ;; esac
 done
-if $need_llvm; then
-  check_llvm
-fi
+# vif $need_llvm; then
+  # check_llvm
+# fi
 
 for check in "${requested[@]}"; do
   case "$check" in

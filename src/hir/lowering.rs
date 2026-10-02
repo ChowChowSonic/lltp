@@ -47,7 +47,7 @@ pub fn build_graph(func: &FunctionValue) -> Result<Cfg, LowerError> {
             let has_succ = successors.get(&name).is_some_and(|s| !s.is_empty());
             let has_pred = preds.get(&name).is_some_and(|p| !p.is_empty());
             let is_first = *bb == first;
-            if (!has_succ && has_pred) || (!has_succ && !has_pred && is_first) {
+            if (is_first || has_pred) && !has_succ {
                 Some(name)
             } else {
                 None

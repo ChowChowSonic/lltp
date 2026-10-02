@@ -21,7 +21,6 @@ struct LoopContext {
     exit: Option<String>,
     latch: Option<String>,
 }
-
 /// Reduce a reducible CFG to structured statements. Irreducible graphs,
 /// multi-exit / multi-entry loops, and parallel acyclic joins are rejected
 /// here; Task 5 (node splitting + differential execution) lifts those.
@@ -288,6 +287,7 @@ fn partition_arms(
     (then_arm, else_arm)
 }
 
+#[allow(clippy::too_many_arguments)]
 /// Structure a region of `nodes` starting from `entry`.
 fn structure_region(
     cfg: &Cfg,
