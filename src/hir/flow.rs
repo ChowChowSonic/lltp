@@ -1,5 +1,68 @@
 use crate::hir::Cfg;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
+pub struct PostDomInfo {
+    pub pdom: HashMap<String, BTreeSet<String>>,
+    pub ipdom: HashMap<String, String>, //immediate post-dominator
+}
+
+const VIRTUAL_SINK_STR: &str = "xXVIRTUAL_SINKXx";
+impl From<&Cfg> for PostDomInfo {
+    fn from(cfg: &Cfg) -> Self {
+        let mut rev_succ: HashMap<String, Vec<String>> = HashMap::new();
+        let mut rev_pred: HashMap<String, Vec<String>> = HashMap::new();
+        for (name, block) in &cfg.blocks {
+            rev_succ.insert(name.clone(), block.pred.clone());
+            rev_pred.insert(name.clone(), block.succ.clone());
+        }
+        rev_succ.insert(VIRTUAL_SINK_STR.to_string(), cfg.exits.clone());
+        rev_pred.insert(VIRTUAL_SINK_STR.to_string(), vec![]);
+
+        for exit in &cfg.exits {
+            if let Some(preds) = rev_pred.get_mut(exit) {
+                preds.push(VIRTUAL_SINK_STR.to_string());
+            }
+        }
+        let rev_cfg = Cfg::new(
+            VIRTUAL_SINK_STR.to_string(),
+            rev_succ,
+            rev_pred,
+            vec![cfg.entry.clone()],
+        );
+        let rev_dom = dominators(&rev_cfg);
+        // The virtual sink stays visible: the last block before the exit
+        // reports ipdom == sink and its pdom set contains the sink. Only
+        // the sink's own entries are excluded.
+        let mut ipdom = HashMap::new();
+        for (node, parent) in rev_dom.idom {
+            if node != VIRTUAL_SINK_STR {
+                ipdom.insert(node, parent);
+            }
+        }
+        let mut pdom = HashMap::new();
+        for (node, set) in rev_dom.dom {
+            if node != VIRTUAL_SINK_STR {
+                pdom.insert(node, set);
+            }
+        }
+        PostDomInfo { pdom, ipdom }
+    }
+}
+impl From<DomInfo> for PostDomInfo {
+    fn from(f: DomInfo) -> Self {
+        Self {
+            pdom: f
+                .dom
+                .into_iter()
+                .filter(|(x, _)| *x != VIRTUAL_SINK_STR)
+                .collect(),
+            ipdom: f
+                .idom
+                .into_iter()
+                .filter(|x| x.0 != VIRTUAL_SINK_STR)
+                .collect(),
+        }
+    }
+}
 pub struct DomInfo {
     pub dom: HashMap<String, BTreeSet<String>>, // n -> dominators(n), incl. n itself
     pub idom: HashMap<String, String>,          // n -> immediate dominator
@@ -40,6 +103,14 @@ pub fn keep_reachable(cfg: &Cfg) -> Cfg {
         .map(|(k, _)| k.clone())
         .collect();
     Cfg::new(cfg.entry.clone(), succ, pred, exits)
+}
+impl From<PostDomInfo> for DomInfo {
+    fn from(f: PostDomInfo) -> Self {
+        Self {
+            dom: f.pdom,
+            idom: f.ipdom,
+        }
+    }
 }
 /// The set of blocks reachable from `src` following successors that stay
 /// inside `within`. Includes `src` itself.
@@ -344,6 +415,71 @@ mod tests {
             .cloned()
             .collect();
         Cfg::new(entry.to_string(), succ, pred, exits)
+    }
+
+    #[test]
+    fn test_pdom_reverse() {
+        // Diamond: entry forks to a and b, both re-joining at the sole exit
+        // `join`. join lies on every exit path, so it post-dominates the entry
+        // and each branch, yet a and b never post-dominate one another.
+        {
+            let cfg = cfg_from(
+                "entry",
+                &[("entry", "a"), ("entry", "b"), ("a", "join"), ("b", "join")],
+            );
+            let info = PostDomInfo::from(&cfg);
+            for n in ["entry", "a", "b"] {
+                assert!(info.pdom[n].contains("join"));
+            }
+            assert!(!info.pdom[&"a".to_string()].contains("b"));
+            assert!(!info.pdom[&"b".to_string()].contains("a"));
+            for n in ["entry", "a", "b"] {
+                assert_eq!(info.ipdom.get(n), Some(&"join".to_string()));
+            }
+            // join is the sole exit, so it post-dominates itself and the sink only.
+            assert_eq!(
+                *info.pdom.get("join").unwrap(),
+                BTreeSet::from(["join".to_string(), "xXVIRTUAL_SINKXx".to_string()])
+            );
+            assert_eq!(
+                info.ipdom.get("join"),
+                Some(&"xXVIRTUAL_SINKXx".to_string())
+            );
+        }
+
+        // Multi-branch: a three-way switch (entry -> a|b|c) that all converge on
+        // `mid` then fall through to `done`. Both mid and done post-dominate all
+        // branches and the entry; every branch's ipdom is mid, and the ipdom
+        // chain is mid -> done -> virtual sink.
+        {
+            let cfg = cfg_from(
+                "entry",
+                &[
+                    ("entry", "a"),
+                    ("entry", "b"),
+                    ("entry", "c"),
+                    ("a", "mid"),
+                    ("b", "mid"),
+                    ("c", "mid"),
+                    ("mid", "done"),
+                ],
+            );
+            let info = PostDomInfo::from(&cfg);
+            for n in ["entry", "a", "b", "c"] {
+                assert!(info.pdom[n].contains("mid"));
+                assert!(info.pdom[n].contains("done"));
+            }
+            for n in ["entry", "a", "b", "c"] {
+                assert_eq!(info.ipdom.get(n), Some(&"mid".to_string()));
+            }
+            assert_eq!(info.ipdom.get("mid"), Some(&"done".to_string()));
+            assert!(!info.pdom[&"a".to_string()].contains("b"));
+            assert!(!info.pdom[&"b".to_string()].contains("c"));
+            assert_eq!(
+                info.ipdom.get("done"),
+                Some(&"xXVIRTUAL_SINKXx".to_string())
+            );
+        }
     }
 
     #[test]

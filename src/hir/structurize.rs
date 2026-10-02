@@ -1,8 +1,8 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
-    DomInfo, NaturalLoop, dominators, natural_loops, reachable, reachable_from,
+    DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, reachable, reachable_from,
 };
 use crate::hir::{Cfg, Expr, Lit, Stmt, StructurizeError, Ty};
 
@@ -30,14 +30,25 @@ pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
         return Err(StructurizeError::IrreducibleControlFlow);
     }
     let dom = dominators(cfg);
+    let pdom = PostDomInfo::from(cfg);
     let reach = reachable(cfg);
     let tree = LoopTree::build(cfg, &dom, &reach)?;
-    structure_region(cfg, &dom, &tree, &reach, &cfg.entry, &BTreeSet::new(), None)
+    structure_region(
+        cfg,
+        &dom,
+        &pdom,
+        &tree,
+        &reach,
+        &cfg.entry,
+        &BTreeSet::new(),
+        None,
+    )
 }
 
 fn structure_loop(
     cfg: &Cfg,
     dom: &DomInfo,
+    pdom: &PostDomInfo,
     tree: &LoopTree,
     loop_idx: usize,
 ) -> Result<Stmt, StructurizeError> {
@@ -115,6 +126,7 @@ fn structure_loop(
             body_stmts.extend(structure_region(
                 cfg,
                 dom,
+                pdom,
                 tree,
                 &body_nodes,
                 body_entry,
@@ -152,6 +164,7 @@ fn structure_loop(
             body_stmts.extend(structure_region(
                 cfg,
                 dom,
+                pdom,
                 tree,
                 &body_nodes,
                 body_entry,
@@ -189,6 +202,7 @@ fn structure_loop(
             let mut region_then = structure_region(
                 cfg,
                 dom,
+                pdom,
                 tree,
                 &a_then,
                 first_b,
@@ -198,6 +212,7 @@ fn structure_loop(
             let mut region_else = structure_region(
                 cfg,
                 dom,
+                pdom,
                 tree,
                 &a_else,
                 second_b,
@@ -237,10 +252,47 @@ fn structure_loop(
     }
 }
 
+fn partition_arm(
+    cfg: &Cfg,
+    branch: &str,
+    join: Option<&String>,
+    within_nodes: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut ret = BTreeSet::new();
+    let mut q: VecDeque<String> = VecDeque::new();
+    q.push_back(branch.to_string());
+    while let Some(name) = q.pop_front() {
+        if !ret.insert(name.clone()) {
+            continue;
+        }
+        let current = cfg.blocks.get(&name);
+        if let Some(block) = current {
+            for x in &block.succ {
+                if within_nodes.contains(x) && Some(x) != join {
+                    q.push_back(x.clone());
+                }
+            }
+        }
+    }
+    ret
+}
+fn partition_arms(
+    cfg: &Cfg,
+    then_branch: &str,
+    else_branch: &str,
+    join: Option<&String>,
+    nodes: &BTreeSet<String>,
+) -> (BTreeSet<String>, BTreeSet<String>) {
+    let then_arm: BTreeSet<String> = partition_arm(cfg, then_branch, join, nodes);
+    let else_arm: BTreeSet<String> = partition_arm(cfg, else_branch, join, nodes);
+    (then_arm, else_arm)
+}
+
 /// Structure a region of `nodes` starting from `entry`.
 fn structure_region(
     cfg: &Cfg,
     dom: &DomInfo,
+    pdom: &PostDomInfo,
     tree: &LoopTree,
     nodes: &BTreeSet<String>,
     entry: &str,
@@ -254,7 +306,7 @@ fn structure_region(
     if let Some(loop_idx) = tree.get_loop_for_header(entry)
         && loop_ctx.is_none_or(|ctx| ctx.header != entry)
     {
-        let loop_stmt = structure_loop(cfg, dom, tree, loop_idx)?;
+        let loop_stmt = structure_loop(cfg, dom, pdom, tree, loop_idx)?;
         let mut stmts = vec![loop_stmt];
 
         if let Some(exit_node) = &tree.exit[loop_idx]
@@ -268,6 +320,7 @@ fn structure_region(
                 let cont_stmts = structure_region(
                     cfg,
                     dom,
+                    pdom,
                     tree,
                     &remaining_nodes,
                     exit_node,
@@ -279,6 +332,7 @@ fn structure_region(
         }
         return Ok(stmts);
     }
+    let (mut prefix, branch) = cfg.split_block(entry)?;
 
     let blk = &cfg.blocks[entry];
     let mut s_in: Vec<String> = Vec::new();
@@ -290,6 +344,9 @@ fn structure_region(
             s_out.push(s.clone());
         }
     }
+    // Every out-of-region successor must be a legitimate frame boundary: a
+    // known exit of the enclosing frame, the loop exit, or the loop header
+    // (a continue edge).
     for x in &s_out {
         if !frame_exits.contains(x) {
             if let Some(ctx) = loop_ctx
@@ -303,192 +360,122 @@ fn structure_region(
             });
         }
     }
-
-    let (mut prefix, branch) = cfg.split_block(entry)?;
-
-    if s_in.is_empty() {
-        if s_out.is_empty() {
-            if prefix.is_empty() {
-                prefix.push(Stmt::Ret { value: None });
-            }
-            return Ok(prefix);
-        }
-
-        if s_out.len() == 1 {
-            let target = &s_out[0];
-            if let Some(ctx) = loop_ctx {
-                if ctx.exit.as_ref() == Some(target) {
-                    prefix.push(Stmt::Break);
-                    return Ok(prefix);
+    match s_in.len() {
+        0 => {
+            if s_out.is_empty() {
+                // The path terminates here; make it explicit so the rebuilt
+                // CFG keeps this block as a real exit.
+                if prefix.is_empty() {
+                    prefix.push(Stmt::Ret { value: None });
                 }
-                if &ctx.header == target {
-                    if ctx.latch.as_ref() == Some(&entry.to_string()) {
+                return Ok(prefix);
+            }
+            if s_out.len() == 1 {
+                let target = &s_out[0];
+                if let Some(ctx) = loop_ctx {
+                    if ctx.exit.as_ref() == Some(target) {
+                        prefix.push(Stmt::Break);
                         return Ok(prefix);
-                    } else {
+                    }
+                    if &ctx.header == target {
+                        if ctx.latch.as_ref() == Some(&entry.to_string()) {
+                            // The latch falls out of the body; the Loop
+                            // rebuild materializes the back edge itself.
+                            return Ok(prefix);
+                        }
                         prefix.push(Stmt::Continue);
                         return Ok(prefix);
                     }
                 }
+                // Otherwise the target is a frame exit; falling through is
+                // the correct control flow.
+                return Ok(prefix);
             }
-            return Ok(prefix);
-        }
+            if s_out.len() == 2
+                && let Some(ctx) = loop_ctx
+            {
+                let cond = branch
+                    .as_ref()
+                    .and_then(|b| b.cond.clone())
+                    .unwrap_or(Expr::Nop);
+                let then_is_first = branch.as_ref().is_none_or(|b| b.then_block == s_out[0]);
+                let (tb, eb) = if then_is_first {
+                    (&s_out[0], &s_out[1])
+                } else {
+                    (&s_out[1], &s_out[0])
+                };
 
-        if s_out.len() == 2
-            && let Some(ctx) = loop_ctx
-        {
+                let emit_target = |target: &String| -> Option<Stmt> {
+                    if ctx.exit.as_ref() == Some(target) {
+                        Some(Stmt::Break)
+                    } else if &ctx.header == target {
+                        if ctx.latch.as_ref() == Some(&entry.to_string()) {
+                            None
+                        } else {
+                            Some(Stmt::Continue)
+                        }
+                    } else {
+                        None
+                    }
+                };
+
+                prefix.push(Stmt::If {
+                    cond,
+                    then_stmts: emit_target(tb).into_iter().collect(),
+                    else_stmts: emit_target(eb).into_iter().collect(),
+                });
+                return Ok(prefix);
+            }
+            Ok(prefix)
+        }
+        1 => {
+            let mut remaining = nodes.clone();
+            remaining.remove(entry);
+            if s_out.is_empty() {
+                prefix.extend(structure_region(
+                    cfg,
+                    dom,
+                    pdom,
+                    tree,
+                    &remaining,
+                    &s_in[0],
+                    frame_exits,
+                    loop_ctx,
+                )?);
+                return Ok(prefix);
+            }
+            // One in-region successor and one out-of-region exit: the
+            // `if (c) break;` / `if (c) continue;` shape inside a loop.
             let cond = branch
                 .as_ref()
                 .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop);
-            let then_is_first = branch.as_ref().is_none_or(|b| b.then_block == s_out[0]);
-            let (tb, eb) = if then_is_first {
-                (&s_out[0], &s_out[1])
-            } else {
-                (&s_out[1], &s_out[0])
-            };
-
-            let emit_target = |target: &String| -> Option<Stmt> {
-                if ctx.exit.as_ref() == Some(target) {
-                    Some(Stmt::Break)
-                } else if &ctx.header == target {
-                    if ctx.latch.as_ref() == Some(&entry.to_string()) {
-                        None
-                    } else {
-                        Some(Stmt::Continue)
-                    }
-                } else {
-                    None
-                }
-            };
-
-            prefix.push(Stmt::If {
-                cond,
-                then_stmts: emit_target(tb).into_iter().collect(),
-                else_stmts: emit_target(eb).into_iter().collect(),
-            });
-            return Ok(prefix);
-        }
-
-        return Ok(prefix);
-    }
-
-    let mut rest = nodes.clone();
-    rest.remove(entry);
-
-    let joins: BTreeSet<String> = nodes
-        .iter()
-        .filter(|n| **n != *entry)
-        .filter(|n| {
-            let preds_in_nodes = cfg.blocks[*n]
-                .pred
-                .iter()
-                .filter(|p| nodes.contains(*p))
-                .filter(|p| {
-                    if let Some(l_idx) = tree.get_loop_for_header(n) {
-                        !tree.loops[l_idx].body.contains(*p)
-                    } else {
-                        true
-                    }
-                })
-                .count();
-            preds_in_nodes > 1
-        })
-        .cloned()
-        .collect();
-
-    if !joins.is_empty() {
-        let j = joins
-            .iter()
-            .max_by(|a, b| {
-                (dom.dom[a.as_str()].len(), a.as_str())
-                    .cmp(&(dom.dom[b.as_str()].len(), b.as_str()))
-            })
-            .unwrap();
-        if !joins
-            .iter()
-            .all(|q| dom.dom[j.as_str()].contains(q.as_str()))
-        {
-            return Err(StructurizeError::ParallelJoinsNeedNodeSplitting);
-        }
-        let tail = reachable_from(cfg, j, nodes);
-        let preset: BTreeSet<String> = nodes.difference(&tail).cloned().collect();
-        let preset_exits: BTreeSet<String> = BTreeSet::from([(*j).clone()]);
-        let mut out = structure_region(cfg, dom, tree, &preset, entry, &preset_exits, loop_ctx)?;
-        out.extend(structure_region(
-            cfg,
-            dom,
-            tree,
-            &tail,
-            j,
-            frame_exits,
-            loop_ctx,
-        )?);
-        return Ok(out);
-    }
-
-    match (s_in.len(), s_out.len()) {
-        (1, 0) => {
-            prefix.extend(structure_region(
+            let in_arm = reachable_from(cfg, &s_in[0], &remaining);
+            let exit_target = &s_out[0];
+            let in_arm_stmts = structure_region(
                 cfg,
                 dom,
+                pdom,
                 tree,
-                &rest,
+                &in_arm,
                 &s_in[0],
                 frame_exits,
                 loop_ctx,
-            )?);
-            Ok(prefix)
-        }
-        (2, 0) => {
-            let cond = branch
-                .as_ref()
-                .and_then(|b| b.cond.clone())
-                .unwrap_or(Expr::Nop);
-            let a_then = reachable_from(cfg, &s_in[0], &rest);
-            let a_else = reachable_from(cfg, &s_in[1], &rest);
-            let then_is_first = branch.as_ref().is_none_or(|b| b.then_block == s_in[0]);
-            let region_then =
-                structure_region(cfg, dom, tree, &a_then, &s_in[0], frame_exits, loop_ctx)?;
-            let mut region_else =
-                structure_region(cfg, dom, tree, &a_else, &s_in[1], frame_exits, loop_ctx)?;
-            if region_else.is_empty() {
-                region_else.push(placeholder());
-            }
-            let (then_stmts, else_stmts) = if then_is_first {
-                (region_then, region_else)
+            )?;
+            let in_arm_stmts = if in_arm_stmts.is_empty() {
+                vec![placeholder()]
             } else {
-                (region_else, region_then)
+                in_arm_stmts
             };
-            prefix.push(Stmt::If {
-                cond,
-                then_stmts,
-                else_stmts,
-            });
-            Ok(prefix)
-        }
-        (1, 1) => {
-            let cond = branch
-                .as_ref()
-                .and_then(|b| b.cond.clone())
-                .unwrap_or(Expr::Nop);
-            let in_arm = reachable_from(cfg, &s_in[0], &rest);
-            let exit_target = &s_out[0];
-
             let then_is_exit = branch
                 .as_ref()
                 .is_some_and(|b| b.then_block == *exit_target);
-
             if let Some(ctx) = loop_ctx {
                 if ctx.exit.as_ref() == Some(exit_target) {
-                    let mut in_arm_stmts =
-                        structure_region(cfg, dom, tree, &in_arm, &s_in[0], frame_exits, loop_ctx)?;
-                    if in_arm_stmts.is_empty() {
-                        in_arm_stmts.push(placeholder());
-                    }
                     let (then_stmts, else_stmts) = if then_is_exit {
-                        (vec![Stmt::Break], in_arm_stmts)
+                        (vec![Stmt::Break], in_arm_stmts.clone())
                     } else {
-                        (in_arm_stmts, vec![Stmt::Break])
+                        (in_arm_stmts.clone(), vec![Stmt::Break])
                     };
                     prefix.push(Stmt::If {
                         cond,
@@ -498,15 +485,10 @@ fn structure_region(
                     return Ok(prefix);
                 }
                 if &ctx.header == exit_target {
-                    let mut in_arm_stmts =
-                        structure_region(cfg, dom, tree, &in_arm, &s_in[0], frame_exits, loop_ctx)?;
-                    if in_arm_stmts.is_empty() {
-                        in_arm_stmts.push(placeholder());
-                    }
                     let (then_stmts, else_stmts) = if then_is_exit {
-                        (vec![Stmt::Continue], in_arm_stmts)
+                        (vec![Stmt::Continue], in_arm_stmts.clone())
                     } else {
-                        (in_arm_stmts, vec![Stmt::Continue])
+                        (in_arm_stmts.clone(), vec![Stmt::Continue])
                     };
                     prefix.push(Stmt::If {
                         cond,
@@ -516,20 +498,130 @@ fn structure_region(
                     return Ok(prefix);
                 }
             }
-
-            let then_stmts =
-                structure_region(cfg, dom, tree, &in_arm, &s_in[0], frame_exits, loop_ctx)?;
+            // The exit target is a frame exit; the false path falls through
+            // to it, so only the in-region arm goes inside the If.
             prefix.push(Stmt::If {
                 cond,
-                then_stmts,
+                then_stmts: in_arm_stmts,
                 else_stmts: vec![],
             });
             Ok(prefix)
         }
-        _ => Err(StructurizeError::UnsupportedFanOut {
-            block: entry.to_string(),
-            successors: s_in.len(),
-        }),
+        2 => {
+            // LLVM lists the false target first in `br` operands; order the
+            // arms by the recorded branch info when available.
+            let then_is_first = branch.as_ref().is_none_or(|b| b.then_block == s_in[0]);
+            let (first, second) = if then_is_first {
+                (&s_in[0], &s_in[1])
+            } else {
+                (&s_in[1], &s_in[0])
+            };
+            let join = pdom.ipdom.get(entry);
+
+            let (then_arm, else_arm) = partition_arms(cfg, first, second, join, nodes);
+            let mut arm_frame_exits = frame_exits.clone();
+            if let Some(j) = join {
+                arm_frame_exits.insert(j.clone());
+            }
+
+            let then_stmts = structure_region(
+                cfg,
+                dom,
+                pdom,
+                tree,
+                &then_arm,
+                first,
+                &arm_frame_exits,
+                loop_ctx,
+            )?;
+            let mut else_stmts = structure_region(
+                cfg,
+                dom,
+                pdom,
+                tree,
+                &else_arm,
+                second,
+                &arm_frame_exits,
+                loop_ctx,
+            )?;
+            // An empty else arm must still materialize a block in the
+            // rebuilt CFG so the arm's edge to the join is preserved —
+            // unless the arm *is* the join itself, which the tail
+            // continuation below materializes.
+            let join_materialized_by_tail = join.is_some_and(|jn| {
+                else_arm.len() == 1
+                    && else_arm.first() == Some(jn)
+                    && nodes.contains(jn)
+                    && !frame_exits.contains(jn)
+            });
+            if else_stmts.is_empty() && !join_materialized_by_tail {
+                else_stmts.push(placeholder());
+            }
+            let cond = branch
+                .as_ref()
+                .and_then(|b| b.cond.clone())
+                .unwrap_or(Expr::Literal(Lit::Bool(true)));
+            prefix.push(Stmt::If {
+                cond,
+                then_stmts,
+                else_stmts,
+            });
+
+            if let Some(jn) = join
+                && nodes.contains(jn)
+                && !frame_exits.contains(jn)
+            {
+                let tail_nodes = reachable_from(cfg, jn, nodes);
+                let cont_stmts =
+                    structure_region(cfg, dom, pdom, tree, &tail_nodes, jn, frame_exits, loop_ctx)?;
+                prefix.extend(cont_stmts);
+            }
+            Ok(prefix)
+        }
+        _ => {
+            // Fan-out >= 3 (switch shape). Parallel acyclic joins cannot be
+            // structured without node splitting; a well-formed single-join
+            // switch is not implemented yet.
+            let joins: BTreeSet<String> = nodes
+                .iter()
+                .filter(|n| **n != *entry)
+                .filter(|n| {
+                    let preds_in_nodes = cfg.blocks[*n]
+                        .pred
+                        .iter()
+                        .filter(|p| nodes.contains(*p))
+                        .filter(|p| {
+                            if let Some(l_idx) = tree.get_loop_for_header(n) {
+                                !tree.loops[l_idx].body.contains(*p)
+                            } else {
+                                true
+                            }
+                        })
+                        .count();
+                    preds_in_nodes > 1
+                })
+                .cloned()
+                .collect();
+            if !joins.is_empty() {
+                let j = joins
+                    .iter()
+                    .max_by(|a, b| {
+                        (dom.dom[a.as_str()].len(), a.as_str())
+                            .cmp(&(dom.dom[b.as_str()].len(), b.as_str()))
+                    })
+                    .unwrap();
+                if !joins
+                    .iter()
+                    .all(|q| dom.dom[j.as_str()].contains(q.as_str()))
+                {
+                    return Err(StructurizeError::ParallelJoinsNeedNodeSplitting);
+                }
+            }
+            Err(StructurizeError::UnsupportedFanOut {
+                block: entry.to_string(),
+                successors: s_in.len(),
+            })
+        }
     }
 }
 
