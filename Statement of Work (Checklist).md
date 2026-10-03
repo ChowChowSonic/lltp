@@ -11,7 +11,7 @@ The following requirements define the functional and non-functional capabilities
 ### 2.1 Frontend and Ingestion
 - [X] **2.1.1** The system shall invoke or consume output from the source language's native toolchain compiler to generate unoptimized LLVM Intermediate Representation (IR) with debug symbols enabled. `[Priority = High]`
 - [X] **2.1.2** The system shall parse the generated LLVM IR files (.ll or .bc formats) using the inkwell library. `[Priority = High]` (Note:pending additional tests to fully confirm)
-- [ ] **2.1.3** The system shall build per-function control-flow graphs (CFGs) from the ingested LLVM IR. `[Priority = High]`
+- [X] **2.1.3** The system shall build per-function control-flow graphs (CFGs) from the ingested LLVM IR. `[Priority = High]`
 - [ ] **2.1.4** The system shall process functions in parallel utilizing the rayon library. `[Priority = Low]`
 
 ### 2.2 Type and Variable Recovery (De-SSA)
