@@ -20,7 +20,7 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     };
 
-    // Stage 1: C -> LLVM IR (already verified working; 2.1.1).
+    // Stage 1: C -> LLVM IR .
     let compiled = match compile_c_to_ir(&cfg, &file) {
         Ok(c) => c,
         Err(e) => {
@@ -30,8 +30,7 @@ fn main() -> ExitCode {
     };
     eprintln!("[2.1.1] compiled {} -> {} bytes of IR", file.display(), compiled.ir.len());
 
-    // Stage 2: parse that IR with inkwell (2.1.2). build_module panics on
-    // failure, so reaching the summary below IS the verification.
+    // Stage 2: parse that IR with inkwell .
     let ctxt = Context::create();
     let module = build_module(&ctxt, &compiled.ir);
     eprintln!("[2.1.2] inkwell accepted the module — parse succeeded");
