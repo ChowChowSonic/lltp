@@ -579,48 +579,84 @@ fn structure_region(
             Ok(prefix)
         }
         _ => {
-            // Fan-out >= 3 (switch shape). Parallel acyclic joins cannot be
-            // structured without node splitting; a well-formed single-join
-            // switch is not implemented yet.
-            let joins: BTreeSet<String> = nodes
-                .iter()
-                .filter(|n| **n != *entry)
-                .filter(|n| {
-                    let preds_in_nodes = cfg.blocks[*n]
-                        .pred
-                        .iter()
-                        .filter(|p| nodes.contains(*p))
-                        .filter(|p| {
-                            if let Some(l_idx) = tree.get_loop_for_header(n) {
-                                !tree.loops[l_idx].body.contains(*p)
-                            } else {
-                                true
-                            }
-                        })
-                        .count();
-                    preds_in_nodes > 1
-                })
-                .cloned()
-                .collect();
-            if !joins.is_empty() {
-                let j = joins
-                    .iter()
-                    .max_by(|a, b| {
-                        (dom.dom[a.as_str()].len(), a.as_str())
-                            .cmp(&(dom.dom[b.as_str()].len(), b.as_str()))
-                    })
-                    .unwrap();
-                if !joins
-                    .iter()
-                    .all(|q| dom.dom[j.as_str()].contains(q.as_str()))
-                {
-                    return Err(StructurizeError::ParallelJoinsNeedNodeSplitting);
+            // Fan-out >= 3 (switch shape). `ipdom(entry)` cannot serve as the
+            // join here: when any arm terminates early the only common
+            // post-dominator is the virtual sink. Derive the join from the
+            // arms instead — every arm that re-converges inside the region
+            // must agree on one immediate post-dominator, arms whose ipdom is
+            // the virtual sink simply terminate, and arms converging to
+            // different nodes are parallel joins that need node splitting.
+            let entry_blk = cfg
+                .get_block(entry)
+                .ok_or(StructurizeError::ParallelJoinsNeedNodeSplitting)?;
+            let mut join: Option<String> = None;
+            for current_succ in &entry_blk.succ {
+                let Some(candidate) = pdom.ipdom.get(current_succ) else {
+                    continue;
+                };
+                if !nodes.contains(candidate) || frame_exits.contains(candidate) {
+                    continue;
+                }
+                match &join {
+                    Some(j) if j == candidate => {}
+                    Some(_) => return Err(StructurizeError::ParallelJoinsNeedNodeSplitting),
+                    None => join = Some(candidate.clone()),
                 }
             }
-            Err(StructurizeError::UnsupportedFanOut {
-                block: entry.to_string(),
-                successors: s_in.len(),
-            })
+            let joins = join.as_ref();
+
+            let mut switch_arms: Vec<(Lit, Vec<Stmt>)> = Vec::new();
+            for (i, current_succ) in entry_blk.succ.iter().enumerate() {
+                let mut arm_frame_exits = frame_exits.clone();
+                if let Some(jn) = joins {
+                    arm_frame_exits.insert(jn.clone());
+                }
+
+                let arm = partition_arm(cfg, current_succ, joins, nodes);
+                let mut arm_stmts = structure_region(
+                    cfg,
+                    dom,
+                    pdom,
+                    tree,
+                    &arm,
+                    current_succ,
+                    &arm_frame_exits,
+                    loop_ctx,
+                )?;
+                if arm_stmts.is_empty() && arm.len() != 1 || arm.first() != Some(joins.unwrap()) {
+                    arm_stmts.push(placeholder());
+                }
+                switch_arms.push((
+                    Lit::Int {
+                        value: i as u64,
+                        bits: 32,
+                        signed: true,
+                    },
+                    arm_stmts,
+                ));
+            }
+            let starting = Expr::Var {
+                name: "_switch_cond".into(),
+                dtype: Ty::Int(32, true),
+            }; //cfg.get_block(entry).unwrap().stmts;
+            let default: Vec<Stmt> = switch_arms.pop().unwrap().1;
+            let mut prefix: Vec<Stmt> = vec![Stmt::Switch {
+                value: starting,
+                cases: switch_arms,
+                default,
+            }];
+
+            if let Some(jn) = joins
+                && nodes.contains(jn)
+                && !frame_exits.contains(jn)
+            {
+                let tail_nodes = reachable_from(cfg, jn, nodes);
+                let cont_stmts =
+                    structure_region(cfg, dom, pdom, tree, &tail_nodes, jn, frame_exits, loop_ctx)?;
+                prefix.extend(cont_stmts);
+            }
+
+            Ok(prefix)
         }
     }
 }
@@ -1088,5 +1124,21 @@ mod test {
             structurize(&cfg),
             Err(StructurizeError::ParallelJoinsNeedNodeSplitting)
         );
+    }
+    #[test]
+    fn three_way_round_trips() {
+        let cfg = cfg_from(
+            "entry",
+            &[
+                ("entry", "case_a"),
+                ("entry", "case_b"),
+                ("entry", "case_c"),
+                ("case_a", "join"),
+                ("case_c", "join"),
+                ("join", "exit"),
+            ],
+        );
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)))
     }
 }
