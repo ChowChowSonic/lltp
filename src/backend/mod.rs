@@ -1,5 +1,6 @@
 mod expr;
 mod stmt;
+pub mod c_goto;
 
 use std::fmt::{self, Formatter};
 

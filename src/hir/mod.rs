@@ -6,6 +6,8 @@ pub mod func;
 pub mod graph;
 pub mod stmt;
 pub mod ty;
+pub mod flat;
+pub mod op;
 pub use func::Function;
 
 #[derive(Debug, Clone)]
