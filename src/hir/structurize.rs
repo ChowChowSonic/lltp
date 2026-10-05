@@ -3,6 +3,7 @@ use std::collections::{BTreeSet, VecDeque};
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
     DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, reachable, reachable_from,
+    unify_loop_exits,
 };
 use crate::hir::{Cfg, Expr, Lit, Stmt, StructurizeError, Ty};
 
@@ -28,10 +29,11 @@ pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
     if !reducible(cfg) {
         return Err(StructurizeError::IrreducibleControlFlow);
     }
-    let dom = dominators(cfg);
-    let pdom = PostDomInfo::from(cfg);
-    let reach = reachable(cfg);
-    let tree = LoopTree::build(cfg, &dom, &reach)?;
+    let normalized_cfg = unify_loop_exits(cfg);
+    let dom = dominators(&normalized_cfg);
+    let pdom = PostDomInfo::from(&normalized_cfg);
+    let reach = reachable(&normalized_cfg);
+    let tree = LoopTree::build(&normalized_cfg, &dom, &reach)?;
     structure_region(
         cfg,
         &dom,
@@ -589,6 +591,16 @@ fn structure_region(
             let entry_blk = cfg
                 .get_block(entry)
                 .ok_or(StructurizeError::ParallelJoinsNeedNodeSplitting)?;
+            let (last_stmt_op, _last_stmt_blocks, _last_stmt_default) =
+                match entry_blk.stmts.last().unwrap() {
+                    Stmt::Switch {
+                        value,
+                        cases,
+                        default,
+                    } => (value, cases, default),
+                    _ => return Err(StructurizeError::IrreducibleControlFlow),
+                };
+
             let mut join: Option<String> = None;
             for current_succ in &entry_blk.succ {
                 let Some(candidate) = pdom.ipdom.get(current_succ) else {
@@ -635,13 +647,10 @@ fn structure_region(
                     arm_stmts,
                 ));
             }
-            let starting = Expr::Var {
-                name: "_switch_cond".into(),
-                dtype: Ty::Int(32, true),
-            }; //cfg.get_block(entry).unwrap().stmts;
+            let starting = last_stmt_op; //cfg.get_block(entry).unwrap().stmts;
             let default: Vec<Stmt> = switch_arms.pop().unwrap().1;
             let mut prefix: Vec<Stmt> = vec![Stmt::Switch {
-                value: starting,
+                value: starting.clone(),
                 cases: switch_arms,
                 default,
             }];

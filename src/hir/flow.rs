@@ -1,4 +1,4 @@
-use crate::hir::Cfg;
+use crate::hir::{Block, Cfg, Expr, Lit, Stmt, Ty};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 pub struct PostDomInfo {
     pub pdom: HashMap<String, BTreeSet<String>>,
@@ -128,6 +128,144 @@ pub fn reachable_from(cfg: &Cfg, src: &str, within: &BTreeSet<String>) -> BTreeS
         }
     }
     seen
+}
+
+pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
+    let mut cfg = in_cfg.clone();
+    loop {
+        let dom = dominators(&cfg);
+        let reach = reachable(&cfg);
+        let loops = natural_loops(&cfg, &dom);
+        let mut changed = false;
+        // collect exit targets not in the body but are reachable
+        for nl in loops {
+            let mut exits: Vec<(String, String)> = Vec::new();
+            let mut distinct_targets: BTreeSet<String> = BTreeSet::new();
+            for node in &nl.body {
+                for s in &cfg.blocks[node].succ {
+                    if !nl.body.contains(s) && reach.contains(s) {
+                        exits.push((node.clone(), s.clone()));
+                        distinct_targets.insert(s.clone());
+                    }
+                }
+            }
+            if exits.len() <= 1 {
+                continue;
+            }
+            changed = true;
+            let header = &nl.header;
+            let tag_name = format!("_exit_tag_{}", nl.header);
+            let unified_name = format!("_unified_exit{}", nl.header);
+            let targets: Vec<String> = distinct_targets.into_iter().collect();
+
+            // Create unified exit block
+            for (edge_idx, (src, og_dst)) in exits.iter().enumerate() {
+                let target_idx = targets.iter().position(|t| t == og_dst).unwrap();
+                let pad_name = format!("_exit_pad_{header}_{edge_idx}");
+                let pad_stmts = [
+                    Stmt::Let {
+                        dest: Box::new(Expr::Var {
+                            name: tag_name.clone(),
+                            dtype: Ty::Int(32, true),
+                        }),
+                        src: Box::new(Expr::Literal(Lit::Int {
+                            value: target_idx as u64,
+                            bits: 32,
+                            signed: true,
+                        })),
+                    },
+                    Stmt::Branch {
+                        cond: None,
+                        then_block: unified_name.clone(),
+                        else_block: None,
+                    },
+                ];
+                let pad_block = Block {
+                    name: pad_name.clone(),
+                    stmts: pad_stmts.to_vec(),
+                    succ: vec![unified_name.clone()],
+                    pred: vec![src.clone()],
+                };
+                cfg.blocks.insert(pad_name.clone(), pad_block);
+
+                let src_blk = cfg.blocks.get_mut(src).unwrap();
+                for s in &mut src_blk.succ {
+                    if s == og_dst {
+                        *s = pad_name.clone();
+                    }
+                }
+                if let Some(Stmt::Branch {
+                    then_block,
+                    else_block,
+                    ..
+                }) = src_blk.stmts.last_mut()
+                {
+                    if then_block == og_dst {
+                        *then_block = pad_name.clone();
+                    }
+                    if let Some(e1) = else_block
+                        && e1 == og_dst
+                    {
+                        *else_block = Some(pad_name.clone())
+                    }
+                }
+                if let Some(dest_blk) = cfg.blocks.get_mut(og_dst) {
+                    dest_blk.pred.retain(|p| p != src);
+                }
+            }
+
+            let pad_names: Vec<String> = (0..exits.len())
+                .map(|i| format!("_exit_pad_{header}_{i}"))
+                .collect();
+            let mut unified_block = Block::new(&unified_name);
+            unified_block.pred = pad_names;
+
+            if targets.len() == 2 {
+                let cond = Expr::BinaryOp {
+                    op: inkwell::values::InstructionOpcode::ICmp,
+                    arg1: Box::new(Expr::Var {
+                        name: tag_name.clone(),
+                        dtype: Ty::Int(32, true),
+                    }),
+                    arg2: Box::new(Expr::Literal(Lit::Int {
+                        value: 0,
+                        bits: 32,
+                        signed: true,
+                    })),
+                };
+                unified_block.stmts.push(Stmt::Branch {
+                    cond: Some(cond),
+                    then_block: targets[0].clone(),
+                    else_block: Some(targets[1].clone()),
+                });
+                unified_block.succ = vec![targets[0].clone(), targets[1].clone()];
+            } else {
+                let first = targets[0].clone();
+                let second = targets[1].clone();
+                unified_block.succ = targets.clone();
+                unified_block.stmts.push(Stmt::Branch {
+                    cond: Some(Expr::Var {
+                        name: tag_name.clone(),
+                        dtype: Ty::Int(32, true),
+                    }),
+                    then_block: first,
+                    else_block: Some(second),
+                });
+            }
+            for t in &targets {
+                if let Some(dest_blk) = cfg.blocks.get_mut(t)
+                    && !dest_blk.pred.contains(&unified_name)
+                {
+                    dest_blk.pred.push(unified_name.clone());
+                }
+            }
+            cfg.blocks.insert(unified_name, unified_block);
+        }
+        if !changed {
+            break;
+        }
+    }
+    cfg.clone()
 }
 
 ///dom(n) = {n} ∪ ⋂ { dom(p) : p ∈ preds(n) }, iterate until fixpoint
