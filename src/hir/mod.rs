@@ -1,6 +1,7 @@
 use crate::hir::expr::Expr;
 use crate::hir::ty::Ty;
 use inkwell::values::Operand;
+pub mod cfg;
 pub mod expr;
 pub mod flat;
 pub mod func;

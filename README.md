@@ -31,11 +31,16 @@ let module = build_module(&ctxt, IR); // IR: &str of unoptimized LLVM IR
 **2. Build per-function CFGs and detect loops.**
 
 ```rust
+use lltp::hir::cfg::Cfg;
 use lltp::hir::graph::{build_graph, has_self_referential_loop};
 
-let graph = build_graph(&module).expect("CFG build");
-for (&bb, _) in &graph {
-    if has_self_referential_loop(&graph, bb) {
+// One CFG per function; successors keys cover all basic blocks,
+// entry is the function's first block, exits are its terminators.
+let func = module.get_first_function().expect("IR has a function");
+let cfg: Cfg = build_graph(&func).expect("CFG build");
+
+for bb in cfg.successors.keys() {
+    if has_self_referential_loop(&cfg, bb) {
         // loop-header candidate
     }
 }
