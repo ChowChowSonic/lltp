@@ -39,18 +39,34 @@ fn main() -> ExitCode {
     let module = build_module(&ctxt, &compiled.ir);
     eprintln!("[2.1.2] inkwell accepted the module — parse succeeded");
 
-    let graph = build_graph(&module).expect("CFG build");
-    eprintln!("[2.1.3] built CFG with {} basic block(s)", graph.len());
-
+    // 2.1.3: one CFG per function (declarations have no body, so skip them)
     let mut loop_headers = Vec::new();
-    for &bb in graph.keys() {
-        if has_self_referential_loop(&graph, bb) {
-            let name = bb.get_name().to_string_lossy().into_owned();
-            loop_headers.push(if name.is_empty() {
-                "<entry>".to_string()
-            } else {
-                name
-            });
+    for func in module.get_functions() {
+        if func.count_basic_blocks() == 0 {
+            continue;
+        }
+        let fname = func.get_name().to_string_lossy().into_owned();
+        let graph = match build_graph(&func) {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("CFG build failed for `{fname}`: {e}");
+                return ExitCode::FAILURE;
+            }
+        };
+        eprintln!(
+            "[2.1.3] `{fname}`: built CFG with {} basic block(s)",
+            graph.blocks.len()
+        );
+
+        for bb in graph.blocks.keys() {
+            if has_self_referential_loop(&graph, bb) {
+                let name = if bb.is_empty() {
+                    "<unnamed>"
+                } else {
+                    bb.as_str()
+                };
+                loop_headers.push(format!("{fname}::{name}"));
+            }
         }
     }
 
