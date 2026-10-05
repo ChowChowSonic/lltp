@@ -365,9 +365,11 @@ impl<'ctx> Cx<'ctx> {
         {
             return self.name(inst);
         }
-        Err("memory access through a non-alloca pointer (GEP, global, loaded pointer) \
+        Err(
+            "memory access through a non-alloca pointer (GEP, global, loaded pointer) \
              is not supported yet"
-            .to_string())
+                .to_string(),
+        )
     }
 
     fn val(&self, op: Option<Operand<'ctx>>) -> Result<Val, String> {

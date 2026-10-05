@@ -28,7 +28,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("[2.1.1] compiled {} -> {} bytes of IR", file.display(), compiled.ir.len());
+    eprintln!(
+        "[2.1.1] compiled {} -> {} bytes of IR",
+        file.display(),
+        compiled.ir.len()
+    );
 
     // Stage 2: parse that IR with inkwell .
     let ctxt = Context::create();
@@ -43,7 +47,11 @@ fn main() -> ExitCode {
         println!("  fn {name}: {} basic block(s)", blocks.len());
         for bb in &blocks {
             let bb_name = bb.get_name().to_string_lossy().into_owned();
-            let bb_name = if bb_name.is_empty() { "<entry>".to_string() } else { bb_name };
+            let bb_name = if bb_name.is_empty() {
+                "<entry>".to_string()
+            } else {
+                bb_name
+            };
             let inst_count = bb.get_instructions().count();
             println!("    {bb_name}: {inst_count} instruction(s)");
         }

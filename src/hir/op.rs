@@ -86,7 +86,7 @@ impl From<IntPredicate> for IntCmp {
     }
 }
 
-/// `O*` = ordered (false if either side is NaN), 
+/// `O*` = ordered (false if either side is NaN),
 /// `U*` = unordered (true if either side is NaN).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FloatCmp {

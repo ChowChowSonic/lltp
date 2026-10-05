@@ -2,12 +2,12 @@ use crate::hir::expr::Expr;
 use crate::hir::ty::Ty;
 use inkwell::values::Operand;
 pub mod expr;
+pub mod flat;
 pub mod func;
 pub mod graph;
+pub mod op;
 pub mod stmt;
 pub mod ty;
-pub mod flat;
-pub mod op;
 pub use func::Function;
 
 #[derive(Debug, Clone)]

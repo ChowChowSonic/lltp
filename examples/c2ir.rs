@@ -37,7 +37,11 @@ fn main() -> ExitCode {
             if !compiled.diagnostics.is_empty() {
                 eprint!("{}", compiled.diagnostics);
             }
-            let out = if brief_output { brief(&compiled.ir) } else { &compiled.ir };
+            let out = if brief_output {
+                brief(&compiled.ir)
+            } else {
+                &compiled.ir
+            };
             let _ = std::io::stdout().write_all(out.as_bytes());
             ExitCode::SUCCESS
         }

@@ -29,7 +29,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    eprintln!("[2.1.1] compiled {} -> {} bytes of IR", file.display(), compiled.ir.len());
+    eprintln!(
+        "[2.1.1] compiled {} -> {} bytes of IR",
+        file.display(),
+        compiled.ir.len()
+    );
 
     let ctxt = Context::create();
     let module = build_module(&ctxt, &compiled.ir);
@@ -39,10 +43,14 @@ fn main() -> ExitCode {
     eprintln!("[2.1.3] built CFG with {} basic block(s)", graph.len());
 
     let mut loop_headers = Vec::new();
-    for (&bb, _) in &graph {
+    for &bb in graph.keys() {
         if has_self_referential_loop(&graph, bb) {
             let name = bb.get_name().to_string_lossy().into_owned();
-            loop_headers.push(if name.is_empty() { "<entry>".to_string() } else { name });
+            loop_headers.push(if name.is_empty() {
+                "<entry>".to_string()
+            } else {
+                name
+            });
         }
     }
 

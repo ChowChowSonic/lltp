@@ -85,7 +85,10 @@ fn check(name: &str) -> Result<(), String> {
     let rebuilt_c = dir.join(format!("{name}_rebuilt.c"));
     fs::write(&rebuilt_c, rebuild(&fixture(name))?).map_err(|e| e.to_string())?;
 
-    let orig = build_and_run(&fixture(name), &dir.join(format!("{name}_orig{exe_suffix}")))?;
+    let orig = build_and_run(
+        &fixture(name),
+        &dir.join(format!("{name}_orig{exe_suffix}")),
+    )?;
     let new = build_and_run(&rebuilt_c, &dir.join(format!("{name}_new{exe_suffix}")))?;
 
     if orig == new {

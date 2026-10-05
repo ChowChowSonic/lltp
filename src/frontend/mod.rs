@@ -35,9 +35,14 @@ pub struct Compiled {
 #[derive(Debug)]
 pub enum FrontendError {
     /// The compiler executable could not be started.
-    Spawn { clang: String, source: io::Error },
+    Spawn {
+        clang: String,
+        source: io::Error,
+    },
     /// clang ran but exited non-zero (e.g. a C syntax error).
-    Compile { stderr: String },
+    Compile {
+        stderr: String,
+    },
     NotUtf8,
 }
 
@@ -67,7 +72,14 @@ impl Error for FrontendError {
 /// `-fno-discard-value-names` keeps names like `%alpha` / `%add` in the IR
 pub fn compile_c_to_ir(cfg: &FrontendConfig, src: &Path) -> Result<Compiled, FrontendError> {
     let mut cmd = Command::new(&cfg.clang);
-    cmd.args(["-S", "-emit-llvm", "-O0", "-fno-discard-value-names", "-x", "c"]);
+    cmd.args([
+        "-S",
+        "-emit-llvm",
+        "-O0",
+        "-fno-discard-value-names",
+        "-x",
+        "c",
+    ]);
     if cfg.debug_info {
         cmd.arg("-g");
     }
@@ -80,7 +92,9 @@ pub fn compile_c_to_ir(cfg: &FrontendConfig, src: &Path) -> Result<Compiled, Fro
 
     let diagnostics = String::from_utf8_lossy(&out.stderr).into_owned();
     if !out.status.success() {
-        return Err(FrontendError::Compile { stderr: diagnostics });
+        return Err(FrontendError::Compile {
+            stderr: diagnostics,
+        });
     }
     let ir = String::from_utf8(out.stdout).map_err(|_| FrontendError::NotUtf8)?;
     Ok(Compiled { ir, diagnostics })

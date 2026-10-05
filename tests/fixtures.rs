@@ -1,6 +1,6 @@
-use std::{fs, path::Path, process::Command};
 use inkwell::context::Context;
 use lltp::{build_module, hir::graph::build_graph};
+use std::{fs, path::Path, process::Command};
 
 fn compile_to_ir(c_file: &Path) -> String {
     let out = Command::new("clang")
@@ -22,8 +22,7 @@ fn all_fixtures_ingest_and_build_cfgs() {
             let ir = compile_to_ir(&path);
             let ctxt = Context::create();
             let module = build_module(&ctxt, &ir);
-            build_graph(&module)
-                .unwrap_or_else(|e| panic!("CFG build failed for {path:?}: {e:?}"));
+            build_graph(&module).unwrap_or_else(|e| panic!("CFG build failed for {path:?}: {e:?}"));
 
             count += 1;
         }
