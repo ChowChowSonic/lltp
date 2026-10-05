@@ -35,12 +35,12 @@ pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
     let reach = reachable(&normalized_cfg);
     let tree = LoopTree::build(&normalized_cfg, &dom, &reach)?;
     structure_region(
-        cfg,
+        &normalized_cfg,
         &dom,
         &pdom,
         &tree,
         &reach,
-        &cfg.entry,
+        &normalized_cfg.entry,
         &BTreeSet::new(),
         None,
     )
@@ -591,15 +591,6 @@ fn structure_region(
             let entry_blk = cfg
                 .get_block(entry)
                 .ok_or(StructurizeError::ParallelJoinsNeedNodeSplitting)?;
-            let (last_stmt_op, _last_stmt_blocks, _last_stmt_default) =
-                match entry_blk.stmts.last().unwrap() {
-                    Stmt::Switch {
-                        value,
-                        cases,
-                        default,
-                    } => (value, cases, default),
-                    _ => return Err(StructurizeError::IrreducibleControlFlow),
-                };
 
             let mut join: Option<String> = None;
             for current_succ in &entry_blk.succ {
@@ -647,10 +638,16 @@ fn structure_region(
                     arm_stmts,
                 ));
             }
-            let starting = last_stmt_op; //cfg.get_block(entry).unwrap().stmts;
+            let starting = branch
+                .as_ref()
+                .and_then(|b| b.cond.clone())
+                .unwrap_or_else(|| Expr::Var {
+                    name: "_switch_cond".into(),
+                    dtype: Ty::Int(32, true),
+                });
             let default: Vec<Stmt> = switch_arms.pop().unwrap().1;
             let mut prefix: Vec<Stmt> = vec![Stmt::Switch {
-                value: starting.clone(),
+                value: starting,
                 cases: switch_arms,
                 default,
             }];

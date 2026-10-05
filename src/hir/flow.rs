@@ -133,10 +133,10 @@ pub fn reachable_from(cfg: &Cfg, src: &str, within: &BTreeSet<String>) -> BTreeS
 pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
     let mut cfg = in_cfg.clone();
     loop {
+        let mut changed = false;
         let dom = dominators(&cfg);
         let reach = reachable(&cfg);
         let loops = natural_loops(&cfg, &dom);
-        let mut changed = false;
         // collect exit targets not in the body but are reachable
         for nl in loops {
             let mut exits: Vec<(String, String)> = Vec::new();
@@ -149,49 +149,20 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
                     }
                 }
             }
-            if exits.len() <= 1 {
+            if distinct_targets.len() <= 1 {
                 continue;
             }
             changed = true;
-            let header = &nl.header;
             let tag_name = format!("_exit_tag_{}", nl.header);
             let unified_name = format!("_unified_exit{}", nl.header);
             let targets: Vec<String> = distinct_targets.into_iter().collect();
 
             // Create unified exit block
-            for (edge_idx, (src, og_dst)) in exits.iter().enumerate() {
-                let target_idx = targets.iter().position(|t| t == og_dst).unwrap();
-                let pad_name = format!("_exit_pad_{header}_{edge_idx}");
-                let pad_stmts = [
-                    Stmt::Let {
-                        dest: Box::new(Expr::Var {
-                            name: tag_name.clone(),
-                            dtype: Ty::Int(32, true),
-                        }),
-                        src: Box::new(Expr::Literal(Lit::Int {
-                            value: target_idx as u64,
-                            bits: 32,
-                            signed: true,
-                        })),
-                    },
-                    Stmt::Branch {
-                        cond: None,
-                        then_block: unified_name.clone(),
-                        else_block: None,
-                    },
-                ];
-                let pad_block = Block {
-                    name: pad_name.clone(),
-                    stmts: pad_stmts.to_vec(),
-                    succ: vec![unified_name.clone()],
-                    pred: vec![src.clone()],
-                };
-                cfg.blocks.insert(pad_name.clone(), pad_block);
-
+            for (src, og_dst) in exits.iter() {
                 let src_blk = cfg.blocks.get_mut(src).unwrap();
                 for s in &mut src_blk.succ {
                     if s == og_dst {
-                        *s = pad_name.clone();
+                        *s = unified_name.clone();
                     }
                 }
                 if let Some(Stmt::Branch {
@@ -201,12 +172,12 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
                 }) = src_blk.stmts.last_mut()
                 {
                     if then_block == og_dst {
-                        *then_block = pad_name.clone();
+                        *then_block = unified_name.clone();
                     }
                     if let Some(e1) = else_block
                         && e1 == og_dst
                     {
-                        *else_block = Some(pad_name.clone())
+                        *else_block = Some(unified_name.clone())
                     }
                 }
                 if let Some(dest_blk) = cfg.blocks.get_mut(og_dst) {
@@ -214,11 +185,12 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
                 }
             }
 
-            let pad_names: Vec<String> = (0..exits.len())
-                .map(|i| format!("_exit_pad_{header}_{i}"))
-                .collect();
+            let mut preds = BTreeSet::new();
+            for (src, _) in &exits {
+                preds.insert(src.clone());
+            }
             let mut unified_block = Block::new(&unified_name);
-            unified_block.pred = pad_names;
+            unified_block.pred = preds.into_iter().collect();
 
             if targets.len() == 2 {
                 let cond = Expr::BinaryOp {
@@ -260,6 +232,7 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
                 }
             }
             cfg.blocks.insert(unified_name, unified_block);
+            break;
         }
         if !changed {
             break;
