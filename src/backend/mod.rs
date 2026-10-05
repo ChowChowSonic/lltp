@@ -1,3 +1,4 @@
+pub mod c_goto;
 mod expr;
 mod stmt;
 
