@@ -92,6 +92,34 @@ The hypothesis: IR-grounded reconstruction yields higher fidelity (compile rate 
 
 LLM-based transpilation flips the pipeline's selling points: quadratic token-cost scaling in project size, non-determinism and inaccuracy, low-quality or unsafe output, and wall-clock slowness.
 
+## Windows toolchain setup
+
+Building against `inkwell`/`llvm-sys` on Windows needs a real LLVM *development*
+archive, not the LLVM installer (which only ships the toolchain, no
+`llvm-config.exe` or static libs).
+
+1. Download `clang+llvm-22.1.x-x86_64-pc-windows-msvc.tar.xz` from the LLVM
+   releases page and extract it somewhere like `C:\LLVM-22.1.6`.
+2. Set environment variables (new terminal/VS Code window required after this):
+```powershell
+   setx LLVM_SYS_221_PREFIX "C:\LLVM-22.1.6"
+   setx LLTP_CLANG "C:\LLVM-22.1.6\bin\clang.exe"
+```
+3. Verify before building:
+```powershell
+   $env:LLVM_SYS_221_PREFIX
+   & "C:\LLVM-22.1.6\bin\llvm-config.exe" --version   # expect 22.1.x
+```
+
+If another LLVM install (e.g. the official installer, or a newer major
+version) is also on the machine, double-check `LLVM_SYS_221_PREFIX` still
+points at the 22.1.x dev archive — a second install can silently overwrite it.
+
+`inkwell` is pinned to `default-features = false, features = ["llvm22-1",
+"target-x86"]` in `Cargo.toml` to avoid linking unused target backends
+(Mips, Sparc, PowerPC, etc.), which otherwise fails with unresolved
+`LLVMInitialize*` symbols at link time on Windows.
+
 ## Pipeline
 
 | Stage | Responsibility | Key techniques |
