@@ -10,7 +10,7 @@ use std::fmt::{self, Formatter};
 use inkwell::values::InstructionOpcode;
 
 use lltp::backend::{ExprEmitter, Language, StmtEmitter};
-use lltp::hir::{Function, Lit, expr::Expr, stmt::Stmt, ty::Ty};
+use lltp::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
 use lltp::passes::SwitchToIfElse;
 
 /// A toy C-like backend that can print the small HIR subset this example
@@ -57,6 +57,11 @@ impl StmtEmitter for ToyBackend {
             Stmt::Switch { .. } => self.emit_switch(stmt, out),
             Stmt::Let { .. } => unreachable!("Assignment statements not supported!"),
             Stmt::Branch { .. } => unreachable!("raw IR branches are not emitted"),
+            Stmt::Loop { .. } => unreachable!("Loops are not emitted"),
+            Stmt::Break => unreachable!("Breaks are not emitted"),
+            Stmt::Continue => unreachable!("Continues are not emitted"),
+            Stmt::Label { .. } => unreachable!("Labels are not emitted"),
+            Stmt::Goto { .. } => unreachable!("Gotos are not emitted"),
         }
     }
 
@@ -229,6 +234,7 @@ fn recovered_switch() -> Function {
         name: "classify".to_string(),
         params: vec![Ty::Int(64, true)],
         return_ty: Ty::Int(64, true),
+        cfg: Cfg::default(),
         body: vec![Stmt::Switch {
             value: Expr::Var {
                 name: "x".to_string(),

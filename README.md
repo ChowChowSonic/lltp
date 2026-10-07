@@ -31,29 +31,24 @@ let module = build_module(&ctxt, IR); // IR: &str of unoptimized LLVM IR
 **2. Build per-function CFGs and detect loops.**
 
 ```rust
-use lltp::hir::cfg::Cfg;
-use lltp::hir::graph::{build_graph, has_self_referential_loop};
+use lltp::hir::Cfg;
+use lltp::hir::flow::natural_loops;
 
-// One CFG per function; successors keys cover all basic blocks,
+// One CFG per function; blocks cover all basic blocks,
 // entry is the function's first block, exits are its terminators.
 let func = module.get_first_function().expect("IR has a function");
-let cfg: Cfg = build_graph(&func).expect("CFG build");
-
-for bb in cfg.successors.keys() {
-    if has_self_referential_loop(&cfg, bb) {
-        // loop-header candidate
-    }
-}
+let cfg = Cfg::try_from(&func).expect("CFG build");
+let loops = natural_loops(&cfg);
 ```
 
 **3. Recover HIR statements/expressions from instructions.**
 
 ```rust
-use lltp::hir::{expr::Expr, stmt::Stmt};
+use lltp::hir::{Expr, Stmt};
 
 for inst in bb.get_instructions() {
-    if let Ok(stmt) = Stmt::build(inst) { /* Branch / Ret */ }
-    if let Ok(expr) = Expr::build(inst) { /* BinaryOp / Call / … */ }
+    if let Ok(stmt) = Stmt::try_from(inst) { /* Branch / Ret */ }
+    if let Ok(expr) = Expr::try_from(inst) { /* BinaryOp / Call / … */ }
 }
 ```
 

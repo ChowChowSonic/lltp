@@ -4,7 +4,7 @@ mod stmt;
 
 use std::fmt::{self, Formatter};
 
-use crate::hir::{Function, ty::Ty};
+use crate::hir::{Function, Ty};
 use crate::passes::{LowerError, Lowering, run_pipeline};
 
 pub use expr::ExprEmitter;

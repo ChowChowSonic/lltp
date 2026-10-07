@@ -1,17 +1,25 @@
-use crate::hir::expr::Expr;
-use crate::hir::ty::Ty;
-use inkwell::values::Operand;
 pub mod cfg;
+pub mod error;
 pub mod expr;
+pub mod flow;
+pub mod lowering;
 pub mod flat;
 pub mod func;
 pub mod graph;
 pub mod op;
 pub mod stmt;
+pub mod structurize;
 pub mod ty;
-pub use func::Function;
+pub mod verify;
 
-#[derive(Debug, Clone)]
+pub use cfg::{Block, Cfg};
+pub use error::{HirError, LowerError, StructurizeError};
+pub use expr::Expr;
+pub use func::Function;
+pub use stmt::{BranchInfo, Stmt};
+pub use ty::Ty;
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum Lit {
     Int {
         value: u64,
@@ -27,74 +35,11 @@ pub enum Lit {
     Void,
 }
 
-fn value_to_expr<'c>(operand: Operand<'c>) -> Result<Expr, &'static str> {
-    let bve = operand.value().ok_or("Expected a value operand")?;
-
-    if bve.is_int_value() {
-        let int = bve.into_int_value();
-        if let Some(inst) = int.as_instruction() {
-            Expr::build(inst)
-        } else if int.is_const() {
-            let bits = int.get_type().get_bit_width() as usize;
-            let value = int
-                .get_zero_extended_constant()
-                .ok_or("Could not extract integer constant")?;
-            if bits == 1 {
-                Ok(Expr::Literal(Lit::Bool(value != 0)))
-            } else {
-                Ok(Expr::Literal(Lit::Int {
-                    value,
-                    bits,
-                    signed: true,
-                }))
-            }
-        } else {
-            let name = int.get_name().to_string_lossy().into_owned();
-            Ok(Expr::Var {
-                name,
-                dtype: Ty::from(bve),
-            })
-        }
-    } else if bve.is_float_value() {
-        let float = bve.into_float_value();
-        if let Some(inst) = float.as_instruction() {
-            Expr::build(inst)
-        } else if float.is_const() {
-            let (value, _lossy) = float
-                .get_constant()
-                .ok_or("Could not extract float constant")?;
-            let bits = float.get_type().get_bit_width() as usize;
-            Ok(Expr::Literal(Lit::Float { bits, value }))
-        } else {
-            let name = float.get_name().to_string_lossy().into_owned();
-            Ok(Expr::Var {
-                name,
-                dtype: Ty::from(bve),
-            })
-        }
-    } else if bve.is_pointer_value() {
-        let ptr = bve.into_pointer_value();
-        if let Some(inst) = ptr.as_instruction() {
-            Expr::build(inst)
-        } else if ptr.is_null() {
-            Ok(Expr::Literal(Lit::NullPtr))
-        } else {
-            let name = ptr.get_name().to_string_lossy().into_owned();
-            Ok(Expr::Var {
-                name,
-                dtype: Ty::from(bve),
-            })
-        }
-    } else {
-        Err("Unsupported operand value kind")
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use inkwell::context::Context;
 
-    use super::{Lit, expr::Expr, stmt::Stmt};
+    use super::{Expr, Lit, Stmt};
 
     fn parse<'a>(ctxt: &'a Context, ir: &str) -> inkwell::module::Module<'a> {
         let mut bytes = ir.as_bytes().to_vec();
@@ -109,7 +54,7 @@ mod tests {
         for bb in func.get_basic_blocks() {
             let name = bb.get_name().to_str().unwrap_or_default().to_owned();
             for inst in bb.get_instructions() {
-                if let Ok(stmt) = Stmt::build(inst) {
+                if let Ok(stmt) = Stmt::try_from(inst) {
                     out.push((
                         format!("{name}::{opcode:?}", opcode = inst.get_opcode()),
                         stmt,

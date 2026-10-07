@@ -1,9 +1,9 @@
 use inkwell::{
-    types::{BasicType, BasicTypeEnum},
+    types::{AnyTypeEnum, BasicType, BasicTypeEnum},
     values::BasicValueEnum,
 };
 use tracing::warn;
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Void,
     Bool,
@@ -64,5 +64,23 @@ impl<'c> From<BasicTypeEnum<'c>> for Ty {
 impl<'c> From<BasicValueEnum<'c>> for Ty {
     fn from(ty: BasicValueEnum) -> Self {
         Ty::from(ty.get_type())
+    }
+}
+impl<'c> TryFrom<AnyTypeEnum<'c>> for Ty {
+    type Error = ();
+    fn try_from(any: AnyTypeEnum<'c>) -> Result<Self, ()> {
+        match any {
+            AnyTypeEnum::IntType(t) => Ok(Ty::from(BasicTypeEnum::IntType(t))),
+            AnyTypeEnum::FloatType(t) => Ok(Ty::from(BasicTypeEnum::FloatType(t))),
+            AnyTypeEnum::PointerType(t) => Ok(Ty::from(BasicTypeEnum::PointerType(t))),
+            AnyTypeEnum::ArrayType(t) => Ok(Ty::from(BasicTypeEnum::ArrayType(t))),
+            AnyTypeEnum::VectorType(t) => Ok(Ty::from(BasicTypeEnum::VectorType(t))),
+            AnyTypeEnum::StructType(t) => Ok(Ty::from(BasicTypeEnum::StructType(t))),
+            AnyTypeEnum::ScalableVectorType(t) => {
+                Ok(Ty::from(BasicTypeEnum::ScalableVectorType(t)))
+            }
+            // Void/Function: no value-producing SSA result to bind via `Let`.
+            AnyTypeEnum::FunctionType(_) | AnyTypeEnum::VoidType(_) => Err(()),
+        }
     }
 }

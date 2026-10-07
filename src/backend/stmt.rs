@@ -1,6 +1,6 @@
 use std::fmt::{self, Formatter};
 
-use crate::hir::{expr::Expr, stmt::Stmt};
+use crate::hir::{Expr, Stmt};
 
 pub trait StmtEmitter {
     /// Default: this backend cannot express the node. Panics on reach — a

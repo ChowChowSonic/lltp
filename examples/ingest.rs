@@ -7,12 +7,11 @@
 use inkwell::context::Context;
 
 use lltp::build_module;
-use lltp::hir::cfg::Cfg;
-use lltp::hir::graph::{build_graph, has_self_referential_loop};
-use lltp::hir::{expr::Expr, stmt::Stmt};
+use lltp::hir::flow::{dominators, natural_loops};
+use lltp::hir::{Cfg, Expr, Stmt};
 
-/// A small unoptimized-function IR, YARPGen-style: an irreducible jumble of
-/// basic blocks with several self-referential loops.
+/// A small unoptimized-function IR, YARPGen-style: a jumble of basic blocks
+/// with several self-referential loops.
 const IR: &str = r#"; ModuleID = '/tmp/autogen.bc'
 source_filename = "/tmp/autogen.bc"
 
@@ -69,16 +68,16 @@ fn main() {
         .get_first_function()
         .expect("Failed to find function in IR!");
     // 3. Build a per-function CFG over basic blocks.
-    let graph: Cfg = build_graph(&first_fn).expect("Failed to build function!");
-    println!("{} basic blocks in CFG", graph.successors.len());
+    let graph: Cfg = Cfg::try_from(&first_fn).expect("Failed to build function!");
+    println!("{} basic blocks in CFG", graph.blocks.len());
 
-    // 4. Find loop headers: blocks reachable from themselves.
-    let loop_headers: Vec<_> = graph
-        .successors
-        .keys()
-        .filter(|bb| has_self_referential_loop(&graph, bb))
+    // 4. Find loop headers via natural loops (dominance-based back edges).
+    let dom = dominators(&graph);
+    let loop_headers: Vec<_> = natural_loops(&graph, &dom)
+        .iter()
+        .map(|l| l.header.clone())
         .collect();
-    println!("loop-header candidates: {loop_headers:?}");
+    println!("loop headers: {loop_headers:?}");
 
     // 5. Recover HIR statements/expressions from each block's instructions.
     let func = module.get_first_function().unwrap();
@@ -87,10 +86,10 @@ fn main() {
         let mut exprs = 0usize;
         let mut stmts = 0usize;
         for inst in bb.get_instructions() {
-            if Expr::build(inst).is_ok() {
+            if Expr::try_from(inst).is_ok() {
                 exprs += 1;
             }
-            if Stmt::build(inst).is_ok() {
+            if Stmt::try_from(inst).is_ok() {
                 stmts += 1;
             }
         }

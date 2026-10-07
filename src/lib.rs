@@ -29,8 +29,7 @@ pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Module<'ctx> {
 
 #[cfg(test)]
 mod tests {
-    use crate::hir::graph::build_graph;
-    use crate::{build_module, hir::cfg::Cfg};
+    use crate::{build_module, hir::Cfg};
     use inkwell::context::Context;
 
     const IR: &str = r#"define void @f(i32 %x) {
@@ -51,17 +50,17 @@ nonpos:
         let ctxt = Context::create();
         let module = build_module(&ctxt, IR);
         let func = module.get_first_function().expect("IR contains a function");
-        let cfg: Cfg = build_graph(&func).expect("CFG build should succeed");
+        let cfg: Cfg = Cfg::try_from(&func).expect("CFG build should succeed");
 
         assert_eq!(cfg.entry, "entry");
         assert_eq!(
-            cfg.successors["entry"],
+            cfg.blocks["entry"].succ,
             vec!["nonpos".to_string(), "pos".to_string()]
         );
-        assert_eq!(cfg.preds["pos"], vec!["entry".to_string()]);
-        assert_eq!(cfg.preds["nonpos"], vec!["entry".to_string()]);
-        assert!(cfg.successors["pos"].is_empty());
-        assert!(cfg.successors["nonpos"].is_empty());
+        assert_eq!(cfg.blocks["pos"].pred, vec!["entry".to_string()]);
+        assert_eq!(cfg.blocks["nonpos"].pred, vec!["entry".to_string()]);
+        assert!(cfg.blocks["pos"].succ.is_empty());
+        assert!(cfg.blocks["nonpos"].succ.is_empty());
         assert_eq!(cfg.exits, vec!["pos".to_string(), "nonpos".to_string()]);
     }
 }
