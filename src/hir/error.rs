@@ -77,11 +77,26 @@ impl std::error::Error for LowerError {}
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StructurizeError {
     IrreducibleControlFlow,
-    MultiExitLoop { header: String, exits: Vec<String> },
-    AbnormalLoopExit { block: String, target: String },
-    NestedLoopEscapedParent { header: String, exit: String },
-    UnsupportedFanOut { block: String, successors: usize },
-    ParallelJoinsNeedNodeSplitting,
+    MultiExitLoop {
+        header: String,
+        exits: Vec<String>,
+    },
+    AbnormalLoopExit {
+        block: String,
+        target: String,
+    },
+    NestedLoopEscapedParent {
+        header: String,
+        exit: String,
+    },
+    UnsupportedFanOut {
+        block: String,
+        successors: usize,
+    },
+    /// The block whose fan-out arms re-converge at different joins.
+    ParallelJoinsNeedNodeSplitting {
+        fork: String,
+    },
     UnknownBlock(String),
 }
 
@@ -109,8 +124,11 @@ impl fmt::Display for StructurizeError {
                     "unsupported fan-out from block {block} ({successors} successors; node splitting is Task 5)"
                 )
             }
-            StructurizeError::ParallelJoinsNeedNodeSplitting => {
-                write!(f, "parallel acyclic joins require node splitting")
+            StructurizeError::ParallelJoinsNeedNodeSplitting { fork } => {
+                write!(
+                    f,
+                    "parallel acyclic joins after fork {fork} require node splitting"
+                )
             }
             StructurizeError::UnknownBlock(name) => {
                 write!(f, "unknown block in control flow graph: {name}")

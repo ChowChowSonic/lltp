@@ -159,7 +159,24 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
 
             // Create unified exit block
             for (src, og_dst) in exits.iter() {
+                let target_idx = targets.iter().position(|t| t == og_dst).unwrap();
                 let src_blk = cfg.blocks.get_mut(src).unwrap();
+
+                let insert_pos = src_blk.stmts.len().saturating_sub(1);
+                src_blk.stmts.insert(
+                    insert_pos,
+                    Stmt::Let {
+                        dest: Box::new(Expr::Var {
+                            name: tag_name.clone(),
+                            dtype: Ty::Int(32, true),
+                        }),
+                        src: Box::new(Expr::Literal(Lit::Int {
+                            value: target_idx as u64,
+                            bits: 32,
+                            signed: true,
+                        })),
+                    },
+                );
                 for s in &mut src_blk.succ {
                     if s == og_dst {
                         *s = unified_name.clone();
@@ -442,7 +459,12 @@ pub fn natural_loops(cfg: &Cfg, dom: &DomInfo) -> Vec<NaturalLoop> {
         .collect()
 }
 
-pub fn reducible(cfg: &Cfg) -> bool {
+/// T1/T2 reduction of `cfg`: repeatedly drop self-edges (T1) and fold nodes
+/// with a single predecessor into it (T2), until nothing more reduces.
+/// Returns the residual successor map — a single node means the graph is
+/// reducible; more than one means cycles remain that no single header
+/// dominates (the irreducible residue).
+pub(crate) fn t1t2_reduce(cfg: &Cfg) -> HashMap<String, BTreeSet<String>> {
     let reach = reachable(cfg);
     let mut succ: HashMap<String, BTreeSet<String>> =
         reach.iter().map(|n| (n.clone(), BTreeSet::new())).collect();
@@ -489,7 +511,11 @@ pub fn reducible(cfg: &Cfg) -> bool {
             }
         }
     }
-    succ.len() == 1
+    succ
+}
+
+pub fn reducible(cfg: &Cfg) -> bool {
+    t1t2_reduce(cfg).len() == 1
 }
 
 #[cfg(test)]

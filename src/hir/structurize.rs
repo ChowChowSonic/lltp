@@ -1,11 +1,11 @@
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
     DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, reachable, reachable_from,
-    unify_loop_exits,
+    t1t2_reduce, unify_loop_exits,
 };
-use crate::hir::{Cfg, Expr, Lit, Stmt, StructurizeError, Ty};
+use crate::hir::{Block, Cfg, Expr, Lit, Stmt, StructurizeError, Ty};
 
 pub struct LoopTree {
     pub loops: Vec<NaturalLoop>,
@@ -22,25 +22,53 @@ struct LoopContext {
     exit: Option<String>,
     latch: Option<String>,
 }
-/// Reduce a reducible CFG to structured statements. Irreducible graphs,
-/// multi-exit / multi-entry loops, and parallel acyclic joins are rejected
-/// here; Task 5 (node splitting + differential execution) lifts those.
+/// Reduce a reducible CFG to structured statements. Irreducible graphs and
+/// parallel acyclic joins are lifted automatically by node splitting
+/// (duplicating blocks until every cycle is single-entry and every fork arm
+/// owns its downstream); a growth budget turns pathological shapes back into
+/// errors instead of unbounded duplication.
 pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
-    if !reducible(cfg) {
-        return Err(StructurizeError::IrreducibleControlFlow);
+    let mut current = cfg.clone();
+    let max_blocks = cfg.len().saturating_mul(8).max(64);
+    loop {
+        if !reducible(&current) {
+            if current.len() > max_blocks {
+                return Err(StructurizeError::IrreducibleControlFlow);
+            }
+            current = split_nodes(&current)?;
+            continue;
+        }
+        let normalized = unify_loop_exits(&current);
+        match structure_cfg(&normalized) {
+            Err(StructurizeError::ParallelJoinsNeedNodeSplitting { fork })
+                if current.len() <= max_blocks =>
+            {
+                let next = split_fork(&normalized, &fork)?;
+                if next.len() == current.len() {
+                    // No clone was possible; retrying cannot make progress.
+                    return Err(StructurizeError::ParallelJoinsNeedNodeSplitting { fork });
+                }
+                current = next;
+            }
+            other => return other,
+        }
     }
-    let normalized_cfg = unify_loop_exits(cfg);
-    let dom = dominators(&normalized_cfg);
-    let pdom = PostDomInfo::from(&normalized_cfg);
-    let reach = reachable(&normalized_cfg);
-    let tree = LoopTree::build(&normalized_cfg, &dom, &reach)?;
+}
+
+/// Dominance/post-dominance setup plus region structuring over an
+/// already-normalized CFG.
+fn structure_cfg(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
+    let dom = dominators(cfg);
+    let pdom = PostDomInfo::from(cfg);
+    let reach = reachable(cfg);
+    let tree = LoopTree::build(cfg, &dom, &reach)?;
     structure_region(
-        &normalized_cfg,
+        cfg,
         &dom,
         &pdom,
         &tree,
         &reach,
-        &normalized_cfg.entry,
+        &cfg.entry,
         &BTreeSet::new(),
         None,
     )
@@ -262,8 +290,15 @@ fn partition_arm(
     let mut ret = BTreeSet::new();
     let mut q: VecDeque<String> = VecDeque::new();
     q.push_back(branch.to_string());
+    // The branch node itself is always part of the arm, but when it *is*
+    // the join we must not expand past it: everything after the join is
+    // materialized by the tail continuation, not inlined into the arm.
+    let expand = join.is_none_or(|j| j != branch);
     while let Some(name) = q.pop_front() {
         if !ret.insert(name.clone()) {
+            continue;
+        }
+        if !expand && ret.len() == 1 {
             continue;
         }
         let current = cfg.blocks.get(&name);
@@ -585,14 +620,16 @@ fn structure_region(
             // join here: when any arm terminates early the only common
             // post-dominator is the virtual sink. Derive the join from the
             // arms instead — every arm that re-converges inside the region
-            // must agree on one immediate post-dominator, arms whose ipdom is
-            // the virtual sink simply terminate, and arms converging to
-            // different nodes are parallel joins that need node splitting.
+            // must agree on one immediate post-dominator. Arms converging to
+            // different nodes (or to nothing) are handled per-arm below,
+            // each inlining its own downstream; overlapping arm regions mean
+            // the shared nodes have not been split yet.
             let entry_blk = cfg
                 .get_block(entry)
-                .ok_or(StructurizeError::ParallelJoinsNeedNodeSplitting)?;
+                .ok_or_else(|| StructurizeError::UnknownBlock(entry.to_string()))?;
 
             let mut join: Option<String> = None;
+            let mut divergent = false;
             for current_succ in &entry_blk.succ {
                 let Some(candidate) = pdom.ipdom.get(current_succ) else {
                     continue;
@@ -602,9 +639,71 @@ fn structure_region(
                 }
                 match &join {
                     Some(j) if j == candidate => {}
-                    Some(_) => return Err(StructurizeError::ParallelJoinsNeedNodeSplitting),
+                    Some(_) => {
+                        divergent = true;
+                        break;
+                    }
                     None => join = Some(candidate.clone()),
                 }
+            }
+
+            if divergent {
+                let arm_sets: Vec<BTreeSet<String>> = entry_blk
+                    .succ
+                    .iter()
+                    .map(|s| reachable_from(cfg, s, nodes))
+                    .collect();
+                for i in 0..arm_sets.len() {
+                    for j in (i + 1)..arm_sets.len() {
+                        let clash = arm_sets[i]
+                            .intersection(&arm_sets[j])
+                            .any(|x| !is_frame_boundary(x, frame_exits, loop_ctx));
+                        if clash {
+                            return Err(StructurizeError::ParallelJoinsNeedNodeSplitting {
+                                fork: entry.to_string(),
+                            });
+                        }
+                    }
+                }
+                // Each arm owns a disjoint copy of its downstream: inline it
+                // fully; there is no shared tail.
+                let mut switch_arms: Vec<(Lit, Vec<Stmt>)> = Vec::new();
+                for (i, current_succ) in entry_blk.succ.iter().enumerate() {
+                    let mut arm_stmts = structure_region(
+                        cfg,
+                        dom,
+                        pdom,
+                        tree,
+                        &arm_sets[i],
+                        current_succ,
+                        frame_exits,
+                        loop_ctx,
+                    )?;
+                    if arm_stmts.is_empty() {
+                        arm_stmts.push(placeholder());
+                    }
+                    switch_arms.push((
+                        Lit::Int {
+                            value: i as u64,
+                            bits: 32,
+                            signed: true,
+                        },
+                        arm_stmts,
+                    ));
+                }
+                let starting = branch
+                    .as_ref()
+                    .and_then(|b| b.cond.clone())
+                    .unwrap_or_else(|| Expr::Var {
+                        name: "_switch_cond".into(),
+                        dtype: Ty::Int(32, true),
+                    });
+                let default: Vec<Stmt> = switch_arms.pop().unwrap().1;
+                return Ok(vec![Stmt::Switch {
+                    value: starting,
+                    cases: switch_arms,
+                    default,
+                }]);
             }
             let joins = join.as_ref();
 
@@ -626,7 +725,16 @@ fn structure_region(
                     &arm_frame_exits,
                     loop_ctx,
                 )?;
-                if arm_stmts.is_empty() && arm.len() != 1 || arm.first() != Some(joins.unwrap()) {
+                // An arm consisting solely of the join block is materialized
+                // by the tail continuation below; every other arm needs a
+                // statement to keep its block in the rebuilt CFG.
+                let arm_is_join = joins.is_some_and(|jn| arm.first() == Some(jn));
+                let needs_placeholder = if joins.is_some() {
+                    (arm_stmts.is_empty() && arm.len() != 1) || !arm_is_join
+                } else {
+                    arm_stmts.is_empty()
+                };
+                if needs_placeholder {
                     arm_stmts.push(placeholder());
                 }
                 switch_arms.push((
@@ -665,6 +773,257 @@ fn structure_region(
             Ok(prefix)
         }
     }
+}
+
+/// Whether `x` is a legitimate boundary of the enclosing frame: a known
+/// frame exit, or (inside a loop) the loop's exit target or header.
+fn is_frame_boundary(
+    x: &str,
+    frame_exits: &BTreeSet<String>,
+    loop_ctx: Option<&LoopContext>,
+) -> bool {
+    frame_exits.contains(x)
+        || loop_ctx.is_some_and(|ctx| ctx.exit.as_deref() == Some(x) || ctx.header == x)
+}
+
+/// A fresh, collision-free name for a cloned block: `{base}_split`,
+/// `{base}_split2`, … Deterministic for a given graph.
+fn fresh_split_name(cfg: &Cfg, base: &str) -> String {
+    let mut name = format!("{base}_split");
+    let mut n = 1usize;
+    while cfg.contains_block(&name) {
+        n += 1;
+        name = format!("{base}_split{n}");
+    }
+    name
+}
+
+/// Redirect every edge `old` leaving `blk` (successor list and trailing
+/// branch statement) to `new`.
+fn retarget_edge(blk: &mut Block, old: &str, new: &str) {
+    for s in &mut blk.succ {
+        if s == old {
+            *s = new.to_string();
+        }
+    }
+    if let Some(Stmt::Branch {
+        then_block,
+        else_block,
+        ..
+    }) = blk.stmts.last_mut()
+    {
+        if then_block == old {
+            *then_block = new.to_string();
+        }
+        if let Some(e) = else_block
+            && e == old
+        {
+            *else_block = Some(new.to_string());
+        }
+    }
+}
+
+/// Pick the node to duplicate: among the nodes that survive the T1/T2
+/// reduction (the irreducible residue) with at least two predecessors
+/// (otherwise there is no incoming edge to displace), prefer the cheapest
+/// duplication (fewest statements), tie-breaking by name for determinism.
+fn split_node_selector(cfg: &Cfg) -> Option<String> {
+    let residue = t1t2_reduce(cfg);
+    cfg.blocks
+        .keys()
+        .filter(|n| residue.contains_key(*n) && cfg.blocks[*n].pred.len() >= 2)
+        .min_by(|a, b| {
+            cfg.blocks[*a]
+                .stmts
+                .len()
+                .cmp(&cfg.blocks[*b].stmts.len())
+                .then_with(|| a.cmp(b))
+        })
+        .cloned()
+}
+
+/// Duplicate `name` once per predecessor beyond the first, redirecting each
+/// displaced predecessor's edges to its private clone; the original keeps
+/// the first predecessor. Splitting multi-predecessor nodes on the
+/// irreducible residue turns multi-entry cycles into single-entry ones.
+fn split_node(cfg: &mut Cfg, name: &str) -> Result<(), StructurizeError> {
+    let orig = cfg
+        .blocks
+        .get(name)
+        .ok_or_else(|| StructurizeError::UnknownBlock(name.to_string()))?
+        .clone();
+    if orig.pred.len() < 2 {
+        return Ok(());
+    }
+    let keep = orig.pred[0].clone();
+    for p in orig.pred.iter().skip(1) {
+        let cname = fresh_split_name(cfg, name);
+        let mut clone = orig.clone();
+        clone.name = cname.clone();
+        clone.pred = vec![p.clone()];
+        // A self-edge stays on the clone, so the clone loops on itself the
+        // way the original does.
+        retarget_edge(&mut clone, name, &cname);
+        // The displaced predecessor now branches into the clone.
+        let p_blk = cfg
+            .blocks
+            .get_mut(p)
+            .ok_or_else(|| StructurizeError::UnknownBlock(p.clone()))?;
+        retarget_edge(p_blk, name, &cname);
+        cfg.blocks.insert(cname.clone(), clone);
+        // The clone's successors (its own self-loop included) gain it as a
+        // predecessor.
+        for s in cfg.blocks[&cname].succ.clone() {
+            if let Some(t) = cfg.blocks.get_mut(&s)
+                && !t.pred.contains(&cname)
+            {
+                t.pred.push(cname.clone());
+            }
+        }
+        if cfg.blocks[&cname].succ.is_empty() && !cfg.exits.contains(&cname) {
+            cfg.exits.push(cname.clone());
+        }
+    }
+    let orig_blk = cfg
+        .blocks
+        .get_mut(name)
+        .ok_or_else(|| StructurizeError::UnknownBlock(name.to_string()))?;
+    orig_blk.pred.retain(|x| *x == keep);
+    Ok(())
+}
+
+/// Break irreducible control flow by node splitting: repeatedly duplicate a
+/// multi-predecessor node from the T1/T2 residue until every cycle has a
+/// single entry. Bounded: if the graph outgrows the budget before becoming
+/// reducible, the irreducibility error is returned.
+fn split_nodes(in_cfg: &Cfg) -> Result<Cfg, StructurizeError> {
+    let mut cfg = in_cfg.clone();
+    let max_blocks = in_cfg.len().saturating_mul(8).max(64);
+    while !reducible(&cfg) {
+        if cfg.len() > max_blocks {
+            return Err(StructurizeError::IrreducibleControlFlow);
+        }
+        let Some(node) = split_node_selector(&cfg) else {
+            return Err(StructurizeError::IrreducibleControlFlow);
+        };
+        split_node(&mut cfg, &node)?;
+    }
+    Ok(cfg)
+}
+
+/// Give each of `fork`'s arms a private copy of the downstream nodes the
+/// arms share, so the structurer can emit every switch arm fully inlined.
+/// Only edges leaving an arm's own subtree are retargeted, so paths that do
+/// not pass through this arm keep targeting the originals and nothing
+/// changes behavior.
+fn split_fork(cfg: &Cfg, fork: &str) -> Result<Cfg, StructurizeError> {
+    let fork_blk = cfg
+        .blocks
+        .get(fork)
+        .ok_or_else(|| StructurizeError::UnknownBlock(fork.to_string()))?;
+    let succs = fork_blk.succ.clone();
+    if succs.len() < 2 {
+        return Ok(cfg.clone());
+    }
+    let all: BTreeSet<String> = cfg.blocks.keys().cloned().collect();
+    let arms: Vec<BTreeSet<String>> = succs.iter().map(|s| reachable_from(cfg, s, &all)).collect();
+
+    let mut out = cfg.clone();
+    for (i, arm) in arms.iter().enumerate() {
+        let arm_entry = &succs[i];
+        // Nodes this arm shares with another arm must be duplicated per arm.
+        // The arm's own entry stays put: the fork has only one edge to give.
+        let shared: BTreeSet<String> = arm
+            .iter()
+            .filter(|n| {
+                *n != arm_entry
+                    && arms
+                        .iter()
+                        .enumerate()
+                        .any(|(j, other)| j != i && other.contains(*n))
+            })
+            .cloned()
+            .collect();
+        if shared.is_empty() {
+            continue;
+        }
+
+        // 1. Create the clones; predecessors are wired once the map is whole.
+        let mut map: HashMap<String, String> = HashMap::new();
+        for n in &shared {
+            let cname = fresh_split_name(&out, n);
+            let mut clone = out.blocks[n].clone();
+            clone.name = cname.clone();
+            clone.pred.clear();
+            out.blocks.insert(cname.clone(), clone);
+            map.insert(n.clone(), cname);
+        }
+
+        // 2. Each clone inherits the original's arm-side predecessors,
+        //    mapped through this arm's earlier clones.
+        for n in &shared {
+            let cname = map[n].clone();
+            let mut new_pred: Vec<String> = Vec::new();
+            for p in &cfg.blocks[n].pred {
+                if !arm.contains(p) {
+                    continue;
+                }
+                let p_eff = map.get(p).cloned().unwrap_or_else(|| p.clone());
+                if !new_pred.contains(&p_eff) {
+                    new_pred.push(p_eff);
+                }
+            }
+            if let Some(c) = out.blocks.get_mut(&cname) {
+                c.pred = new_pred;
+            }
+        }
+
+        // 3. Retarget edges into the shared nodes — but only from blocks
+        //    private to this arm plus the fresh clones; blocks shared with
+        //    other arms keep serving their own paths.
+        let mut sweep: BTreeSet<String> = arm
+            .iter()
+            .filter(|n| !shared.contains(*n))
+            .cloned()
+            .collect();
+        sweep.extend(map.values().cloned());
+        for b in &sweep {
+            let Some(blk) = out.blocks.get_mut(b) else {
+                continue;
+            };
+            for s in &mut blk.succ {
+                if let Some(c) = map.get(s) {
+                    *s = c.clone();
+                }
+            }
+            if let Some(Stmt::Branch {
+                then_block,
+                else_block,
+                ..
+            }) = blk.stmts.last_mut()
+            {
+                if let Some(c) = map.get(then_block) {
+                    *then_block = c.clone();
+                }
+                if let Some(e) = else_block
+                    && let Some(c) = map.get(e)
+                {
+                    *else_block = Some(c.clone());
+                }
+            }
+        }
+
+        // 4. The originals lose only the incoming edges that were actually
+        //    redirected to clones (i.e. those sourced from swept blocks);
+        //    edges from shared blocks not swept keep their preds recorded.
+        let sweep_set: BTreeSet<&String> = sweep.iter().collect();
+        for n in &shared {
+            if let Some(orig) = out.blocks.get_mut(n) {
+                orig.pred.retain(|p| !sweep_set.contains(p));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// A statement that occupies a block without changing its semantics, used to
@@ -781,8 +1140,8 @@ mod test {
     use crate::hir::{
         cfg::Cfg,
         error::StructurizeError,
-        flow::{dominators, reachable},
-        structurize::{LoopTree, structurize},
+        flow::{dominators, reachable, reducible, unify_loop_exits},
+        structurize::{LoopTree, split_fork, split_nodes, structurize},
         verify::{are_equivalent, structured_to_cfg},
     };
 
@@ -818,22 +1177,53 @@ mod test {
     }
 
     #[test]
-    fn structurize_rejects_irreducible() {
+    fn irreducible_cycle_structures_after_splitting() {
         let cfg = cfg_from(
             "A",
             &[
                 ("A", "B"),
                 ("A", "C"),
+                ("A", "ex"),
                 ("B", "A"),
                 ("B", "C"),
                 ("C", "A"),
                 ("C", "B"),
             ],
         );
-        assert_eq!(
-            structurize(&cfg),
-            Err(StructurizeError::IrreducibleControlFlow)
+        let split = split_nodes(&cfg).unwrap();
+        // Splitting must leave every cycle single-entry.
+        assert!(reducible(&split));
+        // The previously-unstructurizable irreducible cycle now structures.
+        assert!(structurize(&cfg).is_ok());
+    }
+
+    #[test]
+    fn irreducible_two_header_cycle_structures_after_splitting() {
+        let cfg = cfg_from(
+            "entry",
+            &[
+                ("entry", "a"),
+                ("entry", "b"),
+                ("a", "b"),
+                ("b", "a"),
+                ("b", "ex"),
+            ],
         );
+        let split = split_nodes(&cfg).unwrap();
+        assert!(reducible(&split));
+        assert!(structurize(&cfg).is_ok());
+    }
+
+    #[test]
+    fn while_loop_is_left_unsplit() {
+        let cfg = cfg_from(
+            "entry",
+            &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "h")],
+        );
+        let split = split_nodes(&cfg).unwrap();
+        // A single-entry loop is already reducible: no block may be cloned.
+        assert!(reducible(&split));
+        assert!(split.blocks.keys().all(|n| !n.contains("_split")));
     }
 
     #[test]
@@ -1110,7 +1500,7 @@ mod test {
     }
 
     #[test]
-    fn parallel_joins_need_node_splitting() {
+    fn parallel_joins_structure_after_splitting() {
         let cfg = cfg_from(
             "e",
             &[
@@ -1126,10 +1516,52 @@ mod test {
                 ("j2", "y"),
             ],
         );
-        assert_eq!(
-            structurize(&cfg),
-            Err(StructurizeError::ParallelJoinsNeedNodeSplitting)
+        // Two parallel diamonds: the fork's arms re-converge at different
+        // joins, so each arm must own a private copy of its downstream.
+        let normalized = unify_loop_exits(&cfg);
+        let split = split_fork(&normalized, "e").unwrap();
+        let stmts = structurize(&cfg).unwrap();
+        assert!(are_equivalent(&split, &structured_to_cfg(&stmts)));
+    }
+
+    #[test]
+    fn parallel_joins_split_preserves_arm_entries() {
+        // A sibling arm flowing into another arm's entry must not be broken:
+        // the shared node is cloned for the reaching arm only.
+        let cfg = cfg_from(
+            "f",
+            &[("f", "a"), ("f", "b"), ("a", "b"), ("b", "j"), ("j", "x")],
         );
+        let normalized = unify_loop_exits(&cfg);
+        let split = split_fork(&normalized, "f").unwrap();
+        // Every original path still exists, on private copies where shared.
+        assert!(split.contains_block("a"));
+        assert!(split.contains_block("b"));
+        assert!(split.contains_block("j"));
+        assert!(split.blocks["a"].succ.iter().any(|s| s.starts_with("b")));
+        // splitting must leave a well-formed, consistent graph: every succ
+        // edge has its matching pred record and vice versa, and every path
+        // from `f` still reaches an exit.
+        for b in split.blocks.values() {
+            for s in &b.succ {
+                assert!(
+                    split.blocks[s].pred.contains(&b.name),
+                    "missing pred {} -> {}",
+                    b.name,
+                    s
+                );
+            }
+            for p in &b.pred {
+                assert!(
+                    split.blocks[p].succ.contains(&b.name),
+                    "missing succ {} -> {}",
+                    p,
+                    b.name
+                );
+            }
+        }
+        let stmts = structurize(&cfg);
+        assert!(stmts.is_ok());
     }
     #[test]
     fn three_way_round_trips() {
