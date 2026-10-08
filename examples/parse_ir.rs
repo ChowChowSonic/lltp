@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use inkwell::context::Context;
-use lltp::{load_module, parse_ir};
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
+use lltp::{load_module, parse_ir};
 
 fn main() -> ExitCode {
     let mut cfg = FrontendConfig::default();

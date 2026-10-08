@@ -115,8 +115,14 @@ mod tests {
 
     #[test]
     fn sniff_detects_bitcode_magics() {
-        assert_eq!(sniff_format(&[0x42, 0x43, 0xC0, 0xDE, 0x35]), IrFormat::Bitcode);
-        assert_eq!(sniff_format(&[0xDE, 0xC0, 0x17, 0x0B, 0x00]), IrFormat::Bitcode);
+        assert_eq!(
+            sniff_format(&[0x42, 0x43, 0xC0, 0xDE, 0x35]),
+            IrFormat::Bitcode
+        );
+        assert_eq!(
+            sniff_format(&[0xDE, 0xC0, 0x17, 0x0B, 0x00]),
+            IrFormat::Bitcode
+        );
     }
 
     #[test]
@@ -137,6 +143,12 @@ mod tests {
     fn parse_ir_rejects_garbage_without_panicking() {
         let ctxt = Context::create();
         let res = parse_ir(&ctxt, "this is not llvm ir");
-        assert!(matches!(res, Err(IngestError::Parse { format: IrFormat::Text, .. })));
+        assert!(matches!(
+            res,
+            Err(IngestError::Parse {
+                format: IrFormat::Text,
+                ..
+            })
+        ));
     }
 }

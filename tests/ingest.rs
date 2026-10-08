@@ -93,7 +93,13 @@ fn malformed_text_is_a_parse_error() {
     let path = out_dir().join("malformed.ll");
     fs::write(&path, "define i32 @f( { this is not IR").unwrap();
     let err = expect_err(&path);
-    assert!(matches!(err, IngestError::Parse { format: IrFormat::Text, .. }));
+    assert!(matches!(
+        err,
+        IngestError::Parse {
+            format: IrFormat::Text,
+            ..
+        }
+    ));
 }
 
 #[test]
@@ -109,5 +115,11 @@ fn truncated_bitcode_is_a_parse_error() {
     fs::write(&cut, &bytes[..8]).unwrap();
 
     let err = expect_err(&cut);
-    assert!(matches!(err, IngestError::Parse { format: IrFormat::Bitcode, .. }));
+    assert!(matches!(
+        err,
+        IngestError::Parse {
+            format: IrFormat::Bitcode,
+            ..
+        }
+    ));
 }

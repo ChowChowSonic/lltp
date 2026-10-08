@@ -2,8 +2,8 @@ use inkwell::{context::Context, module::Module, values::GlobalValue};
 pub mod backend;
 pub mod frontend;
 pub mod hir;
-pub mod passes;
 pub mod ingest;
+pub mod passes;
 pub use ingest::{IngestError, IrFormat, load_module, parse_ir};
 
 pub fn get_globals<'ctx>(module: &Module<'ctx>) -> Vec<GlobalValue<'ctx>> {

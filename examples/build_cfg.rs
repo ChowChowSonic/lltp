@@ -1,10 +1,11 @@
+use std::fmt::{Debug, Formatter};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use inkwell::context::Context;
-use lltp::build_module;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
-use lltp::hir::graph::{build_graph, has_self_referential_loop};
+use lltp::hir::lowering::build_graph;
+use lltp::{build_module, hir};
 
 fn main() -> ExitCode {
     let mut cfg = FrontendConfig::default();
@@ -46,26 +47,31 @@ fn main() -> ExitCode {
             continue;
         }
         let fname = func.get_name().to_string_lossy().into_owned();
-        let graph = match build_graph(&func) {
+        let mut graph = match build_graph(&func) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("CFG build failed for `{fname}`: {e}");
                 return ExitCode::FAILURE;
             }
         };
+
         eprintln!(
             "[2.1.3] `{fname}`: built CFG with {} basic block(s)",
             graph.blocks.len()
         );
-
-        for bb in graph.blocks.keys() {
-            if has_self_referential_loop(&graph, bb) {
-                let name = if bb.is_empty() {
-                    "<unnamed>"
-                } else {
-                    bb.as_str()
-                };
-                loop_headers.push(format!("{fname}::{name}"));
+        let stmts = graph.structurize().unwrap_or(Vec::new());
+        assert!(!stmts.is_empty());
+        for bb in stmts {
+            match bb {
+                hir::Stmt::Loop { cond, body } => {
+                    let name = if body.is_empty() {
+                        "<unnamed>"
+                    } else {
+                        "<unassigned>"
+                    };
+                    loop_headers.push(format!("{fname}::{name}"));
+                }
+                _ => {}
             }
         }
     }
