@@ -1,6 +1,6 @@
 use inkwell::context::Context;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
-use lltp::{build_module, hir::graph::build_graph};
+use lltp::{build_module, hir::lowering::build_graph};
 use std::fs;
 
 #[test]

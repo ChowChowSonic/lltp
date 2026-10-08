@@ -21,7 +21,7 @@ pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Module<'ctx> {
 
 #[cfg(test)]
 mod tests {
-    use crate::hir::graph::build_graph;
+    use crate::hir::lowering::build_graph;
     use crate::{build_module, hir::cfg::Cfg};
     use inkwell::context::Context;
 
@@ -45,13 +45,13 @@ nonpos:
 
         assert_eq!(cfg.entry, "entry");
         assert_eq!(
-            cfg.successors["entry"],
+            cfg.blocks["entry"].succ,
             vec!["nonpos".to_string(), "pos".to_string()]
         );
-        assert_eq!(cfg.preds["pos"], vec!["entry".to_string()]);
-        assert_eq!(cfg.preds["nonpos"], vec!["entry".to_string()]);
-        assert!(cfg.successors["pos"].is_empty());
-        assert!(cfg.successors["nonpos"].is_empty());
+        assert_eq!(cfg.blocks["pos"].pred, vec!["entry".to_string()]);
+        assert_eq!(cfg.blocks["nonpos"].pred, vec!["entry".to_string()]);
+        assert!(cfg.blocks["pos"].succ.is_empty());
+        assert!(cfg.blocks["nonpos"].succ.is_empty());
         assert_eq!(cfg.exits, vec!["pos".to_string(), "nonpos".to_string()]);
     }
 }

@@ -1,4 +1,3 @@
-use std::fmt::{Debug, Formatter};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -47,7 +46,7 @@ fn main() -> ExitCode {
             continue;
         }
         let fname = func.get_name().to_string_lossy().into_owned();
-        let mut graph = match build_graph(&func) {
+        let graph = match build_graph(&func) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("CFG build failed for `{fname}`: {e}");
@@ -62,16 +61,13 @@ fn main() -> ExitCode {
         let stmts = graph.structurize().unwrap_or(Vec::new());
         assert!(!stmts.is_empty());
         for bb in stmts {
-            match bb {
-                hir::Stmt::Loop { cond, body } => {
-                    let name = if body.is_empty() {
-                        "<unnamed>"
-                    } else {
-                        "<unassigned>"
-                    };
-                    loop_headers.push(format!("{fname}::{name}"));
-                }
-                _ => {}
+            if let hir::Stmt::Loop { cond: _, body } = bb {
+                let name = if body.is_empty() {
+                    "<unnamed>"
+                } else {
+                    "<unassigned>"
+                };
+                loop_headers.push(format!("{fname}::{name}"));
             }
         }
     }
