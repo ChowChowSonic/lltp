@@ -1,8 +1,10 @@
 use inkwell::{context::Context, module::Module, values::GlobalValue};
 pub mod backend;
-pub mod frontend; // New directory
+pub mod frontend;
 pub mod hir;
+pub mod ingest;
 pub mod passes;
+pub use ingest::{IngestError, IrFormat, load_module, parse_ir};
 
 pub fn get_globals<'ctx>(module: &Module<'ctx>) -> Vec<GlobalValue<'ctx>> {
     let mut ret: Vec<GlobalValue<'ctx>> = Vec::new();
@@ -12,24 +14,15 @@ pub fn get_globals<'ctx>(module: &Module<'ctx>) -> Vec<GlobalValue<'ctx>> {
     ret
 }
 
+/// Parse textual IR
 pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Module<'ctx> {
-    let ir_complete = if ir.ends_with('\0') {
-        ir.to_string()
-    } else {
-        let mut s = ir.to_string();
-        s.push('\0');
-        s
-    };
-    let bytes = ir_complete.into_bytes();
-    let mem_buf =
-        inkwell::memory_buffer::MemoryBuffer::create_from_memory_range(&bytes, "test_module");
-    ctxt.create_module_from_ir(mem_buf)
-        .expect("Failed to create module from IR")
+    parse_ir(ctxt, ir).unwrap_or_else(|e| panic!("Failed to create module from IR: {e}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{build_module, hir::Cfg};
+    use crate::hir::lowering::build_graph;
+    use crate::{build_module, hir::cfg::Cfg};
     use inkwell::context::Context;
 
     const IR: &str = r#"define void @f(i32 %x) {
@@ -43,14 +36,12 @@ nonpos:
 }
 "#;
 
-    /// Spec: ingest IR through the public `build_module` seam, then build a
-    /// per-function CFG from the resulting module.
     #[test]
     fn cfgs_build_from_ingested_module() {
         let ctxt = Context::create();
         let module = build_module(&ctxt, IR);
         let func = module.get_first_function().expect("IR contains a function");
-        let cfg: Cfg = Cfg::try_from(&func).expect("CFG build should succeed");
+        let cfg: Cfg = build_graph(&func).expect("CFG build should succeed");
 
         assert_eq!(cfg.entry, "entry");
         assert_eq!(

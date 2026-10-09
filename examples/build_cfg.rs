@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use inkwell::context::Context;
-use lltp::build_module;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
-use lltp::hir::graph::{build_graph, has_self_referential_loop};
+use lltp::hir::lowering::build_graph;
+use lltp::{build_module, hir};
 
 fn main() -> ExitCode {
     let mut cfg = FrontendConfig::default();
@@ -53,17 +53,19 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         };
+
         eprintln!(
             "[2.1.3] `{fname}`: built CFG with {} basic block(s)",
             graph.blocks.len()
         );
-
-        for bb in graph.blocks.keys() {
-            if has_self_referential_loop(&graph, bb) {
-                let name = if bb.is_empty() {
+        let stmts = graph.structurize().unwrap_or(Vec::new());
+        assert!(!stmts.is_empty());
+        for bb in stmts {
+            if let hir::Stmt::Loop { cond: _, body } = bb {
+                let name = if body.is_empty() {
                     "<unnamed>"
                 } else {
-                    bb.as_str()
+                    "<unassigned>"
                 };
                 loop_headers.push(format!("{fname}::{name}"));
             }

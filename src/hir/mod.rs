@@ -1,11 +1,10 @@
 pub mod cfg;
 pub mod error;
 pub mod expr;
-pub mod flow;
-pub mod lowering;
 pub mod flat;
+pub mod flow;
 pub mod func;
-pub mod graph;
+pub mod lowering;
 pub mod op;
 pub mod stmt;
 pub mod structurize;
