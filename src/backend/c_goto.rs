@@ -1,16 +1,4 @@
 //! Baseline C emitter: one label per basic block, `goto` for every branch.
-//!
-//! Correct for any CFG (including irreducible ones), so it needs no control-flow
-//! structuring. It is deliberately *not* a `Language` impl: it consumes the flat
-//! pre-structuring HIR (`hir::flat`). Once structuring exists, a structured C
-//! backend replaces it and this stays as the `goto` fallback.
-//!
-//! Conventions:
-//! - every integer local is a *signed* `intN_t`; unsigned operations
-//!   (`udiv`, `urem`, `lshr`, `ult`, `zext`, ...) cast to `uintN_t` at the use
-//! - `i1` is `_Bool`
-//! - all locals (allocas and temporaries) are declared at function top
-//! - compile the output with `-fwrapv` (LLVM `add` without `nsw` wraps)
 
 use std::fmt::Write;
 
@@ -136,6 +124,7 @@ fn inst(i: &Inst) -> Result<String, String> {
     Ok(match i {
         Inst::Load { dest, ptr } => format!("{dest} = {ptr};"),
         Inst::Store { ptr, value } => format!("{ptr} = {};", val(value)?),
+        Inst::Copy { dest, src } => format!("{dest} = {};", val(src)?),
         Inst::Bin {
             dest,
             ty,

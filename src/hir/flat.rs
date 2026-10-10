@@ -1,7 +1,3 @@
-//! Scope (bare bones, `clang -O0 -fno-discard-value-names` output):
-//! - supported: alloca, load/store through an alloca, integer/float binops,
-//!   icmp/fcmp, scalar casts, direct calls, br, ret, unreachable
-
 use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
@@ -10,7 +6,7 @@ use inkwell::basic_block::BasicBlock;
 use inkwell::module::Module;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{
-    BasicValueEnum, FunctionValue, InstructionOpcode as Op, InstructionValue, Operand,
+    BasicValueEnum, FunctionValue, InstructionOpcode as Op, InstructionValue, Operand, PhiValue,
 };
 
 use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp};
@@ -77,6 +73,8 @@ pub enum Inst {
         callee: String,
         args: Vec<Val>,
     },
+    /// `dest = src`: a lowered phi edge copy.
+    Copy { dest: String, src: Val },
 }
 
 #[derive(Debug, Clone)]
@@ -213,7 +211,7 @@ impl Namer {
         }
     }
 
-    /// Unique C identifier derived from `hint`; empty hint -> `t0`, `t1`, ...
+    /// Unique C identifier derived from `hint`;
     fn value(&mut self, hint: &str) -> String {
         let base = if hint.is_empty() {
             let t = format!("t{}", self.next_tmp);
@@ -274,6 +272,75 @@ fn alloca_ty(inst: InstructionValue<'_>) -> Result<Ty, String> {
     Ok(Ty::from(t))
 }
 
+/// Phi result type. Only integer and float phis are lowered;
+/// pointer and aggregate phis are rejected with a clean error.
+fn phi_ty(inst: InstructionValue<'_>) -> Result<Ty, String> {
+    let basic = BasicTypeEnum::try_from(inst.get_type())
+        .map_err(|_| "phi of a non-first-class type is not supported".to_string())?;
+    match basic {
+        BasicTypeEnum::IntType(_) | BasicTypeEnum::FloatType(_) => Ok(Ty::from(basic)),
+        _ => Err("phi of pointer/aggregate type is not supported yet".to_string()),
+    }
+}
+
+/// Incoming `(dest, type, [(predecessor, value)])` for each phi of a block.
+type PhiIn<'ctx> = Vec<(String, Ty, Vec<(BasicBlock<'ctx>, Val)>)>;
+
+/// The `(phi local, type, incoming value)` copies for the edge `from -> to`.
+fn edge_copies<'ctx>(
+    phis: &HashMap<BasicBlock<'ctx>, PhiIn<'ctx>>,
+    from: BasicBlock<'ctx>,
+    to: BasicBlock<'ctx>,
+) -> Result<Vec<(String, Ty, Val)>, String> {
+    let mut out = Vec::new();
+    for (dest, ty, incoming) in phis.get(&to).into_iter().flatten() {
+        let (_, v) = incoming.iter().find(|(b, _)| *b == from).ok_or_else(|| {
+            format!(
+                "phi `{dest}` has no incoming value for block `{}`",
+                from.get_name().to_string_lossy()
+            )
+        })?;
+        out.push((dest.clone(), ty.clone(), v.clone()));
+    }
+    Ok(out)
+}
+
+/// Sequentialize one edge's parallel phi copies.
+fn parallel_copy(
+    copies: Vec<(String, Ty, Val)>,
+    vnames: &mut Namer,
+    locals: &mut Vec<(String, Ty)>,
+) -> Vec<Inst> {
+    let dests: HashSet<String> = copies.iter().map(|(d, _, _)| d.clone()).collect();
+    let mut saves = Vec::new();
+    let mut copy_insts = Vec::new();
+    for (dest, _, src) in &copies {
+        if let Val::Var(n, _) = src
+            && n == dest
+        {
+            continue;
+        }
+        let src = match src {
+            Val::Var(n, vty) if dests.contains(n) => {
+                let tmp = vnames.value("phi_tmp");
+                locals.push((tmp.clone(), vty.clone()));
+                saves.push(Inst::Copy {
+                    dest: tmp.clone(),
+                    src: src.clone(),
+                });
+                Val::Var(tmp, vty.clone())
+            }
+            other => other.clone(),
+        };
+        copy_insts.push(Inst::Copy {
+            dest: dest.clone(),
+            src,
+        });
+    }
+    saves.extend(copy_insts);
+    saves
+}
+
 #[derive(PartialEq)]
 enum CallKind {
     Skip,
@@ -319,7 +386,8 @@ fn defines_value(inst: InstructionValue<'_>) -> Result<bool, String> {
         | Op::UIToFP
         | Op::SIToFP
         | Op::FPTrunc
-        | Op::FPExt => Ok(true),
+        | Op::FPExt
+        | Op::Phi => Ok(true),
         Op::Store | Op::Br | Op::Return | Op::Unreachable => Ok(false),
         Op::Call => Ok(call_kind(inst)? == CallKind::Value),
         op if BinOp::from_opcode(op).is_some() => Ok(true),
@@ -457,8 +525,7 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
         labels.insert(*bb, lnames.value(&hint));
     }
 
-    // pass 1: name every value-producing instruction (uses may precede
-    // defs in block layout order, so this must be a separate pass)
+    // pass 1: name every value-producing instruction
     let mut names = HashMap::new();
     let mut locals = Vec::new();
     for bb in &blocks {
@@ -473,6 +540,8 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
             let n = vnames.value(&hint);
             let ty = if inst.get_opcode() == Op::Alloca {
                 alloca_ty(inst)?
+            } else if inst.get_opcode() == Op::Phi {
+                phi_ty(inst)?
             } else {
                 result_ty(inst)?
             };
@@ -487,8 +556,29 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
         labels,
     };
 
+    // phi incoming values per block (needs `cx` to resolve operands)
+    let mut phis: HashMap<BasicBlock<'_>, PhiIn<'_>> = HashMap::new();
+    for bb in &blocks {
+        for inst in bb.get_instructions() {
+            if inst.get_opcode() != Op::Phi {
+                continue;
+            }
+            let phi = PhiValue::try_from(inst).map_err(|_| "phi is not a PhiValue")?;
+            let mut incoming = Vec::new();
+            for i in 0..phi.count_incoming() {
+                let (v, from) = phi.get_incoming(i).ok_or("phi incoming index out of range")?;
+                incoming.push((from, cx.val(Some(Operand::Value(v)))?));
+            }
+            phis.entry(*bb)
+                .or_default()
+                .push((cx.name(inst)?, phi_ty(inst)?, incoming));
+        }
+    }
+
     // pass 2: translate
     let mut out_blocks = Vec::new();
+    // `<from>_to_<to>` blocks that carry phi copies for a conditional edge
+    let mut edge_blocks = Vec::new();
     for bb in &blocks {
         let mut insts = Vec::new();
         let mut term = None;
@@ -541,18 +631,49 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                         });
                     }
                 },
-                Op::Br => {
-                    term = Some(match inst.get_num_operands() {
-                        1 => Term::Br(cx.label(opnd(0))?),
-                        // LLVM operand order for a conditional br: cond, false, true
-                        3 => Term::CondBr {
-                            cond: cx.val(opnd(0))?,
-                            then_bb: cx.label(opnd(2))?,
-                            else_bb: cx.label(opnd(1))?,
-                        },
-                        n => return Err(format!("br with {n} operands")),
-                    });
-                }
+                Op::Phi => {}
+                Op::Br => match inst.get_num_operands() {
+                    1 => {
+                        let target = opnd(0)
+                            .and_then(|o| o.block())
+                            .ok_or("expected a block operand")?;
+                        let copies = edge_copies(&phis, *bb, target)?;
+                        insts.extend(parallel_copy(copies, &mut vnames, &mut locals));
+                        term = Some(Term::Br(cx.label(opnd(0))?));
+                    }
+                    // LLVM operand order for a conditional br: cond, false, true
+                    3 => {
+                        let cond = cx.val(opnd(0))?;
+                        let mut resolved = Vec::with_capacity(2);
+                        for idx in [2u32, 1u32] {
+                            let target = opnd(idx)
+                                .and_then(|o| o.block())
+                                .ok_or("expected a block operand")?;
+                            let label = cx.label(opnd(idx))?;
+                            let copies = edge_copies(&phis, *bb, target)?;
+                            let copy_insts = parallel_copy(copies, &mut vnames, &mut locals);
+                            if copy_insts.is_empty() {
+                                resolved.push(label);
+                            } else {
+                                let split = lnames.value(&format!("{}_to_{label}", cx.labels[bb]));
+                                edge_blocks.push(FlatBlock {
+                                    label: split.clone(),
+                                    insts: copy_insts,
+                                    term: Term::Br(label),
+                                });
+                                resolved.push(split);
+                            }
+                        }
+                        let else_bb = resolved.pop().ok_or("conditional br lost its targets")?;
+                        let then_bb = resolved.pop().ok_or("conditional br lost its targets")?;
+                        term = Some(Term::CondBr {
+                            cond,
+                            then_bb,
+                            else_bb,
+                        });
+                    }
+                    n => return Err(format!("br with {n} operands")),
+                },
                 Op::Return => {
                     term = Some(if inst.get_num_operands() == 0 {
                         Term::Ret(None)
@@ -590,6 +711,8 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
             term: term.ok_or("basic block without a supported terminator")?,
         });
     }
+
+    out_blocks.extend(edge_blocks);
 
     Ok(FlatFunction {
         sig,
