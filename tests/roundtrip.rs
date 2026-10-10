@@ -1,7 +1,7 @@
 //! Round-trip oracle: C (original) -> LLVM IR -> flat HIR -> C (rebuilt).
 //! Both programs are compiled and run; exit code and stdout must match.
 //!
-//! Saved as `target/tmp/roundtrip/'<name>_rebuilt.c'
+//! Saved as `target/tmp/roundtrip/<name>_rebuilt.c`
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -9,7 +9,7 @@ use std::process::Command;
 
 use inkwell::context::Context;
 use lltp::backend::c_goto;
-use lltp::build_module;
+use lltp::{build_module, parse_ir};
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
 use lltp::hir::flat::FlatModule;
 
@@ -25,6 +25,8 @@ const SUPPORTED: &[&str] = &[
     "bool_basic",
     "casts",
     "float_basic",
+    "logic_short_circuit",
+    "ternary_value",
 ];
 
 /// Fixtures that need GEP / globals / aggregates: must fail *cleanly* (an
@@ -118,4 +120,63 @@ fn pending_fixtures_fail_cleanly() {
             "{name} now round-trips; move it to SUPPORTED"
         );
     }
+}
+
+/// Textual IR -> rebuilt C source text.
+fn rebuild_ir(ir: &str) -> Result<String, String> {
+    let ctxt = Context::create();
+    let module = parse_ir(&ctxt, ir).map_err(|e| e.to_string())?;
+    let flat = FlatModule::from_module(&module).map_err(|e| e.to_string())?;
+    c_goto::emit_module(&flat)
+}
+
+/// `-O0` never produces phis that read each other, so this is hand-written IR.
+const PHI_SWAP_IR: &str = r#"define i32 @swap_loop() {
+entry:
+  br label %loop
+loop:
+  %a = phi i32 [ 1, %entry ], [ %b, %loop ]
+  %b = phi i32 [ 2, %entry ], [ %a, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %i.next = add nsw i32 %i, 1
+  %done = icmp eq i32 %i.next, 3
+  br i1 %done, label %exit, label %loop
+exit:
+  ret i32 %a
+}
+
+define i32 @main() {
+entry:
+  %r = call i32 @swap_loop()
+  ret i32 %r
+}
+"#;
+
+#[test]
+fn phi_swap_at_loop_header() {
+    let dir = out_dir();
+    let rebuilt_c = dir.join("phi_swap_rebuilt.c");
+    fs::write(&rebuilt_c, rebuild_ir(PHI_SWAP_IR).expect("rebuild swap IR"))
+        .expect("write rebuilt C");
+    let exe = dir.join(format!("phi_swap{}", std::env::consts::EXE_SUFFIX));
+    let (code, _) = build_and_run(&rebuilt_c, &exe).expect("build and run rebuilt C");
+    assert_eq!(code, Some(1), "see {}", rebuilt_c.display());
+}
+
+#[test]
+fn pointer_phi_fails_cleanly() {
+    let ir = r#"define ptr @pick(i1 %c, ptr %p, ptr %q) {
+entry:
+  br i1 %c, label %a, label %b
+a:
+  br label %m
+b:
+  br label %m
+m:
+  %r = phi ptr [ %p, %a ], [ %q, %b ]
+  ret ptr %r
+}
+"#;
+    let err = rebuild_ir(ir).expect_err("pointer phi must be rejected");
+    assert!(err.contains("phi"), "unexpected error: {err}");
 }
