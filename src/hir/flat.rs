@@ -160,10 +160,12 @@ impl FlatFunction {
         f: &FunctionValue<'_>,
         reserved: &HashSet<String>,
     ) -> Result<Self, RecoverError> {
-        build(f, reserved).map_err(|detail| RecoverError {
+        let mut flat = build(f, reserved).map_err(|detail| RecoverError {
             func: f.get_name().to_string_lossy().into_owned(),
             detail,
-        })
+        })?;
+        super::coalesce::coalesce(&mut flat);
+        Ok(flat)
     }
 }
 
@@ -211,7 +213,7 @@ impl Namer {
         }
     }
 
-    /// Unique C identifier derived from `hint`;
+    /// Unique C identifier derived from `hint.
     fn value(&mut self, hint: &str) -> String {
         let base = if hint.is_empty() {
             let t = format!("t{}", self.next_tmp);
@@ -566,7 +568,9 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
             let phi = PhiValue::try_from(inst).map_err(|_| "phi is not a PhiValue")?;
             let mut incoming = Vec::new();
             for i in 0..phi.count_incoming() {
-                let (v, from) = phi.get_incoming(i).ok_or("phi incoming index out of range")?;
+                let (v, from) = phi
+                    .get_incoming(i)
+                    .ok_or("phi incoming index out of range")?;
                 incoming.push((from, cx.val(Some(Operand::Value(v)))?));
             }
             phis.entry(*bb)
@@ -577,7 +581,6 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
 
     // pass 2: translate
     let mut out_blocks = Vec::new();
-    // `<from>_to_<to>` blocks that carry phi copies for a conditional edge
     let mut edge_blocks = Vec::new();
     for bb in &blocks {
         let mut insts = Vec::new();
