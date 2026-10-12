@@ -156,8 +156,11 @@ entry:
 fn phi_swap_at_loop_header() {
     let dir = out_dir();
     let rebuilt_c = dir.join("phi_swap_rebuilt.c");
-    fs::write(&rebuilt_c, rebuild_ir(PHI_SWAP_IR).expect("rebuild swap IR"))
-        .expect("write rebuilt C");
+    fs::write(
+        &rebuilt_c,
+        rebuild_ir(PHI_SWAP_IR).expect("rebuild swap IR"),
+    )
+    .expect("write rebuilt C");
     let exe = dir.join(format!("phi_swap{}", std::env::consts::EXE_SUFFIX));
     let (code, _) = build_and_run(&rebuilt_c, &exe).expect("build and run rebuilt C");
     assert_eq!(code, Some(1), "see {}", rebuilt_c.display());
@@ -179,4 +182,46 @@ m:
 "#;
     let err = rebuild_ir(ir).expect_err("pointer phi must be rejected");
     assert!(err.contains("phi"), "unexpected error: {err}");
+}
+
+/// Three phis rotate `(a, b, c) = (b, c, a)` on the back edge. After 4
+/// iterations the exit computes 16a + 4b + c = 27.
+const PHI_ROTATE_IR: &str = r#"define i32 @rotate() {
+entry:
+  br label %loop
+loop:
+  %a = phi i32 [ 1, %entry ], [ %b, %loop ]
+  %b = phi i32 [ 2, %entry ], [ %c, %loop ]
+  %c = phi i32 [ 3, %entry ], [ %a, %loop ]
+  %i = phi i32 [ 0, %entry ], [ %i.next, %loop ]
+  %i.next = add nsw i32 %i, 1
+  %done = icmp eq i32 %i.next, 4
+  br i1 %done, label %exit, label %loop
+exit:
+  %m1 = mul nsw i32 %a, 16
+  %m2 = mul nsw i32 %b, 4
+  %s1 = add nsw i32 %m1, %m2
+  %s2 = add nsw i32 %s1, %c
+  ret i32 %s2
+}
+
+define i32 @main() {
+entry:
+  %r = call i32 @rotate()
+  ret i32 %r
+}
+"#;
+
+#[test]
+fn phi_rotation_survives_coalescing() {
+    let dir = out_dir();
+    let rebuilt_c = dir.join("phi_rotate_rebuilt.c");
+    fs::write(
+        &rebuilt_c,
+        rebuild_ir(PHI_ROTATE_IR).expect("rebuild rotate IR"),
+    )
+    .expect("write rebuilt C");
+    let exe = dir.join(format!("phi_rotate{}", std::env::consts::EXE_SUFFIX));
+    let (code, _) = build_and_run(&rebuilt_c, &exe).expect("build and run rebuilt C");
+    assert_eq!(code, Some(27), "see {}", rebuilt_c.display());
 }
