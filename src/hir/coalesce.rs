@@ -73,9 +73,9 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
             rename_inst(inst, &rename);
         }
         rename_term(&mut block.term, &rename);
-        block.insts.retain(
-            |inst| !matches!(inst, Inst::Copy { dest, src: Val::Var(s, _) } if dest == s),
-        );
+        block
+            .insts
+            .retain(|inst| !matches!(inst, Inst::Copy { dest, src: Val::Var(s, _) } if dest == s));
     }
     func.locals.retain(|(n, _)| !rep.contains_key(n));
     rep.len()
@@ -258,12 +258,7 @@ fn rename_inst(inst: &mut Inst, f: &dyn Fn(&str) -> String) {
     match inst {
         Inst::Load { dest, .. } => *dest = f(dest),
         Inst::Store { value, .. } => rename_val(value, f),
-        Inst::Bin {
-            dest, lhs, rhs, ..
-        }
-        | Inst::Cmp {
-            dest, lhs, rhs, ..
-        } => {
+        Inst::Bin { dest, lhs, rhs, .. } | Inst::Cmp { dest, lhs, rhs, .. } => {
             *dest = f(dest);
             rename_val(lhs, f);
             rename_val(rhs, f);
@@ -490,8 +485,19 @@ mod tests {
         let done = Val::Var("done".to_string(), Ty::Bool);
         let mut f = function(
             &[
-                "a", "b", "c", "i", "i_next", "done", "phi_tmp", "phi_tmp_1", "phi_tmp_2", "m1",
-                "m2", "s1", "s2",
+                "a",
+                "b",
+                "c",
+                "i",
+                "i_next",
+                "done",
+                "phi_tmp",
+                "phi_tmp_1",
+                "phi_tmp_2",
+                "m1",
+                "m2",
+                "s1",
+                "s2",
             ],
             vec![
                 block(

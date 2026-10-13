@@ -9,9 +9,9 @@ use std::process::Command;
 
 use inkwell::context::Context;
 use lltp::backend::c_goto;
-use lltp::{build_module, parse_ir};
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
 use lltp::hir::flat::FlatModule;
+use lltp::{build_module, parse_ir};
 
 /// Fixtures the baseline is expected to round-trip.
 const SUPPORTED: &[&str] = &[
