@@ -1,4 +1,5 @@
 pub mod cfg;
+pub mod coalesce;
 pub mod error;
 pub mod expr;
 pub mod flat;

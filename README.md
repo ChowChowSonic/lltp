@@ -12,11 +12,41 @@
 
 LLTP reconstructs idiomatic source in a **target language** from a program written in a **source language**, by grounding every step in **unoptimized LLVM IR** (`-O0 -g`) produced by the source language's **native toolchain**. It is the low-level layer of a push toward *universal transpilers*.
 
+## Current status
+
+- Working today (Sprint 1): the **C → LLVM IR → flat HIR → C (goto baseline)** round trip.
+- `clang -O0 -g` produces the IR, inkwell parses it, per-function CFGs are built, and a flat
+instruction-level HIR is emitted back to C with one label per basic block and `goto` for every branch.
+- The oracle compiles and runs both the original and rebuilt C and requires identical exit code and stdout.
+
+| Area | State |
+|---|---|
+| Frontend driver, IR ingest, per-function CFGs (SOW 2.1.1-2.1.3) | Done |
+| Goto-based C emitter + round-trip tests | Working for int/bool/char/unsigned/float/cast fixtures |
+| Control-flow structuring (`hir::structurize`) | Implemented with unit tests; not yet wired into the C emitter |
+| `Language` trait, capability flags, `SwitchToIfElse` (2.5.1) | Done |
+| Phi lowering, type recovery, aggregates / GEP / globals (strings, structs, arrays) | Not started (fixtures fail cleanly) |
+| Rayon parallelism (2.1.4), Rust backend, idiom lifting | Not started |
+
+## Round trip
+
+```powershell
+cargo run --example c2ir -- tests/fixtures/alpha_beta.c        # C -> clang -O0 IR
+cargo run --example roundtrip -- tests/fixtures/alpha_beta.c   # C -> rebuilt goto C (stdout)
+cargo run --example roundtrip -- tests/fixtures/loop_branch.c -o out.c
+cargo test --test roundtrip                                    # compile + run both, diff behavior
+```
+
+`tests/roundtrip.rs` keeps two lists: `SUPPORTED` fixtures must match the original's
+behavior, and `PENDING` fixtures (`string_basic`, `string_loop`, `struct_array`) must
+fail with a clean `Err` until GEP/globals/aggregates land, at which point they move to
+`SUPPORTED`. Rebuilt sources are written to `target/tmp/roundtrip/<name>_rebuilt.c`.
+
 ## Quickstart
 
-> The recovery passes (de-SSA, control-flow structuring, memory mapping) land in
-> upcoming milestones; today the seams below are what's public and exercised
-> by `cargo run --example ingest` and `cargo run --example lowering`.
+> Recovery passes (de-SSA, structured emission, memory mapping) are still landing; the
+> seams below are what's public today and are exercised by
+> `cargo run --example ingest`, `cargo run --example lowering`, and the round trip above.
 
 **1. Ingest IR into a module.**
 
@@ -115,10 +145,13 @@ If another LLVM install (e.g. the official installer, or a newer major
 version) is also on the machine, double-check `LLVM_SYS_221_PREFIX` still
 points at the 22.1.x dev archive — a second install can silently overwrite it.
 
-`inkwell` is pinned to `default-features = false, features = ["llvm22-1",
-"target-x86"]` in `Cargo.toml` to avoid linking unused target backends
-(Mips, Sparc, PowerPC, etc.), which otherwise fails with unresolved
-`LLVMInitialize*` symbols at link time on Windows.
+`Cargo.toml` defaults to the `target-all` feature (what CI on Linux uses). On Windows,
+linking every LLVM target backend (Mips, Sparc, PowerPC, etc.) fails with unresolved
+`LLVMInitialize*` symbols, so build with only the x86 backend:
+
+```powershell
+cargo test --no-default-features --features target-x86
+```
 
 ## Pipeline
 
@@ -146,6 +179,12 @@ points at the 22.1.x dev archive — a second install can silently overwrite it.
 2. **Differential equivalence** — same inputs → same outputs vs the original program; YARPGen-style random program generation fuzzes the pipeline.
 3. **Golden tests** per language pair.
 4. **Idiomaticity score** — manual rubric for the portfolio narrative.
+
+## Local checks
+
+`./.github/scripts/pre-push.sh` mirrors CI (`fmt`, `clippy -D warnings`, `test`, example
+smoke runs); pass a name to run one check, e.g. `./.github/scripts/pre-push.sh fmt`.
+The round-trip tests need `clang` on `PATH` or `LLTP_CLANG` set.
 
 ## Stack
 
