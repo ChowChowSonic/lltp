@@ -8,10 +8,17 @@ pub trait ExprEmitter {
     /// (`allows_*() == true` + no `emit_*`) or a lowering pass violated its
     /// contract. A future best-effort mode may use a recoverable signal here.
     fn emit_expr(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
-        let _ = (expr, out);
-        unreachable!(
-            "`emit_expr` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
-        )
+        match expr {
+            Expr::Literal { .. } => self.emit_literal(expr, out),
+            Expr::Var { .. } => self.emit_assignment(expr, out),
+            Expr::UnaryOp { .. } => self.emit_unary_op(expr, out),
+            Expr::BinaryOp { .. } => self.emit_binary_op(expr, out),
+            Expr::Call { .. } => self.emit_call(expr, out),
+            Expr::Index { .. } => self.emit_index(expr, out),
+            Expr::Field { .. } => self.emit_field(expr, out),
+            Expr::Cast { .. } => self.emit_cast(expr, out),
+            Expr::Nop => Ok(()),
+        }
     }
     fn emit_call(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
         let _ = (expr, out);

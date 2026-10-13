@@ -8,9 +8,23 @@ pub trait StmtEmitter {
     /// (`allows_*() == true` + no `emit_*`) or a lowering pass violated its
     /// contract. A future best-effort mode may use a recoverable signal here.
     fn emit_stmt(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
+        match stmt {
+            Stmt::If { .. } => self.emit_if(stmt, out),
+            Stmt::Loop { .. } => self.emit_loop(stmt, out),
+            Stmt::Branch { .. } => Ok(()),
+            Stmt::Ret { .. } => self.emit_return(stmt, out),
+            Stmt::Switch { .. } => self.emit_switch(stmt, out),
+            Stmt::Let { .. } => self.emit_stmt(stmt, out),
+            Stmt::Break => self.emit_break(stmt, out),
+            Stmt::Continue => self.emit_continue(stmt, out),
+            Stmt::Goto { .. } => self.emit_goto(stmt, out),
+            Stmt::Label { .. } => self.emit_label(stmt, out),
+        }
+    }
+    fn emit_label(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
         let _ = (stmt, out);
         unreachable!(
-            "`emit_stmt` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+            "`emit_label` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
         )
     }
     fn emit_block(&self, stmts: &[Stmt], out: &mut Formatter) -> fmt::Result {
@@ -26,19 +40,7 @@ pub trait StmtEmitter {
             "`emit_if` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
         )
     }
-    fn emit_while(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
-        let _ = (stmt, out);
-        unreachable!(
-            "`emit_while` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
-        )
-    }
-    fn emit_for(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
-        let _ = (stmt, out);
-        unreachable!(
-            "`emit_for` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
-        )
-    }
-    fn emit_do_while(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_loop(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
         let _ = (stmt, out);
         unreachable!(
             "`emit_do_while` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"

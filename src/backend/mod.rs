@@ -59,49 +59,79 @@ pub trait Language: ExprEmitter + StmtEmitter {
 
     /// If false, the middle-end MUST rewrite all `Match` HIR nodes into
     /// if/else chains before reaching the backend.
-    fn allows_match(&self) -> bool;
+    fn allows_match(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST rewrite all `Closure` HIR nodes into
     /// deferred records before reaching the backend.
-    fn allows_closures(&self) -> bool;
+    fn allows_closures(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST monomorphize generic HIR nodes before
     /// reaching the backend.
-    fn allows_generics(&self) -> bool;
+    fn allows_generics(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST erase async/await into an explicit state
     /// machine before reaching the backend.
-    fn allows_async(&self) -> bool;
+    fn allows_async(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST map threads onto the target's threading
     /// primitives before reaching the backend.
-    fn allows_threads(&self) -> bool;
+    fn allows_threads(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST lower locks to a target-compatible
     /// primitive before reaching the backend.
-    fn allows_locks(&self) -> bool;
+    fn allows_locks(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST rewrite raw-pointer HIR nodes into the
     /// target's safe reference types, or gate them behind `unsafe`.
-    fn allows_raw_pointers(&self) -> bool;
+    fn allows_raw_pointers(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST rewrite all `Try`/`Catch` HIR nodes into
     /// error-code propagation before reaching the backend.
-    fn allows_exceptions(&self) -> bool;
+    fn allows_exceptions(&self) -> bool {
+        false
+    }
     /// The backend may assume it is only called for single-value returns when
     /// this is false.
-    fn allows_multiple_return(&self) -> bool;
+    fn allows_multiple_return(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST flatten inheritance hierarchies into
     /// composition before reaching the backend.
-    fn allows_inheritance(&self) -> bool;
+    fn allows_inheritance(&self) -> bool {
+        false
+    }
     /// The backend may assume only required arguments are present when this is
     /// false.
-    fn allows_default_args(&self) -> bool;
+    fn allows_default_args(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST lower unions to tagged buffers before
     /// reaching the backend.
-    fn allows_union(&self) -> bool;
+    fn allows_union(&self) -> bool {
+        false
+    }
     /// Ignored by the backend; reserved for the frontend to signal whether
     /// macro-style codegen is permitted.
-    fn allows_macros(&self) -> bool;
+    fn allows_macros(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST rewrite all `Goto` HIR nodes into
     /// structured control flow before reaching the backend. The backend may
     /// panic if `emit_goto` is called and this returns false.
-    fn allows_goto(&self) -> bool;
+    fn allows_goto(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST rewrite all `Switch` HIR nodes into
     /// if/else chains before reaching the backend. The backend may panic if
     /// `emit_switch` is called and this returns false.
-    fn allows_switch(&self) -> bool;
+    fn allows_switch(&self) -> bool {
+        false
+    }
 }
