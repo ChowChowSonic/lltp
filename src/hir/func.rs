@@ -24,7 +24,8 @@ impl Function {
 
     /// Run structurization on this function's CFG, populating and returning `self.body`.
     pub fn structurize(&mut self) -> Result<&[Stmt], StructurizeError> {
-        let stmts = self.cfg.structurize()?;
+        let reachable = self.cfg.keep_reachable();
+        let stmts = reachable.structurize()?;
         self.body = stmts;
         Ok(&self.body)
     }

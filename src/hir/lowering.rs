@@ -102,13 +102,16 @@ pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
     let mut cfg = build_graph(val)?;
     collect_instructions(val, &mut cfg);
 
-    Ok(Function {
+    let mut func = Function {
         name,
         params: param_types,
         return_ty: ret_ty,
         cfg,
         body: stmt_blocks,
-    })
+    };
+    func.structurize()
+        .map_err(|e| LowerError::Other(e.to_string()))?;
+    Ok(func)
 }
 
 fn collect_instructions(val: &FunctionValue, cfg: &mut Cfg) {
@@ -361,11 +364,17 @@ impl<'c> TryFrom<&Operand<'c>> for Expr {
 
 #[cfg(test)]
 mod tests {
-    use crate::hir::{
-        cfg::Cfg,
-        flow::{dominators, natural_loops},
-        func::Function,
-        stmt::Stmt,
+    use std::task::Context;
+
+    use crate::{
+        hir::{
+            cfg::Cfg,
+            flow::{dominators, natural_loops},
+            func::Function,
+            stmt::Stmt,
+            verify::{are_equivalent, structured_to_cfg},
+        },
+        parse_ir,
     };
 
     fn build_cfgs(ir: &str) -> Vec<Cfg> {
@@ -651,5 +660,52 @@ nonpos:
             &f.cfg.blocks["entry"].stmts[1],
             Stmt::Branch { .. }
         ));
+    }
+
+    #[test]
+    fn lower_and_structurize_simple_loop() {
+        let ir = r#"define void @f(i32 %n) {
+            entry: 
+              br label %header
+            header: 
+              %i = phi i32 [0, %entry], [%i2, %body]
+              %c = icmp slt i32 %i, %n
+              br i1 %c, label %body, label %exit 
+            body: 
+              %i2 = add i32 %i, 1 
+              br label %header
+            exit: 
+              ret void 
+            }"#;
+        let ctxt = inkwell::context::Context::create();
+        let module = parse_ir(&ctxt, ir).unwrap();
+        let func_val = module.get_first_function().unwrap();
+        let mut func = Function::try_from(&func_val).unwrap();
+        let func_imut = func.clone();
+        let body = func.structurize().unwrap();
+
+        assert!(matches!(body[0], Stmt::Loop { .. }));
+        assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(&body)));
+    }
+    #[test]
+    fn lower_and_structurize_simple_if() {
+        let ir = r#"define i32 @f(i32 %x) {
+            entry: 
+              %c = icmp sgt i32 %x, 0
+              br i1 %c, label %pos, label %neg
+            pos: 
+              ret i32 1
+            neg: 
+              ret i32 0
+            }"#;
+        let ctxt = inkwell::context::Context::create();
+        let module = parse_ir(&ctxt, ir).unwrap();
+        let func_val = module.get_first_function().unwrap();
+        let mut func = Function::try_from(&func_val).unwrap();
+        let func_imut = func.clone();
+        let body = func.structurize().unwrap();
+
+        assert!(matches!(body[0], Stmt::If { .. }));
+        assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(&body)));
     }
 }
