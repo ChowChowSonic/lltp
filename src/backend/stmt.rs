@@ -2,7 +2,7 @@ use std::fmt::{self, Formatter};
 
 use crate::hir::{
     Expr, Stmt,
-    stmt::{GotoStmt, IfStmt, LabelStmt, LoopStmt, RetStmt, SwitchStmt},
+    stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt},
 };
 
 pub trait StmtEmitter {
@@ -17,7 +17,7 @@ pub trait StmtEmitter {
             Stmt::Branch(_i) => Ok(()),
             Stmt::Ret(i) => self.emit_return(i, out),
             Stmt::Switch(i) => self.emit_switch(i, out),
-            Stmt::Let(_i) => Ok(()), //self.emit_stmt(i, out),
+            Stmt::Let(i) => self.emit_assignment(i, out),
             Stmt::Break => self.emit_break(stmt, out),
             Stmt::Continue => self.emit_continue(stmt, out),
             Stmt::Goto(i) => self.emit_goto(i, out),
@@ -37,6 +37,12 @@ pub trait StmtEmitter {
         )
     }
 
+    fn emit_assignment(&self, expr: &LetStmt, out: &mut Formatter) -> fmt::Result {
+        let _ = (expr, out);
+        unreachable!(
+            "`emit_assignment` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+        )
+    }
     fn emit_if(&self, stmt: &IfStmt, out: &mut Formatter) -> fmt::Result {
         let _ = (stmt, out);
         unreachable!(

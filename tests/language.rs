@@ -1,6 +1,6 @@
 use lltp::backend::{ExprEmitter, Language, StmtEmitter};
 use lltp::hir::expr::{BinaryExpr, CallExpr, CastExpr, IndexExpr, UnaryExpr};
-use lltp::hir::stmt::{GotoStmt, IfStmt, LabelStmt, LoopStmt, RetStmt};
+use lltp::hir::stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt};
 use lltp::hir::{Lit, Stmt};
 use std::fmt::{Formatter, Result};
 pub struct CLanguage;
@@ -70,6 +70,11 @@ impl StmtEmitter for CLanguage {
         let _ = out;
         unimplemented!("I forgot about catch statements. whoops")
     }
+    fn emit_assignment(&self, expr: &LetStmt, out: &mut Formatter) -> std::fmt::Result {
+        self.emit_expr(&expr.dest, out)?;
+        write!(out, " = ")?;
+        self.emit_expr(&expr.src, out)
+    }
 }
 
 impl ExprEmitter for CLanguage {
@@ -83,16 +88,19 @@ impl ExprEmitter for CLanguage {
         self.emit_expr(expr.args.last().unwrap(), out)?;
         write!(out, ");")
     }
-    ///TODO: Needs to be properly reworked. Should be a Stmt defined by the `Let` enum
-    /*fn emit_assignment(&self, expr: &LetStmt, out: &mut Formatter) -> std::fmt::Result {
-        self.emit_ty(expr.dtype, out)?;
-        write!(out, "{name} = ")
-    }*/
     fn emit_index(&self, expr: &IndexExpr, out: &mut Formatter) -> std::fmt::Result {
         self.emit_expr(&expr.base, out)?;
         write!(out, "[")?;
         self.emit_expr(&expr.index, out)?;
         write!(out, "]")
+    }
+    fn emit_variable(
+        &self,
+        expr: &lltp::hir::expr::VarExpr,
+        out: &mut Formatter,
+    ) -> std::fmt::Result {
+        let name = &expr.name;
+        write!(out, "{name}")
     }
     fn emit_literal(&self, expr: &Lit, out: &mut Formatter) -> std::fmt::Result {
         match expr {

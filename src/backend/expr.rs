@@ -13,7 +13,7 @@ pub trait ExprEmitter {
     fn emit_expr(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
         match expr {
             Expr::Literal(i) => self.emit_literal(i, out),
-            Expr::Var(i) => self.emit_assignment(i, out),
+            Expr::Var(i) => self.emit_variable(i, out),
             Expr::UnaryOp(i) => self.emit_unary_op(i, out),
             Expr::BinaryOp(i) => self.emit_binary_op(i, out),
             Expr::Call(i) => self.emit_call(i, out),
@@ -29,6 +29,12 @@ pub trait ExprEmitter {
             "`emit_call` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
         )
     }
+    fn emit_variable(&self, expr: &VarExpr, out: &mut Formatter) -> fmt::Result {
+        let _ = (expr, out);
+        unreachable!(
+            "`emit_variable` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+        )
+    }
     fn emit_binary_op(&self, expr: &BinaryExpr, out: &mut Formatter) -> fmt::Result {
         let _ = (expr, out);
         unreachable!(
@@ -39,12 +45,6 @@ pub trait ExprEmitter {
         let _ = (expr, out);
         unreachable!(
             "`emit_unary_op` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
-        )
-    }
-    fn emit_assignment(&self, expr: &VarExpr, out: &mut Formatter) -> fmt::Result {
-        let _ = (expr, out);
-        unreachable!(
-            "`emit_assignment` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
         )
     }
     fn emit_index(&self, expr: &IndexExpr, out: &mut Formatter) -> fmt::Result {
