@@ -24,43 +24,43 @@ impl BranchInfo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct BranchStmt {
-    cond: Option<Expr>,
-    then_block: String,
-    else_block: Option<String>,
+    pub cond: Option<Expr>,
+    pub then_block: String,
+    pub else_block: Option<String>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetStmt {
-    value: Option<Expr>,
+    pub value: Option<Expr>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct IfStmt {
-    cond: Expr,
-    then_stmts: Vec<Stmt>,
-    else_stmts: Vec<Stmt>,
+    pub cond: Expr,
+    pub then_stmts: Vec<Stmt>,
+    pub else_stmts: Vec<Stmt>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwitchStmt {
-    value: Expr,
-    cases: Vec<(Lit, Vec<Stmt>)>,
-    default: Vec<Stmt>,
+    pub value: Expr,
+    pub cases: Vec<(Lit, Vec<Stmt>)>,
+    pub default: Vec<Stmt>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct LetStmt {
-    dest: Box<Expr>,
-    src: Box<Expr>,
+    pub dest: Box<Expr>,
+    pub src: Box<Expr>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopStmt {
-    cond: Option<Expr>,
-    body: Vec<Stmt>,
+    pub cond: Option<Expr>,
+    pub body: Vec<Stmt>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct GotoStmt {
-    target: String,
+    pub target: String,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct LabelStmt {
-    name: String,
+    pub name: String,
 }
 /// Pure HIR statement AST node.
 #[derive(Debug, Clone, PartialEq)]

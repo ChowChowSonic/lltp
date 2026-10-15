@@ -4,39 +4,39 @@ use crate::hir::{Lit, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarExpr {
-    name: String,
-    dtype: Ty,
+    pub name: String,
+    pub dtype: Ty,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnaryExpr {
-    op: InstructionOpcode,
-    arg: Box<Expr>,
+    pub op: InstructionOpcode,
+    pub arg: Box<Expr>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryExpr {
-    op: InstructionOpcode,
-    arg1: Box<Expr>,
-    arg2: Box<Expr>,
+    pub op: InstructionOpcode,
+    pub arg1: Box<Expr>,
+    pub arg2: Box<Expr>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallExpr {
-    name: String,
-    args: Vec<Expr>,
+    pub name: String,
+    pub args: Vec<Expr>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexExpr {
-    base: Box<Expr>,
-    index: Box<Expr>,
+    pub base: Box<Expr>,
+    pub index: Box<Expr>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldExpr {
-    base: Box<Expr>,
-    name: String,
+    pub base: Box<Expr>,
+    pub name: String,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct CastExpr {
-    data: Box<Expr>,
-    dtype: Box<Expr>,
+    pub data: Box<Expr>,
+    pub dtype: Box<Expr>,
 }
 /// Pure HIR expression AST node.
 #[derive(Debug, Clone, PartialEq)]
