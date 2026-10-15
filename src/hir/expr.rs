@@ -45,7 +45,7 @@ pub enum Expr {
     Var(VarExpr),
     UnaryOp(UnaryExpr),
     BinaryOp(BinaryExpr),
-    Call(CastExpr),
+    Call(CallExpr),
     Index(IndexExpr),
     Field(FieldExpr),
     Cast(CastExpr),
