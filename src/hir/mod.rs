@@ -39,6 +39,8 @@ pub enum Lit {
 mod tests {
     use inkwell::context::Context;
 
+    use crate::hir::stmt::{BranchStmt, RetStmt};
+
     use super::{Expr, Lit, Stmt};
 
     fn parse<'a>(ctxt: &'a Context, ir: &str) -> inkwell::module::Module<'a> {
@@ -92,11 +94,11 @@ fal:
         let module = parse(&ctxt, BR_IR);
         let out = collect_stmts(&module);
         match find(&out, "entry::Br") {
-            Stmt::Branch {
+            Stmt::Branch(BranchStmt {
                 cond: None,
                 then_block,
                 else_block: None,
-            } => {
+            }) => {
                 assert_eq!(then_block, "mid")
             }
             other => panic!("expected unconditional Branch, got {other:?}"),
@@ -109,11 +111,11 @@ fal:
         let module = parse(&ctxt, BR_IR);
         let out = collect_stmts(&module);
         match find(&out, "mid::Br") {
-            Stmt::Branch {
+            Stmt::Branch(BranchStmt {
                 cond,
                 then_block,
                 else_block,
-            } => {
+            }) => {
                 assert!(matches!(cond, Some(Expr::Literal(Lit::Bool(true)))));
                 assert_eq!(then_block, "tru");
                 assert_eq!(else_block.as_deref(), Some("fal"));
@@ -129,15 +131,15 @@ fal:
         let out = collect_stmts(&module);
         assert!(matches!(
             find(&out, "tru::Return"),
-            Stmt::Ret {
+            Stmt::Ret(RetStmt {
                 value: Some(Expr::Literal(Lit::Int { value: 0, .. }))
-            }
+            })
         ));
         assert!(matches!(
             find(&out, "fal::Return"),
-            Stmt::Ret {
+            Stmt::Ret(RetStmt {
                 value: Some(Expr::Literal(Lit::Int { value: 1, .. }))
-            }
+            })
         ));
 
         let ctxt = Context::create();
@@ -146,7 +148,7 @@ fal:
         let out = collect_stmts(&module);
         assert!(matches!(
             find(&out, "entry::Return"),
-            Stmt::Ret { value: None }
+            Stmt::Ret(RetStmt { value: None })
         ));
     }
 }

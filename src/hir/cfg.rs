@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use crate::hir::{BranchInfo, Stmt, StructurizeError};
+use crate::hir::{BranchInfo, Stmt, StructurizeError, stmt::BranchStmt};
 
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct Block {
@@ -180,11 +180,11 @@ impl Cfg {
             .ok_or_else(|| StructurizeError::UnknownBlock(name.to_string()))?;
         let mut body = block.stmts.clone();
         match body.last() {
-            Some(Stmt::Branch {
+            Some(Stmt::Branch(BranchStmt {
                 cond,
                 then_block,
                 else_block,
-            }) => {
+            })) => {
                 let br = BranchInfo {
                     cond: cond.clone(),
                     then_block: then_block.clone(),

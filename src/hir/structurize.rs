@@ -1,10 +1,12 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use crate::hir::expr::{BinaryExpr, VarExpr};
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
     DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, reachable, reachable_from,
     t1t2_reduce, unify_loop_exits,
 };
+use crate::hir::stmt::{BranchStmt, IfStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt};
 use crate::hir::{Block, Cfg, Expr, Lit, Stmt, StructurizeError, Ty};
 
 pub struct LoopTree {
@@ -136,11 +138,11 @@ fn structure_loop(
                 .as_ref()
                 .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop);
-            Expr::BinaryOp {
+            Expr::BinaryOp(BinaryExpr {
                 op: inkwell::values::InstructionOpcode::Xor,
                 arg1: Box::new(c),
                 arg2: Box::new(Expr::Literal(Lit::Bool(true))),
-            }
+            })
         };
 
         let mut body_nodes = l.body.clone();
@@ -167,10 +169,10 @@ fn structure_loop(
             }
         }
 
-        Ok(Stmt::Loop {
+        Ok(Stmt::Loop(LoopStmt {
             cond: Some(cond),
             body: body_stmts,
-        })
+        }))
     } else {
         let body_succs: Vec<String> = succs
             .iter()
@@ -204,10 +206,10 @@ fn structure_loop(
                 body_stmts.push(placeholder());
             }
 
-            Ok(Stmt::Loop {
+            Ok(Stmt::Loop(LoopStmt {
                 cond: None,
                 body: body_stmts,
-            })
+            }))
         } else if body_succs.len() == 2 {
             let cond = branch
                 .as_ref()
@@ -257,26 +259,26 @@ fn structure_loop(
             }
 
             let mut body_stmts = prefix;
-            body_stmts.push(Stmt::If {
+            body_stmts.push(Stmt::If(IfStmt {
                 cond,
                 then_stmts: region_then,
                 else_stmts: region_else,
-            });
+            }));
 
-            Ok(Stmt::Loop {
+            Ok(Stmt::Loop(LoopStmt {
                 cond: None,
                 body: body_stmts,
-            })
+            }))
         } else {
             let mut body_stmts = prefix;
             if body_stmts.is_empty() {
                 body_stmts.push(placeholder());
             }
 
-            Ok(Stmt::Loop {
+            Ok(Stmt::Loop(LoopStmt {
                 cond: None,
                 body: body_stmts,
-            })
+            }))
         }
     }
 }
@@ -403,7 +405,7 @@ fn structure_region(
                 // The path terminates here; make it explicit so the rebuilt
                 // CFG keeps this block as a real exit.
                 if prefix.is_empty() {
-                    prefix.push(Stmt::Ret { value: None });
+                    prefix.push(Stmt::Ret(RetStmt { value: None }));
                 }
                 return Ok(prefix);
             }
@@ -456,11 +458,11 @@ fn structure_region(
                     }
                 };
 
-                prefix.push(Stmt::If {
+                prefix.push(Stmt::If(IfStmt {
                     cond,
                     then_stmts: emit_target(tb).into_iter().collect(),
                     else_stmts: emit_target(eb).into_iter().collect(),
-                });
+                }));
                 return Ok(prefix);
             }
             Ok(prefix)
@@ -514,11 +516,11 @@ fn structure_region(
                     } else {
                         (in_arm_stmts.clone(), vec![Stmt::Break])
                     };
-                    prefix.push(Stmt::If {
+                    prefix.push(Stmt::If(IfStmt {
                         cond,
                         then_stmts,
                         else_stmts,
-                    });
+                    }));
                     return Ok(prefix);
                 }
                 if &ctx.header == exit_target {
@@ -527,21 +529,21 @@ fn structure_region(
                     } else {
                         (in_arm_stmts.clone(), vec![Stmt::Continue])
                     };
-                    prefix.push(Stmt::If {
+                    prefix.push(Stmt::If(IfStmt {
                         cond,
                         then_stmts,
                         else_stmts,
-                    });
+                    }));
                     return Ok(prefix);
                 }
             }
             // The exit target is a frame exit; the false path falls through
             // to it, so only the in-region arm goes inside the If.
-            prefix.push(Stmt::If {
+            prefix.push(Stmt::If(IfStmt {
                 cond,
                 then_stmts: in_arm_stmts,
                 else_stmts: vec![],
-            });
+            }));
             Ok(prefix)
         }
         2 => {
@@ -598,11 +600,11 @@ fn structure_region(
                 .as_ref()
                 .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Literal(Lit::Bool(true)));
-            prefix.push(Stmt::If {
+            prefix.push(Stmt::If(IfStmt {
                 cond,
                 then_stmts,
                 else_stmts,
-            });
+            }));
 
             if let Some(jn) = join
                 && nodes.contains(jn)
@@ -694,16 +696,18 @@ fn structure_region(
                 let starting = branch
                     .as_ref()
                     .and_then(|b| b.cond.clone())
-                    .unwrap_or_else(|| Expr::Var {
-                        name: "_switch_cond".into(),
-                        dtype: Ty::Int(32, true),
+                    .unwrap_or_else(|| {
+                        Expr::Var(VarExpr {
+                            name: "_switch_cond".into(),
+                            dtype: Ty::Int(32, true),
+                        })
                     });
                 let default: Vec<Stmt> = switch_arms.pop().unwrap().1;
-                return Ok(vec![Stmt::Switch {
+                return Ok(vec![Stmt::Switch(SwitchStmt {
                     value: starting,
                     cases: switch_arms,
                     default,
-                }]);
+                })]);
             }
             let joins = join.as_ref();
 
@@ -749,16 +753,18 @@ fn structure_region(
             let starting = branch
                 .as_ref()
                 .and_then(|b| b.cond.clone())
-                .unwrap_or_else(|| Expr::Var {
-                    name: "_switch_cond".into(),
-                    dtype: Ty::Int(32, true),
+                .unwrap_or_else(|| {
+                    Expr::Var(VarExpr {
+                        name: "_switch_cond".into(),
+                        dtype: Ty::Int(32, true),
+                    })
                 });
             let default: Vec<Stmt> = switch_arms.pop().unwrap().1;
-            let mut prefix: Vec<Stmt> = vec![Stmt::Switch {
+            let mut prefix: Vec<Stmt> = vec![Stmt::Switch(SwitchStmt {
                 value: starting,
                 cases: switch_arms,
                 default,
-            }];
+            })];
 
             if let Some(jn) = joins
                 && nodes.contains(jn)
@@ -806,11 +812,11 @@ fn retarget_edge(blk: &mut Block, old: &str, new: &str) {
             *s = new.to_string();
         }
     }
-    if let Some(Stmt::Branch {
+    if let Some(Stmt::Branch(BranchStmt {
         then_block,
         else_block,
         ..
-    }) = blk.stmts.last_mut()
+    })) = blk.stmts.last_mut()
     {
         if then_block == old {
             *then_block = new.to_string();
@@ -996,11 +1002,11 @@ fn split_fork(cfg: &Cfg, fork: &str) -> Result<Cfg, StructurizeError> {
                     *s = c.clone();
                 }
             }
-            if let Some(Stmt::Branch {
+            if let Some(Stmt::Branch(BranchStmt {
                 then_block,
                 else_block,
                 ..
-            }) = blk.stmts.last_mut()
+            })) = blk.stmts.last_mut()
             {
                 if let Some(c) = map.get(then_block) {
                     *then_block = c.clone();
@@ -1029,17 +1035,17 @@ fn split_fork(cfg: &Cfg, fork: &str) -> Result<Cfg, StructurizeError> {
 /// A statement that occupies a block without changing its semantics, used to
 /// materialize bare (statement-free) arm blocks in the rebuilt CFG.
 fn placeholder() -> Stmt {
-    Stmt::Let {
-        dest: Box::new(Expr::Var {
+    Stmt::Let(LetStmt {
+        dest: Box::new(Expr::Var(VarExpr {
             name: "_unused".into(),
             dtype: Ty::Void,
-        }),
+        })),
         src: Box::new(Expr::Literal(Lit::Int {
             value: 0,
             bits: 32,
             signed: true,
         })),
-    }
+    })
 }
 
 impl LoopTree {

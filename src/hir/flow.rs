@@ -1,4 +1,8 @@
-use crate::hir::{Block, Cfg, Expr, Lit, Stmt, Ty};
+use crate::hir::{
+    Block, Cfg, Expr, Lit, Stmt, Ty,
+    expr::{BinaryExpr, VarExpr},
+    stmt::{BranchStmt, LetStmt},
+};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 pub struct PostDomInfo {
     pub pdom: HashMap<String, BTreeSet<String>>,
@@ -165,28 +169,28 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
                 let insert_pos = src_blk.stmts.len().saturating_sub(1);
                 src_blk.stmts.insert(
                     insert_pos,
-                    Stmt::Let {
-                        dest: Box::new(Expr::Var {
+                    Stmt::Let(LetStmt {
+                        dest: Box::new(Expr::Var(VarExpr {
                             name: tag_name.clone(),
                             dtype: Ty::Int(32, true),
-                        }),
+                        })),
                         src: Box::new(Expr::Literal(Lit::Int {
                             value: target_idx as u64,
                             bits: 32,
                             signed: true,
                         })),
-                    },
+                    }),
                 );
                 for s in &mut src_blk.succ {
                     if s == og_dst {
                         *s = unified_name.clone();
                     }
                 }
-                if let Some(Stmt::Branch {
+                if let Some(Stmt::Branch(BranchStmt {
                     then_block,
                     else_block,
                     ..
-                }) = src_blk.stmts.last_mut()
+                })) = src_blk.stmts.last_mut()
                 {
                     if then_block == og_dst {
                         *then_block = unified_name.clone();
@@ -210,36 +214,36 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
             unified_block.pred = preds.into_iter().collect();
 
             if targets.len() == 2 {
-                let cond = Expr::BinaryOp {
+                let cond = Expr::BinaryOp(BinaryExpr {
                     op: inkwell::values::InstructionOpcode::ICmp,
-                    arg1: Box::new(Expr::Var {
+                    arg1: Box::new(Expr::Var(VarExpr {
                         name: tag_name.clone(),
                         dtype: Ty::Int(32, true),
-                    }),
+                    })),
                     arg2: Box::new(Expr::Literal(Lit::Int {
                         value: 0,
                         bits: 32,
                         signed: true,
                     })),
-                };
-                unified_block.stmts.push(Stmt::Branch {
+                });
+                unified_block.stmts.push(Stmt::Branch(BranchStmt {
                     cond: Some(cond),
                     then_block: targets[0].clone(),
                     else_block: Some(targets[1].clone()),
-                });
+                }));
                 unified_block.succ = vec![targets[0].clone(), targets[1].clone()];
             } else {
                 let first = targets[0].clone();
                 let second = targets[1].clone();
                 unified_block.succ = targets.clone();
-                unified_block.stmts.push(Stmt::Branch {
-                    cond: Some(Expr::Var {
+                unified_block.stmts.push(Stmt::Branch(BranchStmt {
+                    cond: Some(Expr::Var(VarExpr {
                         name: tag_name.clone(),
                         dtype: Ty::Int(32, true),
-                    }),
+                    })),
                     then_block: first,
                     else_block: Some(second),
-                });
+                }));
             }
             for t in &targets {
                 if let Some(dest_blk) = cfg.blocks.get_mut(t)

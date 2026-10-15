@@ -8,7 +8,13 @@ use inkwell::{
 use tracing::{debug, warn};
 
 use crate::hir::{
-    Lit, cfg::Cfg, error::LowerError, expr::Expr, func::Function, stmt::Stmt, ty::Ty,
+    Lit,
+    cfg::Cfg,
+    error::LowerError,
+    expr::{BinaryExpr, Expr, VarExpr},
+    func::Function,
+    stmt::{BranchStmt, LetStmt, RetStmt, Stmt},
+    ty::Ty,
 };
 
 /// Build a CFG from an LLVM function value.
@@ -129,10 +135,10 @@ fn collect_instructions(val: &FunctionValue, cfg: &mut Cfg) {
                     .to_string();
                 let dtype = Ty::try_from(inst.get_type()).unwrap_or(Ty::Void);
                 if !dest.is_empty() {
-                    stmts.push(Stmt::Let {
-                        dest: Box::new(Expr::Var { name: dest, dtype }),
+                    stmts.push(Stmt::Let(LetStmt {
+                        dest: Box::new(Expr::Var(VarExpr { name: dest, dtype })),
                         src: Box::new(e),
-                    });
+                    }));
                 } else {
                     tracing::debug!("Skipping unnamed value");
                 }
@@ -207,11 +213,11 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                 if op1.is_block()
                     && let blockval = op1.unwrap_block()
                 {
-                    Ok(Stmt::Branch {
+                    Ok(Stmt::Branch(BranchStmt {
                         cond: None,
                         then_block: blockval.get_name().to_string_lossy().to_string(),
                         else_block: None,
-                    })
+                    }))
                 } else {
                     let opval = Expr::try_from(op1)?;
                     let else_block = ops
@@ -230,11 +236,11 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                         .ok_or_else(|| {
                             LowerError::UnsupportedOperandKind("expected true block".into())
                         })?;
-                    Ok(Stmt::Branch {
+                    Ok(Stmt::Branch(BranchStmt {
                         cond: Some(opval),
                         then_block: then_block.get_name().to_string_lossy().to_string(),
                         else_block: Some(else_block.get_name().to_string_lossy().to_string()),
-                    })
+                    }))
                 }
             }
             Return => {
@@ -242,9 +248,9 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                 let op1 = ops.next().and_then(|o| o);
                 if let Some(op1) = op1 {
                     let value = Expr::try_from(op1)?;
-                    Ok(Stmt::Ret { value: Some(value) })
+                    Ok(Stmt::Ret(RetStmt { value: Some(value) }))
                 } else {
-                    Ok(Stmt::Ret { value: None })
+                    Ok(Stmt::Ret(RetStmt { value: None }))
                 }
             }
             other => Err(LowerError::UnsupportedOpcode(format!("{other:?}"))),
@@ -276,11 +282,11 @@ impl<'c> TryFrom<InstructionValue<'c>> for Expr {
                     })?;
                 let op1_expr = Expr::try_from(op1)?;
                 let op2_expr = Expr::try_from(op2)?;
-                Ok(Expr::BinaryOp {
+                Ok(Expr::BinaryOp(BinaryExpr {
                     op: op.get_opcode(),
                     arg1: Box::new(op1_expr),
                     arg2: Box::new(op2_expr),
-                })
+                }))
             }
             other => Err(LowerError::UnsupportedOpcode(format!("{other:?}"))),
         }
@@ -313,10 +319,10 @@ impl<'c> TryFrom<Operand<'c>> for Expr {
                 }
             } else {
                 let name = int.get_name().to_string_lossy().into_owned();
-                Ok(Expr::Var {
+                Ok(Expr::Var(VarExpr {
                     name,
                     dtype: Ty::from(bve),
-                })
+                }))
             }
         } else if bve.is_float_value() {
             let float = bve.into_float_value();
@@ -330,10 +336,10 @@ impl<'c> TryFrom<Operand<'c>> for Expr {
                 Ok(Expr::Literal(Lit::Float { bits, value }))
             } else {
                 let name = float.get_name().to_string_lossy().into_owned();
-                Ok(Expr::Var {
+                Ok(Expr::Var(VarExpr {
                     name,
                     dtype: Ty::from(bve),
-                })
+                }))
             }
         } else if bve.is_pointer_value() {
             let ptr = bve.into_pointer_value();
@@ -343,10 +349,10 @@ impl<'c> TryFrom<Operand<'c>> for Expr {
                 Ok(Expr::Literal(Lit::NullPtr))
             } else {
                 let name = ptr.get_name().to_string_lossy().into_owned();
-                Ok(Expr::Var {
+                Ok(Expr::Var(VarExpr {
                     name,
                     dtype: Ty::from(bve),
-                })
+                }))
             }
         } else {
             Err(LowerError::UnsupportedOperandKind(format!("{bve:?}")))
