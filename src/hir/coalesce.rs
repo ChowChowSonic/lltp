@@ -116,7 +116,7 @@ fn find(rep: &BTreeMap<String, String>, name: &str) -> String {
 // liveness and interference
 // ---------------------------------------------------------------------------
 
-fn inst_vals(inst: &Inst) -> Vec<&Val> {
+pub(super) fn inst_vals(inst: &Inst) -> Vec<&Val> {
     match inst {
         Inst::Load { .. } => vec![],
         Inst::Store { value, .. } => vec![value],
@@ -126,7 +126,7 @@ fn inst_vals(inst: &Inst) -> Vec<&Val> {
     }
 }
 
-fn term_vals(term: &Term) -> Vec<&Val> {
+pub(super) fn term_vals(term: &Term) -> Vec<&Val> {
     match term {
         Term::Br(_) | Term::Unreachable => vec![],
         Term::CondBr { cond, .. } => vec![cond],
