@@ -2,6 +2,8 @@ use inkwell::values::InstructionOpcode::ICmp;
 use tracing::info;
 
 use crate::backend::Language;
+use crate::hir::expr::BinaryExpr;
+use crate::hir::stmt::{IfStmt, SwitchStmt};
 use crate::hir::{Expr, Function, Lit, Stmt};
 use crate::passes::{LowerError, Lowering};
 
@@ -31,46 +33,48 @@ fn lower_stmts(stmts: Vec<Stmt>) -> Vec<Stmt> {
 
 fn lower_stmt(stmt: Stmt) -> Vec<Stmt> {
     match stmt {
-        Stmt::Switch {
+        Stmt::Switch(SwitchStmt {
             value,
             cases,
             default,
-        } if !cases.is_empty() => {
+        }) if !cases.is_empty() => {
             let mut else_stmts = lower_stmts(default);
             for (case, body) in cases.into_iter().rev() {
-                else_stmts = vec![Stmt::If {
+                else_stmts = vec![Stmt::If(IfStmt {
                     cond: eq(value.clone(), case),
                     then_stmts: lower_stmts(body),
                     else_stmts,
-                }];
+                })];
             }
             else_stmts
         }
-        Stmt::Switch { default, .. } => lower_stmts(default),
-        Stmt::If {
+        Stmt::Switch(SwitchStmt { default, .. }) => lower_stmts(default),
+        Stmt::If(IfStmt {
             cond,
             then_stmts,
             else_stmts,
-        } => vec![Stmt::If {
+        }) => vec![Stmt::If(IfStmt {
             cond,
             then_stmts: lower_stmts(then_stmts),
             else_stmts: lower_stmts(else_stmts),
-        }],
+        })],
         other => vec![other],
     }
 }
 
 fn eq(value: Expr, case: Lit) -> Expr {
-    Expr::BinaryOp {
+    Expr::BinaryOp(BinaryExpr {
         op: ICmp,
         arg1: Box::new(value),
         arg2: Box::new(Expr::Literal(case)),
-    }
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use crate::backend::{ExprEmitter, Language, StmtEmitter};
+    use crate::hir::expr::VarExpr;
+    use crate::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
     use crate::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
     use crate::passes::{Lowering, SwitchToIfElse};
 
@@ -146,29 +150,29 @@ mod tests {
             params: vec![Ty::Int(64, true)],
             return_ty: Ty::Int(64, true),
             cfg: Cfg::default(),
-            body: vec![Stmt::Switch {
-                value: Expr::Var {
+            body: vec![Stmt::Switch(SwitchStmt {
+                value: Expr::Var(VarExpr {
                     name: "x".to_string(),
                     dtype: Ty::Int(64, true),
-                },
+                }),
                 cases: vec![
                     (
                         i64(1),
-                        vec![Stmt::Ret {
+                        vec![Stmt::Ret(RetStmt {
                             value: Some(Expr::Literal(i64(10))),
-                        }],
+                        })],
                     ),
                     (
                         i64(2),
-                        vec![Stmt::Ret {
+                        vec![Stmt::Ret(RetStmt {
                             value: Some(Expr::Literal(i64(20))),
-                        }],
+                        })],
                     ),
                 ],
-                default: vec![Stmt::Ret {
+                default: vec![Stmt::Ret(RetStmt {
                     value: Some(Expr::Literal(i64(30))),
-                }],
-            }],
+                })],
+            })],
         }
     }
 
@@ -182,11 +186,11 @@ mod tests {
             .expect("lowering should succeed");
 
         assert_eq!(func.body.len(), 1);
-        let Stmt::If {
+        let Stmt::If(IfStmt {
             then_stmts,
             else_stmts,
             ..
-        } = &func.body[0]
+        }) = &func.body[0]
         else {
             panic!("expected an If, got {:?}", func.body[0]);
         };

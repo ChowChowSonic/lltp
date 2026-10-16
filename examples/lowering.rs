@@ -10,6 +10,8 @@ use std::fmt::{self, Formatter};
 use inkwell::values::InstructionOpcode;
 
 use lltp::backend::{ExprEmitter, Language, StmtEmitter};
+use lltp::hir::expr::{BinaryExpr, VarExpr};
+use lltp::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
 use lltp::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
 use lltp::passes::SwitchToIfElse;
 
@@ -21,47 +23,44 @@ struct ToyBackend;
 impl ExprEmitter for ToyBackend {
     fn emit_expr(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
         match expr {
-            Expr::Var { name, .. } => write!(out, "{name}"),
-            Expr::Literal(_) => self.emit_literal(expr, out),
-            Expr::BinaryOp { .. } => self.emit_binary_op(expr, out),
+            Expr::Var(VarExpr { name, .. }) => write!(out, "{name}"),
+            Expr::Literal(i) => self.emit_literal(i, out),
+            Expr::BinaryOp(b) => self.emit_binary_op(b, out),
             other => unreachable!("toy emitter does not support {other:?}"),
         }
     }
 
-    fn emit_literal(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
+    fn emit_literal(&self, expr: &Lit, out: &mut Formatter) -> fmt::Result {
         match expr {
-            Expr::Literal(Lit::Int { value, .. }) => write!(out, "{value}"),
-            Expr::Literal(Lit::Bool(b)) => write!(out, "{b}"),
+            Lit::Int { value, .. } => write!(out, "{value}"),
+            Lit::Bool(b) => write!(out, "{b}"),
             other => unreachable!("toy emitter does not support {other:?}"),
         }
     }
 
-    fn emit_binary_op(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
-        let Expr::BinaryOp { op, arg1, arg2 } = expr else {
-            unreachable!("expected a binary op");
-        };
-        self.emit_expr(arg1, out)?;
-        match op {
+    fn emit_binary_op(&self, expr: &BinaryExpr, out: &mut Formatter) -> fmt::Result {
+        self.emit_expr(&expr.arg1, out)?;
+        match expr.op {
             InstructionOpcode::ICmp => write!(out, " == ")?,
             other => unreachable!("toy emitter does not support `{other:?}`"),
         }
-        self.emit_expr(arg2, out)
+        self.emit_expr(&expr.arg2, out)
     }
 }
 
 impl StmtEmitter for ToyBackend {
     fn emit_stmt(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
         match stmt {
-            Stmt::Ret { .. } => self.emit_return(stmt, out),
-            Stmt::If { .. } => self.emit_if(stmt, out),
-            Stmt::Switch { .. } => self.emit_switch(stmt, out),
-            Stmt::Let { .. } => unreachable!("Assignment statements not supported!"),
-            Stmt::Branch { .. } => unreachable!("raw IR branches are not emitted"),
-            Stmt::Loop { .. } => unreachable!("Loops are not emitted"),
+            Stmt::Ret(i) => self.emit_return(i, out),
+            Stmt::If(i) => self.emit_if(i, out),
+            Stmt::Switch(i) => self.emit_switch(i, out),
+            Stmt::Let(_i) => unreachable!("Assignment statements not supported!"),
+            Stmt::Branch(_i) => unreachable!("raw IR branches are not emitted"),
+            Stmt::Loop(_i) => unreachable!("Loops are not emitted"),
             Stmt::Break => unreachable!("Breaks are not emitted"),
             Stmt::Continue => unreachable!("Continues are not emitted"),
-            Stmt::Label { .. } => unreachable!("Labels are not emitted"),
-            Stmt::Goto { .. } => unreachable!("Gotos are not emitted"),
+            Stmt::Label(_i) => unreachable!("Labels are not emitted"),
+            Stmt::Goto(_i) => unreachable!("Gotos are not emitted"),
         }
     }
 
@@ -71,68 +70,49 @@ impl StmtEmitter for ToyBackend {
         write!(out, "}}")
     }
 
-    fn emit_return(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
-        let Stmt::Ret { value } = stmt else {
-            unreachable!("expected a return");
-        };
+    fn emit_return(&self, stmt: &RetStmt, out: &mut Formatter) -> fmt::Result {
         write!(out, "return")?;
-        if let Some(value) = value {
+        if let Some(value) = &stmt.value {
             write!(out, " ")?;
             self.emit_expr(value, out)?;
         }
         write!(out, ";")
     }
 
-    fn emit_if(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
-        let Stmt::If {
-            cond,
-            then_stmts,
-            else_stmts,
-        } = stmt
-        else {
-            unreachable!("expected an if");
-        };
+    fn emit_if(&self, stmt: &IfStmt, out: &mut Formatter) -> fmt::Result {
         write!(out, "if (")?;
-        self.emit_expr(cond, out)?;
+        self.emit_expr(&stmt.cond, out)?;
         writeln!(out, ") {{")?;
-        emit_stmt_lines(self, then_stmts, out)?;
+        emit_stmt_lines(self, &stmt.then_stmts, out)?;
         write!(out, "}}")?;
-        match else_stmts.as_slice() {
-            [nested @ Stmt::If { .. }] => {
+        match stmt.else_stmts.as_slice() {
+            [Stmt::If(i)] => {
                 write!(out, " else ")?;
-                self.emit_if(nested, out)?;
+                self.emit_if(i, out)?;
             }
             [] => {}
             _ => {
                 writeln!(out, " else {{")?;
-                emit_stmt_lines(self, else_stmts, out)?;
+                emit_stmt_lines(self, &stmt.else_stmts, out)?;
                 write!(out, "}}")?;
             }
         }
         Ok(())
     }
 
-    fn emit_switch(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
-        let Stmt::Switch {
-            value,
-            cases,
-            default,
-        } = stmt
-        else {
-            unreachable!("expected a switch");
-        };
+    fn emit_switch(&self, stmt: &SwitchStmt, out: &mut Formatter) -> fmt::Result {
         write!(out, "switch (")?;
-        self.emit_expr(value, out)?;
+        self.emit_expr(&stmt.value, out)?;
         writeln!(out, ") {{")?;
-        for (case, body) in cases {
+        for (case, body) in &stmt.cases {
             write!(out, "case ")?;
-            self.emit_literal(&Expr::Literal(case.clone()), out)?;
+            self.emit_literal(case, out)?;
             writeln!(out, ":")?;
             emit_stmt_lines(self, body, out)?;
         }
-        if !default.is_empty() {
+        if !stmt.default.is_empty() {
             writeln!(out, "default:")?;
-            emit_stmt_lines(self, default, out)?;
+            emit_stmt_lines(self, &stmt.default, out)?;
         }
         write!(out, "}}")
     }
@@ -235,29 +215,29 @@ fn recovered_switch() -> Function {
         params: vec![Ty::Int(64, true)],
         return_ty: Ty::Int(64, true),
         cfg: Cfg::default(),
-        body: vec![Stmt::Switch {
-            value: Expr::Var {
+        body: vec![Stmt::Switch(SwitchStmt {
+            value: Expr::Var(VarExpr {
                 name: "x".to_string(),
                 dtype: Ty::Int(64, true),
-            },
+            }),
             cases: vec![
                 (
                     i64(1),
-                    vec![Stmt::Ret {
+                    vec![Stmt::Ret(RetStmt {
                         value: Some(Expr::Literal(i64(10))),
-                    }],
+                    })],
                 ),
                 (
                     i64(2),
-                    vec![Stmt::Ret {
+                    vec![Stmt::Ret(RetStmt {
                         value: Some(Expr::Literal(i64(20))),
-                    }],
+                    })],
                 ),
             ],
-            default: vec![Stmt::Ret {
+            default: vec![Stmt::Ret(RetStmt {
                 value: Some(Expr::Literal(i64(30))),
-            }],
-        }],
+            })],
+        })],
     }
 }
 

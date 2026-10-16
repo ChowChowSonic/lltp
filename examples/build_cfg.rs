@@ -4,6 +4,7 @@ use std::process::ExitCode;
 use inkwell::context::Context;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
 use lltp::hir::lowering::build_graph;
+use lltp::hir::stmt::LoopStmt;
 use lltp::{build_module, hir};
 
 fn main() -> ExitCode {
@@ -61,7 +62,7 @@ fn main() -> ExitCode {
         let stmts = graph.structurize().unwrap_or(Vec::new());
         assert!(!stmts.is_empty());
         for bb in stmts {
-            if let hir::Stmt::Loop { cond: _, body } = bb {
+            if let hir::Stmt::Loop(LoopStmt { body, .. }) = bb {
                 let name = if body.is_empty() {
                     "<unnamed>"
                 } else {

@@ -8,7 +8,13 @@ use inkwell::{
 use tracing::{debug, warn};
 
 use crate::hir::{
-    Lit, cfg::Cfg, error::LowerError, expr::Expr, func::Function, stmt::Stmt, ty::Ty,
+    Lit,
+    cfg::Cfg,
+    error::LowerError,
+    expr::{BinaryExpr, Expr, VarExpr},
+    func::Function,
+    stmt::{BranchStmt, LetStmt, RetStmt, Stmt},
+    ty::Ty,
 };
 
 /// Build a CFG from an LLVM function value.
@@ -102,13 +108,16 @@ pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
     let mut cfg = build_graph(val)?;
     collect_instructions(val, &mut cfg);
 
-    Ok(Function {
+    let mut func = Function {
         name,
         params: param_types,
         return_ty: ret_ty,
         cfg,
         body: stmt_blocks,
-    })
+    };
+    func.structurize()
+        .map_err(|e| LowerError::Other(e.to_string()))?;
+    Ok(func)
 }
 
 fn collect_instructions(val: &FunctionValue, cfg: &mut Cfg) {
@@ -126,10 +135,10 @@ fn collect_instructions(val: &FunctionValue, cfg: &mut Cfg) {
                     .to_string();
                 let dtype = Ty::try_from(inst.get_type()).unwrap_or(Ty::Void);
                 if !dest.is_empty() {
-                    stmts.push(Stmt::Let {
-                        dest: Box::new(Expr::Var { name: dest, dtype }),
+                    stmts.push(Stmt::Let(LetStmt {
+                        dest: Box::new(Expr::Var(VarExpr { name: dest, dtype })),
                         src: Box::new(e),
-                    });
+                    }));
                 } else {
                     tracing::debug!("Skipping unnamed value");
                 }
@@ -204,11 +213,11 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                 if op1.is_block()
                     && let blockval = op1.unwrap_block()
                 {
-                    Ok(Stmt::Branch {
+                    Ok(Stmt::Branch(BranchStmt {
                         cond: None,
                         then_block: blockval.get_name().to_string_lossy().to_string(),
                         else_block: None,
-                    })
+                    }))
                 } else {
                     let opval = Expr::try_from(op1)?;
                     let else_block = ops
@@ -227,11 +236,11 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                         .ok_or_else(|| {
                             LowerError::UnsupportedOperandKind("expected true block".into())
                         })?;
-                    Ok(Stmt::Branch {
+                    Ok(Stmt::Branch(BranchStmt {
                         cond: Some(opval),
                         then_block: then_block.get_name().to_string_lossy().to_string(),
                         else_block: Some(else_block.get_name().to_string_lossy().to_string()),
-                    })
+                    }))
                 }
             }
             Return => {
@@ -239,9 +248,9 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                 let op1 = ops.next().and_then(|o| o);
                 if let Some(op1) = op1 {
                     let value = Expr::try_from(op1)?;
-                    Ok(Stmt::Ret { value: Some(value) })
+                    Ok(Stmt::Ret(RetStmt { value: Some(value) }))
                 } else {
-                    Ok(Stmt::Ret { value: None })
+                    Ok(Stmt::Ret(RetStmt { value: None }))
                 }
             }
             other => Err(LowerError::UnsupportedOpcode(format!("{other:?}"))),
@@ -273,11 +282,11 @@ impl<'c> TryFrom<InstructionValue<'c>> for Expr {
                     })?;
                 let op1_expr = Expr::try_from(op1)?;
                 let op2_expr = Expr::try_from(op2)?;
-                Ok(Expr::BinaryOp {
+                Ok(Expr::BinaryOp(BinaryExpr {
                     op: op.get_opcode(),
                     arg1: Box::new(op1_expr),
                     arg2: Box::new(op2_expr),
-                })
+                }))
             }
             other => Err(LowerError::UnsupportedOpcode(format!("{other:?}"))),
         }
@@ -310,10 +319,10 @@ impl<'c> TryFrom<Operand<'c>> for Expr {
                 }
             } else {
                 let name = int.get_name().to_string_lossy().into_owned();
-                Ok(Expr::Var {
+                Ok(Expr::Var(VarExpr {
                     name,
                     dtype: Ty::from(bve),
-                })
+                }))
             }
         } else if bve.is_float_value() {
             let float = bve.into_float_value();
@@ -327,10 +336,10 @@ impl<'c> TryFrom<Operand<'c>> for Expr {
                 Ok(Expr::Literal(Lit::Float { bits, value }))
             } else {
                 let name = float.get_name().to_string_lossy().into_owned();
-                Ok(Expr::Var {
+                Ok(Expr::Var(VarExpr {
                     name,
                     dtype: Ty::from(bve),
-                })
+                }))
             }
         } else if bve.is_pointer_value() {
             let ptr = bve.into_pointer_value();
@@ -340,10 +349,10 @@ impl<'c> TryFrom<Operand<'c>> for Expr {
                 Ok(Expr::Literal(Lit::NullPtr))
             } else {
                 let name = ptr.get_name().to_string_lossy().into_owned();
-                Ok(Expr::Var {
+                Ok(Expr::Var(VarExpr {
                     name,
                     dtype: Ty::from(bve),
-                })
+                }))
             }
         } else {
             Err(LowerError::UnsupportedOperandKind(format!("{bve:?}")))
@@ -361,11 +370,15 @@ impl<'c> TryFrom<&Operand<'c>> for Expr {
 
 #[cfg(test)]
 mod tests {
-    use crate::hir::{
-        cfg::Cfg,
-        flow::{dominators, natural_loops},
-        func::Function,
-        stmt::Stmt,
+    use crate::{
+        hir::{
+            cfg::Cfg,
+            flow::{dominators, natural_loops},
+            func::Function,
+            stmt::Stmt,
+            verify::{are_equivalent, structured_to_cfg},
+        },
+        parse_ir,
     };
 
     fn build_cfgs(ir: &str) -> Vec<Cfg> {
@@ -651,5 +664,54 @@ nonpos:
             &f.cfg.blocks["entry"].stmts[1],
             Stmt::Branch { .. }
         ));
+    }
+
+    /* //TODO: Re-add this test when support for Phi instructions is working
+        #[test]
+        fn lower_and_structurize_simple_loop() {
+            let ir = r#"define void @f(i32 %n) {
+            entry: 
+              br label %header
+            header: 
+              %i = phi i32 [0, %entry], [%i2, %body]
+              %c = icmp slt i32 %i, %n
+              br i1 %c, label %body, label %exit 
+            body: 
+              %i2 = add i32 %i, 1 
+              br label %header
+            exit: 
+              ret void 
+            }"#;
+            let ctxt = inkwell::context::Context::create();
+            let module = parse_ir(&ctxt, ir).unwrap();
+            let func_val = module.get_first_function().unwrap();
+            let mut func = Function::try_from(&func_val).unwrap();
+            let func_imut = func.clone();
+            let body = func.structurize().unwrap();
+
+            assert!(matches!(body[0], Stmt::Loop { .. }));
+            assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(body)));
+        }
+    */
+    #[test]
+    fn lower_and_structurize_simple_if() {
+        let ir = r#"define i32 @f(i32 %x) {
+            entry: 
+              %c = icmp sgt i32 %x, 0
+              br i1 %c, label %pos, label %neg
+            pos: 
+              ret i32 1
+            neg: 
+              ret i32 0
+            }"#;
+        let ctxt = inkwell::context::Context::create();
+        let module = parse_ir(&ctxt, ir).unwrap();
+        let func_val = module.get_first_function().unwrap();
+        let mut func = Function::try_from(&func_val).unwrap();
+        let func_imut = func.clone();
+        let body = func.structurize().unwrap();
+
+        assert!(matches!(body[0], Stmt::If { .. }));
+        assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(body)));
     }
 }

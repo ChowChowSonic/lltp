@@ -1,4 +1,7 @@
-use crate::hir::{Cfg, Stmt};
+use crate::hir::{
+    Cfg, Stmt,
+    stmt::{GotoStmt, IfStmt, LabelStmt, LoopStmt, SwitchStmt},
+};
 use std::collections::{BTreeSet, HashMap};
 
 struct ReBuilder {
@@ -31,21 +34,21 @@ impl ReBuilder {
     fn collect_labels(&mut self, stmts: &[Stmt], labels: &mut HashMap<String, String>) {
         for s in stmts {
             match s {
-                Stmt::Label { name } => {
+                Stmt::Label(LabelStmt { name }) => {
                     labels.insert(name.clone(), self.fresh());
                 }
-                Stmt::If {
+                Stmt::If(IfStmt {
                     then_stmts,
                     else_stmts,
                     ..
-                } => {
+                }) => {
                     self.collect_labels(then_stmts, labels);
                     self.collect_labels(else_stmts, labels);
                 }
-                Stmt::Loop { body, .. } => {
+                Stmt::Loop(LoopStmt { body, .. }) => {
                     self.collect_labels(body, labels);
                 }
-                Stmt::Switch { cases, .. } => {
+                Stmt::Switch(SwitchStmt { cases, .. }) => {
                     for (_, b) in cases {
                         self.collect_labels(b, labels);
                     }
@@ -75,7 +78,7 @@ impl ReBuilder {
                     cur = None;
                 }
 
-                Stmt::Goto { target } => {
+                Stmt::Goto(GotoStmt { target }) => {
                     if let Some(c) = &cur {
                         let t = labels
                             .get(target)
@@ -84,17 +87,17 @@ impl ReBuilder {
                     }
                     cur = None;
                 }
-                Stmt::Label { name } => {
+                Stmt::Label(LabelStmt { name }) => {
                     if let Some(c) = &cur {
                         self.edge(c, &labels[name]);
                     }
                     cur = labels.get(name).cloned();
                 }
-                Stmt::If {
+                Stmt::If(IfStmt {
                     then_stmts,
                     else_stmts,
                     ..
-                } => {
+                }) => {
                     let Some(c) = cur else { continue }; // dead code: skip
                     let (te, tx) = self.region(then_stmts, brk, cont, labels);
                     self.edge(&c, &te);
@@ -119,9 +122,9 @@ impl ReBuilder {
                     }
                     cur = join; // None if both arms terminated
                 }
-                Stmt::Loop {
+                Stmt::Loop(LoopStmt {
                     body, cond: lcond, ..
-                } => {
+                }) => {
                     let Some(c) = cur else { continue };
                     let header = self.fresh();
                     let join = self.fresh(); // false-exit: cond fails → after loop
@@ -137,7 +140,7 @@ impl ReBuilder {
                     cur = Some(join);
                 }
 
-                Stmt::Switch { cases, default, .. } => {
+                Stmt::Switch(SwitchStmt { cases, default, .. }) => {
                     let Some(c) = cur else { continue };
                     let mut join: Option<String> = None;
                     for (_, body) in cases {
@@ -246,7 +249,10 @@ pub fn are_equivalent(a: &Cfg, b: &Cfg) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{are_equivalent, structured_to_cfg};
-    use crate::hir::{Cfg, Expr, Lit, Stmt};
+    use crate::hir::{
+        Cfg, Expr, Lit, Stmt,
+        stmt::{IfStmt, LetStmt, LoopStmt, RetStmt},
+    };
     use std::collections::{BTreeSet, HashMap};
 
     fn cond() -> Expr {
@@ -288,11 +294,11 @@ mod tests {
     /// so no join block is created.
     #[test]
     fn if_with_both_arms_ret_has_no_join() {
-        let body = [Stmt::If {
+        let body = [Stmt::If(IfStmt {
             cond: cond(),
-            then_stmts: vec![Stmt::Ret { value: None }],
-            else_stmts: vec![Stmt::Ret { value: None }],
-        }];
+            then_stmts: vec![Stmt::Ret(RetStmt { value: None })],
+            else_stmts: vec![Stmt::Ret(RetStmt { value: None })],
+        })];
         let cfg = structured_to_cfg(&body);
         assert_eq!(cfg.blocks.len(), 3);
         assert_eq!(cfg.blocks[&cfg.entry].succ.len(), 2);
@@ -305,13 +311,13 @@ mod tests {
     /// only the cond-false edge may leave the loop.
     #[test]
     fn loop_body_fallout_returns_to_the_header() {
-        let body = [Stmt::Loop {
+        let body = [Stmt::Loop(LoopStmt {
             cond: Some(cond()),
-            body: vec![Stmt::Let {
+            body: vec![Stmt::Let(LetStmt {
                 dest: Box::new(Expr::Literal(Lit::Bool(false))),
                 src: Box::new(Expr::Literal(Lit::Bool(true))),
-            }],
-        }];
+            })],
+        })];
         let cfg = structured_to_cfg(&body);
         // b0 entry, b1 header, b2 join, b3 body (falls out)
         assert_eq!(cfg.blocks.len(), 4);
@@ -329,11 +335,11 @@ mod tests {
     #[test]
     fn loop_with_break_shape() {
         let body = [
-            Stmt::Loop {
+            Stmt::Loop(LoopStmt {
                 cond: Some(cond()),
                 body: vec![Stmt::Break],
-            },
-            Stmt::Ret { value: None },
+            }),
+            Stmt::Ret(RetStmt { value: None }),
         ];
         let cfg = structured_to_cfg(&body);
         // b0 entry, b1 header, b2 join (holds the ret), b3 body entry (break)
@@ -352,17 +358,17 @@ mod tests {
     /// to the loop header (re-evaluating the condition), not to the exit.
     #[test]
     fn continue_targets_the_loop_header() {
-        let body = [Stmt::Loop {
+        let body = [Stmt::Loop(LoopStmt {
             cond: Some(cond()),
             body: vec![
-                Stmt::If {
+                Stmt::If(IfStmt {
                     cond: cond(),
                     then_stmts: vec![Stmt::Continue],
                     else_stmts: vec![],
-                },
-                Stmt::Ret { value: None },
+                }),
+                Stmt::Ret(RetStmt { value: None }),
             ],
-        }];
+        })];
         let cfg = structured_to_cfg(&body);
         // b0 entry, b1 header, b2 join, b3 body entry, b4 then arm (continue),
         // b5 after the if (ret)
@@ -388,10 +394,10 @@ mod tests {
     /// is reachable only through the break.
     #[test]
     fn infinite_loop_has_no_false_exit() {
-        let body = [Stmt::Loop {
+        let body = [Stmt::Loop(LoopStmt {
             cond: None,
             body: vec![Stmt::Break],
-        }];
+        })];
         let cfg = structured_to_cfg(&body);
         // b0 entry, b1 header, b2 join, b3 body entry (break)
         assert_eq!(cfg.blocks.len(), 4);
