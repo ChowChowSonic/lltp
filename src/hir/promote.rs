@@ -1,9 +1,19 @@
+//! At `-O0`, clang keeps every source variable in an `alloca` slot and talks to
+//! it through `load`/`store`. A slot whose address is never taken is just a
+//! variable, so its loads and stores are plain copies. `promotable_slots`
+//! decides which slots qualify, and `promote_slots` rewrites their accesses
+//! into copies so the coalescer can merge the temporaries into the slot.
+
 use std::collections::{BTreeMap, BTreeSet};
 
 use super::coalesce::{inst_vals, term_vals};
 use super::flat::{FlatFunction, Inst, Val};
 use super::ty::Ty;
 
+/// A slot qualifies when it is only reached through `load`/`store`, has a
+/// scalar type, and every access uses exactly that type.
+/// A slot is rejected if its address escapes (`Val::Addr` as any operand)
+/// or if it is accessed through a different type.
 pub fn promotable_slots(func: &FlatFunction) -> BTreeSet<String> {
     let ty_of: BTreeMap<&str, &Ty> = func
         .locals
@@ -46,6 +56,35 @@ pub fn promotable_slots(func: &FlatFunction) -> BTreeSet<String> {
         .collect()
 }
 
+/// Rewrite loads and stores of promotable slots into plain copies.
+pub fn promote_slots(func: &mut FlatFunction) -> usize {
+    let slots = promotable_slots(func);
+    if slots.is_empty() {
+        return 0;
+    }
+    let ty_of: BTreeMap<String, Ty> = func.locals.iter().cloned().collect();
+
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            let copy = match &*inst {
+                Inst::Load { dest, ptr } if slots.contains(ptr.as_str()) => Some(Inst::Copy {
+                    dest: dest.clone(),
+                    src: Val::Var(ptr.clone(), ty_of[ptr.as_str()].clone()),
+                }),
+                Inst::Store { ptr, value } if slots.contains(ptr.as_str()) => Some(Inst::Copy {
+                    dest: ptr.clone(),
+                    src: value.clone(),
+                }),
+                _ => None,
+            };
+            if let Some(copy) = copy {
+                *inst = copy;
+            }
+        }
+    }
+    slots.len()
+}
+
 fn note_escapes(vals: Vec<&Val>, rejected: &mut BTreeSet<String>) {
     for v in vals {
         if let Val::Addr(name) = v {
@@ -61,6 +100,7 @@ fn is_scalar(ty: &Ty) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir::coalesce::coalesce;
     use crate::hir::flat::{FlatBlock, FnSig, Term};
 
     fn i32t() -> Ty {
@@ -199,5 +239,79 @@ mod tests {
             ret("t0"),
         );
         assert_eq!(names(&promotable_slots(&f)), ["a"]);
+    }
+
+    #[test]
+    fn promotion_turns_slot_accesses_into_copies() {
+        let mut f = function(
+            vec![("x", i32t()), ("t0", i32t())],
+            vec![store("x", int(1)), load("t0", "x")],
+            ret("t0"),
+        );
+        assert_eq!(promote_slots(&mut f), 1);
+        let insts = &f.blocks[0].insts;
+        assert!(matches!(
+            &insts[0],
+            Inst::Copy { dest, src: Val::Int { value: 1, .. } } if dest == "x"
+        ));
+        assert!(matches!(
+            &insts[1],
+            Inst::Copy { dest, src: Val::Var(src, _) } if dest == "t0" && src == "x"
+        ));
+    }
+
+    #[test]
+    fn promotion_leaves_escaping_slots_alone() {
+        let mut f = function(
+            vec![("x", i32t()), ("t0", i32t())],
+            vec![
+                store("x", int(1)),
+                Inst::Call {
+                    dest: None,
+                    callee: "use_ptr".to_string(),
+                    args: vec![Val::Addr("x".to_string())],
+                },
+                load("t0", "x"),
+            ],
+            ret("t0"),
+        );
+        assert_eq!(promote_slots(&mut f), 0);
+        let insts = &f.blocks[0].insts;
+        assert!(matches!(&insts[0], Inst::Store { .. }));
+        assert!(matches!(&insts[2], Inst::Load { .. }));
+    }
+
+    #[test]
+    fn promoted_temporary_merges_back_into_the_slot() {
+        let mut f = function(
+            vec![("x", i32t()), ("t0", i32t())],
+            vec![store("x", int(1)), load("t0", "x")],
+            ret("t0"),
+        );
+        promote_slots(&mut f);
+        assert_eq!(coalesce(&mut f), 1);
+
+        let names: Vec<&str> = f.locals.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["x"]);
+        let insts = &f.blocks[0].insts;
+        assert_eq!(insts.len(), 1);
+        assert!(matches!(&insts[0], Inst::Copy { dest, .. } if dest == "x"));
+        assert!(matches!(
+            &f.blocks[0].term,
+            Term::Ret(Some(Val::Var(name, _))) if name == "x"
+        ));
+    }
+
+    #[test]
+    fn temporary_stays_separate_when_the_slot_changes_while_it_is_live() {
+        // t0 = x; x = 2; ret t0  -- t0 still holds the old value after x changes.
+        let mut f = function(
+            vec![("x", i32t()), ("t0", i32t())],
+            vec![store("x", int(1)), load("t0", "x"), store("x", int(2))],
+            ret("t0"),
+        );
+        promote_slots(&mut f);
+        assert_eq!(coalesce(&mut f), 0);
+        assert_eq!(f.locals.len(), 2);
     }
 }
