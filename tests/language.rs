@@ -61,7 +61,25 @@ impl StmtEmitter for CLanguage {
         write!(out, "goto {}", stmt.target)
     }
     fn emit_try_catch(&self, stmt: &TryCatchStmt, out: &mut Formatter) -> std::fmt::Result {
-        unimplemented!("err")
+        write!(out, "try {{")?;
+        for x in &stmt.try_body {
+            self.emit_stmt(x, out)?;
+        }
+        write!(out, "}}")?;
+        for x in &stmt.catches {
+            if let Some(ty) = &x.exception_ty
+                && let Some(arg) = &x.param
+            {
+                write!(out, "catch(")?;
+                self.emit_ty(ty, out)?;
+                self.emit_variable(arg, out)?;
+                for y in &x.body {
+                    self.emit_stmt(y, out)?;
+                }
+                write!(out, "}}")?;
+            }
+        }
+        Ok(())
     }
     fn emit_assignment(&self, expr: &LetStmt, out: &mut Formatter) -> std::fmt::Result {
         self.emit_expr(&expr.dest, out)?;
