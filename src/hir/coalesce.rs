@@ -1,6 +1,8 @@
 //! This pass computes liveness, builds an interference graph, and merges
 //! the two ends of a `dest = src` copy into one variable whenever their
 //! live ranges never overlap, then drops the copies that became `x = x`.
+//! A parameter can absorb a local it is copied into (the `x.addr` slot clang
+//! makes for `x`), so the source-level parameter name survives.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -9,16 +11,25 @@ use super::ty::Ty;
 
 type Names = BTreeSet<String>;
 
-/// Coalesce phi-related copies in `func`. Returns how many variables were merged.
+/// Coalesce copy-related variables in `func`. Returns how many variables were merged.
 pub fn coalesce(func: &mut FlatFunction) -> usize {
     let fixed = fixed_names(func);
+    let params: Names = func.param_names.iter().cloned().collect();
+    // Parameters sort before every local, so a merge always keeps the parameter.
     let order: BTreeMap<String, usize> = func
-        .locals
+        .param_names
         .iter()
+        .chain(func.locals.iter().map(|(n, _)| n))
         .enumerate()
-        .map(|(i, (n, _))| (n.clone(), i))
+        .map(|(i, n)| (n.clone(), i))
         .collect();
-    let ty_of: BTreeMap<String, Ty> = func.locals.iter().cloned().collect();
+    let mut ty_of: BTreeMap<String, Ty> = func.locals.iter().cloned().collect();
+    ty_of.extend(
+        func.param_names
+            .iter()
+            .cloned()
+            .zip(func.sig.params.iter().cloned()),
+    );
 
     let live_out = liveness(func);
     let mut adj = interference(func, &live_out);
@@ -47,6 +58,10 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
             continue;
         };
         if fixed.contains(&a) || fixed.contains(&b) || ty_of.get(&a) != ty_of.get(&b) {
+            continue;
+        }
+        // Two parameters are both live on entry, so they can never share a name.
+        if params.contains(&a) && params.contains(&b) {
             continue;
         }
         if adj.get(&a).is_some_and(|n| n.contains(&b)) {
@@ -81,9 +96,10 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
     rep.len()
 }
 
-/// Names that must keep their identity: parameters and alloca slots.
+/// Names that must keep their identity: slots that are still reached through
+/// `load`/`store` or have their address taken.
 fn fixed_names(func: &FlatFunction) -> Names {
-    let mut fixed: Names = func.param_names.iter().cloned().collect();
+    let mut fixed = Names::new();
     for block in &func.blocks {
         for inst in &block.insts {
             if let Inst::Load { ptr, .. } | Inst::Store { ptr, .. } = inst {
@@ -602,5 +618,72 @@ mod tests {
         coalesce(&mut first);
         coalesce(&mut second);
         assert_eq!(format!("{first:?}"), format!("{second:?}"));
+    }
+
+    fn function_with_param(locals: &[&str], blocks: Vec<FlatBlock>) -> FlatFunction {
+        let mut f = function(locals, blocks);
+        f.sig.params = vec![i32t()];
+        f.param_names = vec!["x".to_string()];
+        f
+    }
+
+    #[test]
+    fn slot_copied_from_a_parameter_merges_into_it() {
+        // x_addr = x; add = x_addr + 1; ret add
+        let mut f = function_with_param(
+            &["x_addr", "add"],
+            vec![block(
+                "entry",
+                vec![
+                    copy("x_addr", var("x")),
+                    bin("add", BinOp::Add, var("x_addr"), int(1)),
+                ],
+                Term::Ret(Some(var("add"))),
+            )],
+        );
+        assert_eq!(coalesce(&mut f), 1);
+        assert_eq!(f.param_names, ["x"]);
+        let names: Vec<&str> = f.locals.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["add"]);
+        assert_eq!(f.blocks[0].insts.len(), 1);
+        assert!(matches!(
+            &f.blocks[0].insts[0],
+            Inst::Bin { dest, lhs: Val::Var(l, _), .. } if dest == "add" && l == "x"
+        ));
+    }
+
+    #[test]
+    fn parameter_stays_separate_while_still_live_after_the_slot_changes() {
+        // x_addr = x; x_addr = 5; add = x_addr + x; ret add
+        let mut f = function_with_param(
+            &["x_addr", "add"],
+            vec![block(
+                "entry",
+                vec![
+                    copy("x_addr", var("x")),
+                    copy("x_addr", int(5)),
+                    bin("add", BinOp::Add, var("x_addr"), var("x")),
+                ],
+                Term::Ret(Some(var("add"))),
+            )],
+        );
+        coalesce(&mut f);
+        assert!(f.locals.iter().any(|(n, _)| n == "x_addr"));
+    }
+
+    #[test]
+    fn two_parameters_are_never_merged() {
+        let mut f = function(
+            &[],
+            vec![block(
+                "entry",
+                vec![copy("b", var("a"))],
+                Term::Ret(Some(var("b"))),
+            )],
+        );
+        f.sig.params = vec![i32t(), i32t()];
+        f.param_names = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(coalesce(&mut f), 0);
+        assert_eq!(copies_in(&f), 1);
     }
 }

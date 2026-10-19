@@ -225,3 +225,38 @@ fn phi_rotation_survives_coalescing() {
     let (code, _) = build_and_run(&rebuilt_c, &exe).expect("build and run rebuilt C");
     assert_eq!(code, Some(27), "see {}", rebuilt_c.display());
 }
+
+/// clang spills each parameter into an `x.addr` slot. Recovering variables
+/// should fold that slot back into `x` and keep the source-level name.
+const PARAM_SLOT_IR: &str = r#"define i32 @bump(i32 %x) {
+entry:
+  %x.addr = alloca i32
+  store i32 %x, ptr %x.addr
+  %0 = load i32, ptr %x.addr
+  %add = add nsw i32 %0, 1
+  store i32 %add, ptr %x.addr
+  %1 = load i32, ptr %x.addr
+  ret i32 %1
+}
+
+define i32 @main() {
+entry:
+  %r = call i32 @bump(i32 41)
+  ret i32 %r
+}
+"#;
+
+#[test]
+fn parameter_slot_folds_into_the_parameter_name() {
+    let dir = out_dir();
+    let rebuilt = rebuild_ir(PARAM_SLOT_IR).expect("rebuild param IR");
+    assert!(
+        !rebuilt.contains("x_addr"),
+        "slot for `x` was not folded away:\n{rebuilt}"
+    );
+    let rebuilt_c = dir.join("param_slot_rebuilt.c");
+    fs::write(&rebuilt_c, rebuilt).expect("write rebuilt C");
+    let exe = dir.join(format!("param_slot{}", std::env::consts::EXE_SUFFIX));
+    let (code, _) = build_and_run(&rebuilt_c, &exe).expect("build and run rebuilt C");
+    assert_eq!(code, Some(42), "see {}", rebuilt_c.display());
+}
