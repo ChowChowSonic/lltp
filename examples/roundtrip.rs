@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     };
 
     let ctxt = Context::create();
-    let module = build_module(&ctxt, &compiled.ir);
+    let module = build_module(&ctxt, &compiled.ir).expect("Unable to build module");
 
     let flat = match FlatModule::from_module(&module) {
         Ok(m) => m,

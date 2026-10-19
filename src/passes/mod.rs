@@ -1,7 +1,7 @@
 mod switch;
 
-use std::error::Error;
-use std::fmt::{self, Formatter};
+use crate::hir::LowerError;
+use std::fmt::Formatter;
 
 use crate::backend::Language;
 use crate::hir::Function;
@@ -17,20 +17,6 @@ pub trait Lowering {
     fn name(&self) -> &'static str;
     fn apply(&self, func: &mut Function, target: &dyn Language) -> Result<(), LowerError>;
 }
-
-#[derive(Debug)]
-pub struct LowerError {
-    pub pass: &'static str,
-    pub detail: String,
-}
-
-impl fmt::Display for LowerError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "pass `{}` failed: {}", self.pass, self.detail)
-    }
-}
-
-impl Error for LowerError {}
 
 /// Runs the backend's registered lowering pipeline (the B-core). Structural
 /// passes are library-owned and flags-driven; semantic passes are authored per

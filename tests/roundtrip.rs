@@ -9,9 +9,9 @@ use std::process::Command;
 
 use inkwell::context::Context;
 use lltp::backend::c_goto;
+use lltp::build_module;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
 use lltp::hir::flat::FlatModule;
-use lltp::{build_module, parse_ir};
 
 /// Fixtures the baseline is expected to round-trip.
 const SUPPORTED: &[&str] = &[
@@ -49,7 +49,7 @@ fn rebuild(c_file: &Path) -> Result<String, String> {
     let cfg = FrontendConfig::default();
     let compiled = compile_c_to_ir(&cfg, c_file).map_err(|e| e.to_string())?;
     let ctxt = Context::create();
-    let module = build_module(&ctxt, &compiled.ir);
+    let module = build_module(&ctxt, &compiled.ir).unwrap();
     let flat = FlatModule::from_module(&module).map_err(|e| e.to_string())?;
     c_goto::emit_module(&flat)
 }
@@ -125,7 +125,7 @@ fn pending_fixtures_fail_cleanly() {
 /// Textual IR -> rebuilt C source text.
 fn rebuild_ir(ir: &str) -> Result<String, String> {
     let ctxt = Context::create();
-    let module = parse_ir(&ctxt, ir).map_err(|e| e.to_string())?;
+    let module = build_module(&ctxt, ir).map_err(|e| e.to_string())?;
     let flat = FlatModule::from_module(&module).map_err(|e| e.to_string())?;
     c_goto::emit_module(&flat)
 }

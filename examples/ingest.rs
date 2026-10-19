@@ -58,11 +58,11 @@ fn main() {
 
     // 1. Ingest IR text into an in-memory LLVM module.
     let ctxt = Context::create();
-    let module = build_module(&ctxt, IR);
+    let module = build_module(&ctxt, IR).unwrap();
     println!("module: {}", module.get_name().to_str().unwrap());
 
     // 2. Enumerate module-level globals.
-    let globals = lltp::get_globals(&module);
+    let globals: Vec<_> = module.get_globals().collect();
     println!("{} global(s) in module", globals.len());
     let first_fn = module
         .get_first_function()

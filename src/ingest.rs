@@ -66,21 +66,6 @@ pub fn sniff_format(header: &[u8]) -> IrFormat {
     }
 }
 
-/// Parse textual IR held in memory.
-pub fn parse_ir<'ctx>(ctxt: &'ctx Context, ir: &str) -> Result<Module<'ctx>, IngestError> {
-    let mut bytes = ir.as_bytes().to_vec();
-    if bytes.last() != Some(&0) {
-        bytes.push(0);
-    }
-    let mem_buf = MemoryBuffer::create_from_memory_range(&bytes, "test_module");
-    ctxt.create_module_from_ir(mem_buf)
-        .map_err(|e| IngestError::Parse {
-            origin: "<memory>".to_string(),
-            format: IrFormat::Text,
-            detail: e.to_string(),
-        })
-}
-
 /// Load a `.ll` or `.bc` file into a module.
 pub fn load_module<'ctx>(ctxt: &'ctx Context, path: &Path) -> Result<Module<'ctx>, IngestError> {
     let read_err = |detail: String| IngestError::Read {
@@ -111,6 +96,8 @@ pub fn load_module<'ctx>(ctxt: &'ctx Context, path: &Path) -> Result<Module<'ctx
 
 #[cfg(test)]
 mod tests {
+    use crate::build_module;
+
     use super::*;
 
     #[test]
@@ -135,14 +122,14 @@ mod tests {
     #[test]
     fn parse_ir_accepts_valid_text() {
         let ctxt = Context::create();
-        let res = parse_ir(&ctxt, "define void @f() {\nentry:\n  ret void\n}\n");
+        let res = build_module(&ctxt, "define void @f() {\nentry:\n  ret void\n}\n");
         assert!(res.is_ok());
     }
 
     #[test]
     fn parse_ir_rejects_garbage_without_panicking() {
         let ctxt = Context::create();
-        let res = parse_ir(&ctxt, "this is not llvm ir");
+        let res = build_module(&ctxt, "this is not llvm ir");
         assert!(matches!(
             res,
             Err(IngestError::Parse {

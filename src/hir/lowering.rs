@@ -371,6 +371,7 @@ impl<'c> TryFrom<&Operand<'c>> for Expr {
 #[cfg(test)]
 mod tests {
     use crate::{
+        build_module,
         hir::{
             cfg::Cfg,
             flow::{dominators, natural_loops},
@@ -378,7 +379,6 @@ mod tests {
             stmt::Stmt,
             verify::{are_equivalent, structured_to_cfg},
         },
-        parse_ir,
     };
 
     fn build_cfgs(ir: &str) -> Vec<Cfg> {
@@ -655,7 +655,7 @@ nonpos:
         let ctxt = inkwell::context::Context::create();
         let mut ir_str = IR2.to_string();
         ir_str.push('\0');
-        let module = crate::build_module(&ctxt, &ir_str);
+        let module = crate::build_module(&ctxt, &ir_str).unwrap();
         let func = module.get_first_function().unwrap();
         let f = Function::try_from(&func).expect("Function lowering failed");
         assert_eq!(f.cfg.blocks["entry"].stmts.len(), 2);
@@ -683,7 +683,7 @@ nonpos:
               ret void 
             }"#;
             let ctxt = inkwell::context::Context::create();
-            let module = parse_ir(&ctxt, ir).unwrap();
+            let module = build_module(&ctxt, ir).unwrap();
             let func_val = module.get_first_function().unwrap();
             let mut func = Function::try_from(&func_val).unwrap();
             let func_imut = func.clone();
@@ -705,7 +705,7 @@ nonpos:
               ret i32 0
             }"#;
         let ctxt = inkwell::context::Context::create();
-        let module = parse_ir(&ctxt, ir).unwrap();
+        let module = build_module(&ctxt, ir).unwrap();
         let func_val = module.get_first_function().unwrap();
         let mut func = Function::try_from(&func_val).unwrap();
         let func_imut = func.clone();

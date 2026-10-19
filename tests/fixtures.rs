@@ -14,7 +14,8 @@ fn all_fixtures_ingest_and_build_cfgs() {
             let compiled = compile_c_to_ir(&cfg, &path)
                 .unwrap_or_else(|e| panic!("clang failed on {path:?}: {e}"));
             let ctxt = Context::create();
-            let module = build_module(&ctxt, &compiled.ir);
+            let module =
+                build_module(&ctxt, &compiled.ir).expect("Unable to construct module from IR");
 
             // build_graph is per function; declarations have no body.
             for func in module.get_functions() {
