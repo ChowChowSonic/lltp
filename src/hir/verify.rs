@@ -1,6 +1,6 @@
 use crate::hir::{
     Cfg, Stmt,
-    stmt::{GotoStmt, IfStmt, LabelStmt, LoopStmt, SwitchStmt},
+    stmt::{GotoStmt, IfStmt, LabelStmt, LoopStmt, SwitchStmt, TryCatchStmt},
 };
 use std::collections::{BTreeSet, HashMap};
 
@@ -53,6 +53,19 @@ impl ReBuilder {
                         self.collect_labels(b, labels);
                     }
                 }
+                Stmt::TryCatch(TryCatchStmt {
+                    try_body,
+                    catches,
+                    finally_body,
+                }) => {
+                    self.collect_labels(try_body, labels);
+                    for x in catches {
+                        self.collect_labels(&x.body, labels);
+                    }
+                    if let Some(b) = finally_body {
+                        self.collect_labels(b, labels);
+                    }
+                }
                 _ => {}
             }
         }
@@ -62,7 +75,7 @@ impl ReBuilder {
         stmts: &[Stmt],
         brk: Option<&String>,
         cont: Option<&String>,
-        labels: &HashMap<String, String>,
+        labels: &mut HashMap<String, String>,
     ) -> (String, Option<String>) {
         let entry = self.fresh();
         let mut cur = Some(entry.clone());
@@ -92,6 +105,19 @@ impl ReBuilder {
                         self.edge(c, &labels[name]);
                     }
                     cur = labels.get(name).cloned();
+                }
+                Stmt::TryCatch(TryCatchStmt {
+                    try_body,
+                    catches,
+                    finally_body,
+                }) => {
+                    self.collect_labels(try_body, labels);
+                    for x in catches {
+                        self.collect_labels(&x.body, labels);
+                    }
+                    if let Some(x) = finally_body {
+                        self.collect_labels(x, labels);
+                    }
                 }
                 Stmt::If(IfStmt {
                     then_stmts,
@@ -188,7 +214,7 @@ pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
     };
     let mut labels = HashMap::new();
     b.collect_labels(body, &mut labels);
-    let (entry, _) = b.region(body, None, None, &labels);
+    let (entry, _) = b.region(body, None, None, &mut labels);
     for n in &b.all {
         b.succ.entry(n.clone()).or_default();
     }
@@ -251,7 +277,7 @@ mod tests {
     use super::{are_equivalent, structured_to_cfg};
     use crate::hir::{
         Cfg, Expr, Lit, Stmt,
-        stmt::{IfStmt, LetStmt, LoopStmt, RetStmt},
+        stmt::{IfStmt, LetStmt, LoopStmt, RetStmt, TryCatchStmt},
     };
 
     fn cond() -> Expr {
@@ -388,6 +414,72 @@ mod tests {
         // diamond where both arms terminate vs diamond with a real join
         let d3 = Cfg::cfg_from("e", &[("e", "a"), ("e", "b"), ("a", "ret1"), ("b", "ret2")]);
         assert!(!are_equivalent(&d2, &d3));
+    }
+    /// A set of IR with an invoke stmt + landingpad correctly ingests and lowers without panicking
+    #[test]
+    fn invoke_and_landingpad_lower_without_panicking() {
+        let ir = r#"
+define void @f() personality ptr @pers {
+entry:
+  invoke void @callee() to label %ok unwind label %lp
+ok:
+  br label %end
+lp:
+  %ex = landingpad ptr catch ptr null
+  br label %end
+end:
+  ret void
+}
+
+declare void @callee()
+declare void @pers()
+"#;
+        let ctxt = inkwell::context::Context::create();
+        let module = crate::build_module(&ctxt, ir).expect("invoke IR should parse");
+        let func_val = module.get_first_function().expect("module has a function");
+
+        // The invoke forks the graph: the normal edge to the success block and
+        // the unwind edge to the landingpad.
+        let cfg = Cfg::try_from(&func_val).expect("CFG build should succeed");
+        assert_eq!(cfg.entry, "entry");
+        let succs = &cfg.blocks["entry"].succ;
+        assert_eq!(succs.len(), 2);
+        assert!(succs.contains(&"ok".to_string()));
+        assert!(succs.contains(&"lp".to_string()));
+        assert_eq!(cfg.blocks["lp"].pred, vec!["entry".to_string()]);
+
+        let mut func = crate::hir::Function::try_from(&func_val).expect("Function lowering failed");
+        let func_imut = func.clone();
+
+        // `InvokeInst` operands are [normal dest, unwind dest, callee], so the
+        // invoke must lower to a Branch with the success block as the then arm
+        // and the landingpad as the else arm.
+        match &func.cfg.blocks["entry"].stmts[0] {
+            Stmt::TryCatch(TryCatchStmt {
+                try_body, catches, ..
+            }) => {
+                assert!(
+                    !catches.is_empty(),
+                    "the invoked callee failed to be recovered"
+                );
+                assert!(
+                    !try_body.is_empty(),
+                    "Try body should have at least one statement"
+                );
+            }
+            other => panic!("invoke should lower to a Branch, got {other:?}"),
+        }
+
+        // A landingpad is not a recoverable statement, but its block must
+        // survive as a node carrying its terminator.
+        let lp = &func.cfg.blocks["lp"];
+        assert_eq!(lp.stmts.len(), 1);
+        assert!(matches!(lp.stmts[0], Stmt::Branch { .. }));
+
+        // Structurization must not panic and must round-trip.
+        let body = func.structurize().expect("structurization failed").to_vec();
+        assert!(matches!(body[0], Stmt::If { .. }));
+        assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(&body)));
     }
 
     /// A straight-line chain collapses down to a single block: the fused

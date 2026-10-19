@@ -1,6 +1,6 @@
 use lltp::backend::{ExprEmitter, Language, StmtEmitter};
 use lltp::hir::expr::{BinaryExpr, CallExpr, CastExpr, IndexExpr, UnaryExpr};
-use lltp::hir::stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt};
+use lltp::hir::stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt, TryCatchStmt};
 use lltp::hir::{Lit, Stmt};
 use std::fmt::{Formatter, Result};
 pub struct CLanguage;
@@ -60,15 +60,8 @@ impl StmtEmitter for CLanguage {
     fn emit_goto(&self, stmt: &GotoStmt, out: &mut Formatter) -> std::fmt::Result {
         write!(out, "goto {}", stmt.target)
     }
-    fn emit_try(&self, stmt: &Stmt, out: &mut Formatter) -> std::fmt::Result {
-        let _ = stmt;
-        let _ = out;
-        unimplemented!("I forgot about try statements. Whoops")
-    }
-    fn emit_catch(&self, stmt: &Stmt, out: &mut Formatter) -> std::fmt::Result {
-        let _ = stmt;
-        let _ = out;
-        unimplemented!("I forgot about catch statements. whoops")
+    fn emit_try_catch(&self, stmt: &TryCatchStmt, out: &mut Formatter) -> std::fmt::Result {
+        unimplemented!("err")
     }
     fn emit_assignment(&self, expr: &LetStmt, out: &mut Formatter) -> std::fmt::Result {
         self.emit_expr(&expr.dest, out)?;

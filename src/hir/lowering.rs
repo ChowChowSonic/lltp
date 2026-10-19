@@ -11,9 +11,9 @@ use crate::hir::{
     Lit,
     cfg::Cfg,
     error::LowerError,
-    expr::{BinaryExpr, Expr, VarExpr},
+    expr::{BinaryExpr, CallExpr, Expr, VarExpr},
     func::Function,
-    stmt::{BranchStmt, LetStmt, RetStmt, Stmt},
+    stmt::{BranchStmt, CatchClause, GotoStmt, LetStmt, RetStmt, Stmt, TryCatchStmt},
     ty::Ty,
 };
 
@@ -66,6 +66,7 @@ pub fn build_graph(func: &FunctionValue) -> Result<Cfg, LowerError> {
 
 /// Retrieve the successor basic blocks of a given basic block by inspecting its terminator.
 pub fn get_neighbors<'ctx>(bb: &BasicBlock<'ctx>) -> Vec<BasicBlock<'ctx>> {
+    //TODO: Verify this fn correctly identifies unwinding/landingpad destinations
     let mut ret = Vec::new();
     if let Some(terminator) = bb.get_terminator() {
         for i in 0..terminator.get_num_operands() {
@@ -242,6 +243,81 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                         else_block: Some(else_block.get_name().to_string_lossy().to_string()),
                     }))
                 }
+            }
+            Invoke => {
+                let num_ops = op.get_num_operands();
+                let mut blocks = Vec::new();
+                let mut value_operands = Vec::new();
+
+                for i in 0..num_ops {
+                    match op.get_operand(i) {
+                        Some(inkwell::values::Operand::Block(bb)) => {
+                            blocks.push(bb);
+                        }
+                        Some(inkwell::values::Operand::Value(vv)) => {
+                            value_operands.push(vv);
+                        }
+                        None => {}
+                    }
+                }
+
+                if blocks.len() < 2 {
+                    return Err(LowerError::MissingOperand {
+                        op: "Invoke",
+                        index: 0,
+                    });
+                }
+                let _normal_block = blocks.pop().ok_or(LowerError::MissingOperand {
+                    op: "block",
+                    index: 0,
+                });
+                let unwind_blocks: Vec<String> = blocks
+                    .into_iter()
+                    .map(|o| o.get_name().to_string_lossy().to_string())
+                    .collect();
+                let callee_val = value_operands
+                    .pop()
+                    .ok_or(LowerError::ExpectedValueOperand)?;
+                let mut args = Vec::new();
+                for v in value_operands {
+                    let oprnd = Expr::try_from(inkwell::values::Operand::Value(v))?;
+                    args.push(oprnd);
+                }
+                let call_expr = Expr::Call(CallExpr {
+                    name: callee_val.get_name().to_string_lossy().to_string(),
+                    args,
+                });
+                let dest_name = op
+                    .get_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                let try_stmt = if !dest_name.is_empty() {
+                    let dtype = Ty::try_from(op.get_type()).unwrap_or(Ty::Void);
+                    Stmt::Let(LetStmt {
+                        dest: Box::new(Expr::Var(VarExpr {
+                            name: dest_name,
+                            dtype,
+                        })),
+                        src: Box::new(call_expr),
+                    })
+                } else {
+                    Stmt::Let(LetStmt {
+                        dest: Box::new(Expr::Nop),
+                        src: Box::new(call_expr),
+                    })
+                };
+                Ok(Stmt::TryCatch(TryCatchStmt {
+                    try_body: vec![try_stmt],
+                    catches: unwind_blocks
+                        .into_iter()
+                        .map(|x| CatchClause {
+                            param: None,
+                            exception_ty: None,
+                            body: vec![Stmt::Goto(GotoStmt { target: x })],
+                        })
+                        .collect(),
+                    finally_body: None,
+                }))
             }
             Return => {
                 let mut ops = op.get_operands();
