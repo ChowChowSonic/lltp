@@ -90,7 +90,7 @@ pub trait StmtEmitter {
     fn emit_try_catch(&self, stmt: &TryCatchStmt, out: &mut Formatter) -> fmt::Result {
         let _ = (stmt, out);
         unreachable!(
-            "`emit_try` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+            "`emit_try_catch` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
         )
     }
     fn emit_thread(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {

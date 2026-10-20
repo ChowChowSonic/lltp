@@ -111,12 +111,41 @@ impl ReBuilder {
                     catches,
                     finally_body,
                 }) => {
-                    self.collect_labels(try_body, labels);
-                    for x in catches {
-                        self.collect_labels(&x.body, labels);
+                    let Some(c) = &cur else {
+                        continue;
+                    };
+
+                    let (te, tx) = self.region(try_body, brk, cont, labels);
+                    self.edge(c, &te);
+
+                    let mut fallthrough_exits = Vec::new();
+                    if let Some(x) = tx {
+                        fallthrough_exits.push(x);
                     }
-                    if let Some(x) = finally_body {
-                        self.collect_labels(x, labels);
+
+                    for catch in catches {
+                        let (ce, cx) = self.region(&catch.body, brk, cont, labels);
+                        self.edge(c, &ce);
+                        if let Some(x) = cx {
+                            fallthrough_exits.push(x);
+                        }
+                    }
+                    if let Some(fb) = finally_body.as_ref().filter(|b| !b.is_empty()) {
+                        if !fallthrough_exits.is_empty() {
+                            let (fe, fx) = self.region(fb, brk, cont, labels);
+                            for x in &fallthrough_exits {
+                                self.edge(x, &fe);
+                            }
+                            cur = fx;
+                        }
+                    } else if fallthrough_exits.is_empty() {
+                        cur = None;
+                    } else {
+                        let join = self.fresh();
+                        for x in fallthrough_exits {
+                            self.edge(&x, &join);
+                        }
+                        cur = Some(join);
                     }
                 }
                 Stmt::If(IfStmt {

@@ -267,10 +267,7 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                         index: 0,
                     });
                 }
-                let _normal_block = blocks.pop().ok_or(LowerError::MissingOperand {
-                    op: "block",
-                    index: 0,
-                });
+                let _normal_block = blocks.remove(0);
                 let unwind_blocks: Vec<String> = blocks
                     .into_iter()
                     .map(|o| o.get_name().to_string_lossy().to_string())

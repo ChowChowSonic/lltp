@@ -73,6 +73,13 @@ impl StmtEmitter for CLanguage {
                 write!(out, "catch(")?;
                 self.emit_ty(ty, out)?;
                 self.emit_variable(arg, out)?;
+                write!(out, "){{")?;
+                for y in &x.body {
+                    self.emit_stmt(y, out)?;
+                }
+                write!(out, "}}")?;
+            } else {
+                write!(out, "catch(...){{")?;
                 for y in &x.body {
                     self.emit_stmt(y, out)?;
                 }
