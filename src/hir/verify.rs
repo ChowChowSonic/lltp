@@ -137,6 +137,8 @@ impl ReBuilder {
                                 self.edge(x, &fe);
                             }
                             cur = fx;
+                        } else {
+                            cur = None;
                         }
                     } else if fallthrough_exits.is_empty() {
                         cur = None;
