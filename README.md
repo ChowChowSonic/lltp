@@ -25,7 +25,8 @@ instruction-level HIR is emitted back to C with one label per basic block and `g
 | Goto-based C emitter + round-trip tests | Working for int/bool/char/unsigned/float/cast fixtures |
 | Control-flow structuring (`hir::structurize`) | Implemented with unit tests; not yet wired into the C emitter |
 | `Language` trait, capability flags, `SwitchToIfElse` (2.5.1) | Done |
-| Phi lowering, type recovery, aggregates / GEP / globals (strings, structs, arrays) | Not started (fixtures fail cleanly) |
+| Variable recovery: phi lowering, slot promotion, coalescing (2.2.3, 2.2.4) | Done; parameters keep their names, slots fold into plain variables |
+| Type recovery, aggregates / GEP / globals (strings, structs, arrays) | Not started (fixtures fail cleanly) |
 | Rayon parallelism (2.1.4), Rust backend, idiom lifting | Not started |
 
 ## Round trip

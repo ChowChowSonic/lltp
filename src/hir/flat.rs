@@ -164,6 +164,7 @@ impl FlatFunction {
             func: f.get_name().to_string_lossy().into_owned(),
             detail,
         })?;
+        super::promote::promote_slots(&mut flat);
         super::coalesce::coalesce(&mut flat);
         Ok(flat)
     }

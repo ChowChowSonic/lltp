@@ -7,6 +7,7 @@ pub mod flow;
 pub mod func;
 pub mod lowering;
 pub mod op;
+pub mod promote;
 pub mod stmt;
 pub mod structurize;
 pub mod ty;
