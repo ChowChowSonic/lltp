@@ -2,7 +2,7 @@ use std::fmt::{self, Formatter};
 
 use crate::hir::{
     Expr, Stmt,
-    stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt},
+    stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt, TryCatchStmt},
 };
 
 pub trait StmtEmitter {
@@ -22,6 +22,7 @@ pub trait StmtEmitter {
             Stmt::Continue => self.emit_continue(stmt, out),
             Stmt::Goto(i) => self.emit_goto(i, out),
             Stmt::Label(i) => self.emit_label(i, out),
+            Stmt::TryCatch(i) => self.emit_try_catch(i, out),
         }
     }
     fn emit_label(&self, stmt: &LabelStmt, out: &mut Formatter) -> fmt::Result {
@@ -86,16 +87,10 @@ pub trait StmtEmitter {
         )
     }
 
-    fn emit_try(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_try_catch(&self, stmt: &TryCatchStmt, out: &mut Formatter) -> fmt::Result {
         let _ = (stmt, out);
         unreachable!(
-            "`emit_try` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
-        )
-    }
-    fn emit_catch(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
-        let _ = (stmt, out);
-        unreachable!(
-            "`emit_catch` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+            "`emit_try_catch` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
         )
     }
     fn emit_thread(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {

@@ -1151,40 +1151,13 @@ mod test {
         verify::{are_equivalent, structured_to_cfg},
     };
 
-    fn cfg_from(entry: &str, edges: &[(&str, &str)]) -> Cfg {
-        let mut nodes: BTreeSet<String> = BTreeSet::new();
-        nodes.insert(entry.to_string());
-        for (a, b) in edges {
-            nodes.insert((*a).to_string());
-            nodes.insert((*b).to_string());
-        }
-        let mut succ: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        let mut pred: std::collections::HashMap<String, Vec<String>> =
-            std::collections::HashMap::new();
-        for n in &nodes {
-            succ.entry(n.clone()).or_default();
-            pred.entry(n.clone()).or_default();
-        }
-        for (a, b) in edges {
-            succ.get_mut(*a).unwrap().push((*b).to_string());
-            pred.get_mut(*b).unwrap().push((*a).to_string());
-        }
-        let exits: Vec<String> = nodes
-            .iter()
-            .filter(|n| succ.get(*n).is_some_and(|s| s.is_empty()))
-            .cloned()
-            .collect();
-        Cfg::new(entry.to_string(), succ, pred, exits)
-    }
-
     fn tree(cfg: &Cfg) -> LoopTree {
         LoopTree::build(cfg, &dominators(cfg), &reachable(cfg)).unwrap()
     }
 
     #[test]
     fn irreducible_cycle_structures_after_splitting() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "A",
             &[
                 ("A", "B"),
@@ -1205,7 +1178,7 @@ mod test {
 
     #[test]
     fn irreducible_two_header_cycle_structures_after_splitting() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "a"),
@@ -1222,7 +1195,7 @@ mod test {
 
     #[test]
     fn while_loop_is_left_unsplit() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "h")],
         );
@@ -1234,7 +1207,7 @@ mod test {
 
     #[test]
     fn multi_exit_loop_is_rejected() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "h"),
@@ -1252,7 +1225,7 @@ mod test {
 
     #[test]
     fn loop_tree_nests_while_in_while() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "oh"),
@@ -1278,7 +1251,7 @@ mod test {
 
     #[test]
     fn sequential_loops_are_sibling_roots() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "h1"),
@@ -1299,7 +1272,7 @@ mod test {
 
     #[test]
     fn dispatch_loop_has_no_exit() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "h"),
@@ -1320,7 +1293,7 @@ mod test {
 
     #[test]
     fn nested_loop_jumping_out_of_its_parent_is_rejected() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "oh"),
@@ -1341,7 +1314,7 @@ mod test {
 
     #[test]
     fn while_loop_round_trips() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "h")],
         );
@@ -1351,7 +1324,7 @@ mod test {
 
     #[test]
     fn while_loop_with_break_round_trips() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "ex")],
         );
@@ -1361,7 +1334,7 @@ mod test {
 
     #[test]
     fn while_loop_with_continue_round_trips() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "h"),
@@ -1379,7 +1352,7 @@ mod test {
 
     #[test]
     fn nested_while_loops_round_trip() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "oh"),
@@ -1399,7 +1372,7 @@ mod test {
 
     #[test]
     fn sequential_loops_round_trip() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "h1"),
@@ -1418,7 +1391,7 @@ mod test {
 
     #[test]
     fn infinite_loop_with_break_round_trips() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "h"),
@@ -1434,7 +1407,7 @@ mod test {
 
     #[test]
     fn dispatch_loop_round_trips() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "h"),
@@ -1450,14 +1423,14 @@ mod test {
 
     #[test]
     fn straight_line_round_trips() {
-        let cfg = cfg_from("a", &[("a", "b"), ("b", "c")]);
+        let cfg = Cfg::cfg_from("a", &[("a", "b"), ("b", "c")]);
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
     #[test]
     fn diamond_join_round_trips() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "l"),
@@ -1473,21 +1446,21 @@ mod test {
 
     #[test]
     fn if_else_round_trips() {
-        let cfg = cfg_from("e", &[("e", "a"), ("e", "b")]);
+        let cfg = Cfg::cfg_from("e", &[("e", "a"), ("e", "b")]);
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
     #[test]
     fn if_without_else_round_trips() {
-        let cfg = cfg_from("e", &[("e", "a"), ("e", "j"), ("a", "j")]);
+        let cfg = Cfg::cfg_from("e", &[("e", "a"), ("e", "j"), ("a", "j")]);
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
     #[test]
     fn sequential_joins_round_trip() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "e",
             &[
                 ("e", "a"),
@@ -1507,7 +1480,7 @@ mod test {
 
     #[test]
     fn parallel_joins_structure_after_splitting() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "e",
             &[
                 ("e", "a"),
@@ -1534,7 +1507,7 @@ mod test {
     fn parallel_joins_split_preserves_arm_entries() {
         // A sibling arm flowing into another arm's entry must not be broken:
         // the shared node is cloned for the reaching arm only.
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "f",
             &[("f", "a"), ("f", "b"), ("a", "b"), ("b", "j"), ("j", "x")],
         );
@@ -1571,7 +1544,7 @@ mod test {
     }
     #[test]
     fn three_way_round_trips() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[
                 ("entry", "case_a"),

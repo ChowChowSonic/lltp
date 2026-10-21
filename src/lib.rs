@@ -1,22 +1,24 @@
-use inkwell::{context::Context, module::Module, values::GlobalValue};
+use inkwell::{context::Context, memory_buffer::MemoryBuffer, module::Module};
 pub mod backend;
 pub mod frontend;
 pub mod hir;
 pub mod ingest;
 pub mod passes;
-pub use ingest::{IngestError, IrFormat, load_module, parse_ir};
-
-pub fn get_globals<'ctx>(module: &Module<'ctx>) -> Vec<GlobalValue<'ctx>> {
-    let mut ret: Vec<GlobalValue<'ctx>> = Vec::new();
-    for x in module.get_globals() {
-        ret.push(x);
-    }
-    ret
-}
+pub use ingest::{IngestError, IrFormat, load_module};
 
 /// Parse textual IR
-pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Module<'ctx> {
-    parse_ir(ctxt, ir).unwrap_or_else(|e| panic!("Failed to create module from IR: {e}"))
+pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Result<Module<'ctx>, IngestError> {
+    let mut bytes = ir.as_bytes().to_vec();
+    if bytes.last() != Some(&0) {
+        bytes.push(0);
+    }
+    let mem_buf = MemoryBuffer::create_from_memory_range(&bytes, "test_module");
+    ctxt.create_module_from_ir(mem_buf)
+        .map_err(|e| IngestError::Parse {
+            origin: "<memory>".to_string(),
+            format: IrFormat::Text,
+            detail: e.to_string(),
+        })
 }
 
 #[cfg(test)]
@@ -39,7 +41,7 @@ nonpos:
     #[test]
     fn cfgs_build_from_ingested_module() {
         let ctxt = Context::create();
-        let module = build_module(&ctxt, IR);
+        let module = build_module(&ctxt, IR).unwrap();
         let func = module.get_first_function().expect("IR contains a function");
         let cfg: Cfg = build_graph(&func).expect("CFG build should succeed");
 

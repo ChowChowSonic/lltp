@@ -3,7 +3,7 @@ use tracing::info;
 
 use crate::backend::Language;
 use crate::hir::expr::BinaryExpr;
-use crate::hir::stmt::{IfStmt, SwitchStmt};
+use crate::hir::stmt::{CatchClause, IfStmt, SwitchStmt, TryCatchStmt};
 use crate::hir::{Expr, Function, Lit, Stmt};
 use crate::passes::{LowerError, Lowering};
 
@@ -48,6 +48,22 @@ fn lower_stmt(stmt: Stmt) -> Vec<Stmt> {
             }
             else_stmts
         }
+        Stmt::TryCatch(TryCatchStmt {
+            try_body,
+            catches,
+            finally_body,
+        }) => vec![Stmt::TryCatch(TryCatchStmt {
+            try_body: lower_stmts(try_body),
+            catches: catches
+                .into_iter()
+                .map(|c| CatchClause {
+                    param: c.param,
+                    exception_ty: c.exception_ty,
+                    body: lower_stmts(c.body),
+                })
+                .collect(),
+            finally_body: finally_body.map(lower_stmts),
+        })],
         Stmt::Switch(SwitchStmt { default, .. }) => lower_stmts(default),
         Stmt::If(IfStmt {
             cond,

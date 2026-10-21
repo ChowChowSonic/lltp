@@ -50,7 +50,7 @@ impl<'c> From<BasicTypeEnum<'c>> for Ty {
                 )
             }
             BasicTypeEnum::StructType(_) => {
-                warn!("unsupported type: struct coerced to `Ty::Void`");
+                warn!("unsupported type: struct coerced to `Ty::Opaque`");
                 Ty::Opaque("Unsupported type".to_string())
             }
             BasicTypeEnum::ScalableVectorType(_) => {

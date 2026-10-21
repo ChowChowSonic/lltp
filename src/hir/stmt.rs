@@ -1,4 +1,4 @@
-use crate::hir::{Expr, Lit};
+use crate::hir::{Expr, Lit, Ty, expr::VarExpr};
 
 /// Information extracted from a basic block's terminating branch.
 #[derive(Debug, Clone, PartialEq)]
@@ -62,6 +62,18 @@ pub struct GotoStmt {
 pub struct LabelStmt {
     pub name: String,
 }
+#[derive(Debug, Clone, PartialEq)]
+pub struct CatchClause {
+    pub param: Option<VarExpr>,
+    pub exception_ty: Option<Ty>,
+    pub body: Vec<Stmt>,
+}
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryCatchStmt {
+    pub try_body: Vec<Stmt>,
+    pub catches: Vec<CatchClause>,
+    pub finally_body: Option<Vec<Stmt>>,
+}
 /// Pure HIR statement AST node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -80,6 +92,7 @@ pub enum Stmt {
     Continue,
     Goto(GotoStmt),
     Label(LabelStmt),
+    TryCatch(TryCatchStmt),
 }
 
 impl Stmt {

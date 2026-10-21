@@ -29,6 +29,39 @@ pub struct Cfg {
 }
 
 impl Cfg {
+    #[cfg(test)]
+    /// Build a `Cfg` from an entry name and an edge list. Every named node
+    /// gets a block; nodes without successors become exits.
+    pub fn cfg_from(entry: &str, edges: &[(&str, &str)]) -> Cfg {
+        use std::collections::BTreeSet;
+
+        let mut nodes: BTreeSet<String> = BTreeSet::new();
+        nodes.insert(entry.to_string());
+        for (a, b) in edges {
+            nodes.insert((*a).to_string());
+            nodes.insert((*b).to_string());
+        }
+        let mut succ: HashMap<String, Vec<String>> = HashMap::new();
+        let mut pred: HashMap<String, Vec<String>> = HashMap::new();
+        for n in &nodes {
+            succ.entry(n.clone()).or_default();
+            pred.entry(n.clone()).or_default();
+        }
+        for (a, b) in edges {
+            succ.entry((*a).to_string())
+                .or_default()
+                .push((*b).to_string());
+            pred.entry((*b).to_string())
+                .or_default()
+                .push((*a).to_string());
+        }
+        let exits: Vec<String> = nodes
+            .iter()
+            .filter(|n| succ.get(*n).is_some_and(|s| s.is_empty()))
+            .cloned()
+            .collect();
+        Cfg::new(entry.to_string(), succ, pred, exits)
+    }
     pub fn new(
         entry: String,
         successors: HashMap<String, Vec<String>>,

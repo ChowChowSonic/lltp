@@ -1,7 +1,7 @@
 use crate::hir::{
     Block, Cfg, Expr, Lit, Stmt, Ty,
     expr::{BinaryExpr, VarExpr},
-    stmt::{BranchStmt, LetStmt},
+    stmt::{BranchStmt, LetStmt, SwitchStmt},
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 pub struct PostDomInfo {
@@ -233,16 +233,28 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
                 }));
                 unified_block.succ = vec![targets[0].clone(), targets[1].clone()];
             } else {
-                let first = targets[0].clone();
-                let second = targets[1].clone();
                 unified_block.succ = targets.clone();
-                unified_block.stmts.push(Stmt::Branch(BranchStmt {
-                    cond: Some(Expr::Var(VarExpr {
+                unified_block.stmts.push(Stmt::Switch(SwitchStmt {
+                    value: Expr::Var(VarExpr {
                         name: tag_name.clone(),
                         dtype: Ty::Int(32, true),
-                    })),
-                    then_block: first,
-                    else_block: Some(second),
+                    }),
+                    cases: targets
+                        .clone()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(pos, v)| {
+                            (
+                                Lit::Int {
+                                    value: pos as u64,
+                                    bits: 32,
+                                    signed: true,
+                                },
+                                cfg.blocks[&v].stmts.clone(),
+                            )
+                        })
+                        .collect(),
+                    default: Vec::new(),
                 }));
             }
             for t in &targets {
@@ -259,7 +271,7 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
             break;
         }
     }
-    cfg.clone()
+    cfg
 }
 
 ///dom(n) = {n} ∪ ⋂ { dom(p) : p ∈ preds(n) }, iterate until fixpoint
@@ -373,6 +385,8 @@ impl Tarjan<'_> {
         }
     }
 }
+/// Temporarily deprecated while we get the codebase online
+//#[deprecated]
 pub fn sccs(cfg: &Cfg) -> Vec<Vec<String>> {
     let reach = reachable(cfg);
     let mut t = Tarjan {
@@ -525,38 +539,7 @@ pub fn reducible(cfg: &Cfg) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeSet, HashMap};
-
-    /// Build a `Cfg` from an entry name and an edge list. Every named node
-    /// gets a block; nodes without successors become exits.
-    fn cfg_from(entry: &str, edges: &[(&str, &str)]) -> Cfg {
-        let mut nodes: BTreeSet<String> = BTreeSet::new();
-        nodes.insert(entry.to_string());
-        for (a, b) in edges {
-            nodes.insert((*a).to_string());
-            nodes.insert((*b).to_string());
-        }
-        let mut succ: HashMap<String, Vec<String>> = HashMap::new();
-        let mut pred: HashMap<String, Vec<String>> = HashMap::new();
-        for n in &nodes {
-            succ.entry(n.clone()).or_default();
-            pred.entry(n.clone()).or_default();
-        }
-        for (a, b) in edges {
-            succ.entry((*a).to_string())
-                .or_default()
-                .push((*b).to_string());
-            pred.entry((*b).to_string())
-                .or_default()
-                .push((*a).to_string());
-        }
-        let exits: Vec<String> = nodes
-            .iter()
-            .filter(|n| succ.get(*n).is_some_and(|s| s.is_empty()))
-            .cloned()
-            .collect();
-        Cfg::new(entry.to_string(), succ, pred, exits)
-    }
+    use std::collections::BTreeSet;
 
     #[test]
     fn test_pdom_reverse() {
@@ -564,7 +547,7 @@ mod tests {
         // `join`. join lies on every exit path, so it post-dominates the entry
         // and each branch, yet a and b never post-dominate one another.
         {
-            let cfg = cfg_from(
+            let cfg = Cfg::cfg_from(
                 "entry",
                 &[("entry", "a"), ("entry", "b"), ("a", "join"), ("b", "join")],
             );
@@ -593,7 +576,7 @@ mod tests {
         // branches and the entry; every branch's ipdom is mid, and the ipdom
         // chain is mid -> done -> virtual sink.
         {
-            let cfg = cfg_from(
+            let cfg = Cfg::cfg_from(
                 "entry",
                 &[
                     ("entry", "a"),
@@ -625,7 +608,7 @@ mod tests {
 
     #[test]
     fn idom_in_a_diamond() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[("entry", "a"), ("entry", "b"), ("a", "join"), ("b", "join")],
         );
@@ -642,7 +625,7 @@ mod tests {
 
     #[test]
     fn sccs_on_a_two_node_cycle() {
-        let cfg = cfg_from("entry", &[("entry", "a"), ("a", "b"), ("b", "a")]);
+        let cfg = Cfg::cfg_from("entry", &[("entry", "a"), ("a", "b"), ("b", "a")]);
         let sccs = sccs(&cfg);
         assert_eq!(sccs.len(), 2);
         assert!(sccs.contains(&vec!["a".to_string(), "b".to_string()]));
@@ -652,16 +635,22 @@ mod tests {
     #[test]
     fn reducible_shapes() {
         // self loop: entry → a → a
-        assert!(reducible(&cfg_from("entry", &[("entry", "a"), ("a", "a")])));
+        assert!(reducible(&Cfg::cfg_from(
+            "entry",
+            &[("entry", "a"), ("a", "a")]
+        )));
         // straight-line chain
-        assert!(reducible(&cfg_from("entry", &[("entry", "a"), ("a", "b")])));
+        assert!(reducible(&Cfg::cfg_from(
+            "entry",
+            &[("entry", "a"), ("a", "b")]
+        )));
         // while loop: entry → h, h → {body, exit}, body → h
-        assert!(reducible(&cfg_from(
+        assert!(reducible(&Cfg::cfg_from(
             "entry",
             &[("entry", "h"), ("h", "body"), ("h", "exit"), ("body", "h")]
         )));
         // irreducible: two headers, each entered from outside the cycle
-        assert!(!reducible(&cfg_from(
+        assert!(!reducible(&Cfg::cfg_from(
             "entry",
             &[("entry", "a"), ("entry", "b"), ("a", "b"), ("b", "a")]
         )));
@@ -669,7 +658,7 @@ mod tests {
 
     #[test]
     fn natural_loop_of_a_while() {
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[("entry", "h"), ("h", "body"), ("h", "exit"), ("body", "h")],
         );
@@ -690,7 +679,7 @@ mod tests {
 
     #[test]
     fn natural_loop_of_a_self_loop() {
-        let cfg = cfg_from("entry", &[("entry", "a"), ("a", "a")]);
+        let cfg = Cfg::cfg_from("entry", &[("entry", "a"), ("a", "a")]);
         let dom = dominators(&cfg);
         let loops = natural_loops(&cfg, &dom);
         assert_eq!(loops.len(), 1);
@@ -703,7 +692,7 @@ mod tests {
     #[test]
     fn natural_loops_absent_without_cycles() {
         // diamond: no cycle, no loops
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[("entry", "a"), ("entry", "b"), ("a", "join"), ("b", "join")],
         );
@@ -711,7 +700,7 @@ mod tests {
         assert!(natural_loops(&cfg, &dom).is_empty());
         // irreducible two-header cycle: dominance-based detection finds no
         // single-header loop
-        let cfg = cfg_from(
+        let cfg = Cfg::cfg_from(
             "entry",
             &[("entry", "a"), ("entry", "b"), ("a", "b"), ("b", "a")],
         );

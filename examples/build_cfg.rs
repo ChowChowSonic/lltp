@@ -37,7 +37,7 @@ fn main() -> ExitCode {
     );
 
     let ctxt = Context::create();
-    let module = build_module(&ctxt, &compiled.ir);
+    let module = build_module(&ctxt, &compiled.ir).expect("Unable to build module");
     eprintln!("[2.1.2] inkwell accepted the module — parse succeeded");
 
     // 2.1.3: one CFG per function (declarations have no body, so skip them)

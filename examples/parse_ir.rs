@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use inkwell::context::Context;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
-use lltp::{load_module, parse_ir};
+use lltp::{build_module, load_module};
 
 fn main() -> ExitCode {
     let mut cfg = FrontendConfig::default();
@@ -49,7 +49,7 @@ fn main() -> ExitCode {
             file.display(),
             compiled.ir.len()
         );
-        match parse_ir(&ctxt, &compiled.ir) {
+        match build_module(&ctxt, &compiled.ir) {
             Ok(m) => {
                 eprintln!("[2.1.2] inkwell accepted the module — parse succeeded");
                 m
