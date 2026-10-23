@@ -74,6 +74,17 @@ pub struct TryCatchStmt {
     pub catches: Vec<CatchClause>,
     pub finally_body: Option<Vec<Stmt>>,
 }
+#[derive(Debug, Clone)]
+pub enum Term {
+    Br(String),
+    CondBr {
+        cond: Val,
+        then_bb: String,
+        else_bb: String,
+    },
+    Ret(Option<Val>),
+    Unreachable,
+}
 /// Pure HIR statement AST node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {

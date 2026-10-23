@@ -38,6 +38,7 @@ pub struct CastExpr {
     pub data: Box<Expr>,
     pub dtype: Box<Expr>,
 }
+
 /// Pure HIR expression AST node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -49,6 +50,7 @@ pub enum Expr {
     Index(IndexExpr),
     Field(FieldExpr),
     Cast(CastExpr),
+    Addr(String),
     Nop,
 }
 

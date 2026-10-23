@@ -1,6 +1,9 @@
 use std::collections::{HashMap, HashSet};
-
+use super::stmt::{RetStmt};
 use crate::errors::LowerError;
+use crate::hir::expr::VarExpr;
+use crate::hir::stmt::BranchStmt;
+use crate::hir::{Expr, Stmt};
 use inkwell::basic_block::BasicBlock;
 use inkwell::module::Module;
 use inkwell::types::BasicTypeEnum;
@@ -11,88 +14,45 @@ use inkwell::values::{
 use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp};
 use super::ty::Ty;
 
-/// An operand: already resolved to a C-friendly name or a constant.
-#[derive(Debug, Clone)]
-pub enum Val {
-    /// A named local
-    Var(String, Ty),
-    Addr(String),
-    Int {
-        value: i64,
-        bits: usize,
-    },
-    Float {
-        value: f64,
-        bits: usize,
-    },
-    Null,
-}
-
-impl Val {
-    pub fn ty(&self) -> Ty {
-        match self {
-            Val::Var(_, t) => t.clone(),
-            Val::Addr(_) | Val::Null => {
-                Ty::Ptr(Box::new(Ty::Opaque("unresolved pointee".to_string())))
-            }
-            Val::Int { bits: 1, .. } => Ty::Bool,
-            Val::Int { bits, .. } => Ty::Int(*bits, true),
-            Val::Float { bits, .. } => Ty::Float(*bits),
-        }
-    }
-}
-
 #[derive(Debug, Clone)]
 pub enum Inst {
     /// `dest = *ptr` where `ptr` is an alloca slot.
     Load { dest: String, ptr: String },
     /// `*ptr = value` where `ptr` is an alloca slot.
-    Store { ptr: String, value: Val },
+    Store { ptr: String, value: Expr },
     Bin {
         dest: String,
         ty: Ty,
         op: BinOp,
-        lhs: Val,
-        rhs: Val,
+        lhs: Expr,
+        rhs: Expr,
     },
     Cmp {
         dest: String,
         pred: Cmp,
-        lhs: Val,
-        rhs: Val,
+        lhs: Expr,
+        rhs: Expr,
     },
     Cast {
         dest: String,
         ty: Ty,
         kind: CastKind,
-        src: Val,
+        src: Expr,
     },
     Call {
         dest: Option<String>,
         callee: String,
-        args: Vec<Val>,
+        args: Vec<Expr>,
     },
     /// `dest = src`: a lowered phi edge copy.
-    Copy { dest: String, src: Val },
-}
-
-#[derive(Debug, Clone)]
-pub enum Term {
-    Br(String),
-    CondBr {
-        cond: Val,
-        then_bb: String,
-        else_bb: String,
-    },
-    Ret(Option<Val>),
-    Unreachable,
+    Copy { dest: String, src: Expr },
 }
 
 #[derive(Debug, Clone)]
 pub struct FlatBlock {
     pub label: String,
     pub insts: Vec<Inst>,
-    pub term: Term,
+    pub term: Stmt,
 }
 
 #[derive(Debug, Clone)]
@@ -279,7 +239,7 @@ fn edge_copies<'ctx>(
     phis: &HashMap<BasicBlock<'ctx>, PhiIn<'ctx>>,
     from: BasicBlock<'ctx>,
     to: BasicBlock<'ctx>,
-) -> Result<Vec<(String, Ty, Val)>, String> {
+) -> Result<Vec<(String, Ty, Expr)>, String> {
     let mut out = Vec::new();
     for (dest, ty, incoming) in phis.get(&to).into_iter().flatten() {
         let (_, v) = incoming.iter().find(|(b, _)| *b == from).ok_or_else(|| {
@@ -295,7 +255,7 @@ fn edge_copies<'ctx>(
 
 /// Sequentialize one edge's parallel phi copies.
 fn parallel_copy(
-    copies: Vec<(String, Ty, Val)>,
+    copies: Vec<(String, Ty, Expr)>,
     vnames: &mut Namer,
     locals: &mut Vec<(String, Ty)>,
 ) -> Vec<Inst> {
@@ -303,20 +263,20 @@ fn parallel_copy(
     let mut saves = Vec::new();
     let mut copy_insts = Vec::new();
     for (dest, _, src) in &copies {
-        if let Val::Var(n, _) = src
+        if let Expr::Var(VarExpr {name:n, ..}) = src
             && n == dest
         {
             continue;
         }
         let src = match src {
-            Val::Var(n, vty) if dests.contains(n) => {
+            Expr::Var(VarExpr{name:n, dtype:vty}) if dests.contains(n) => {
                 let tmp = vnames.value("phi_tmp");
                 locals.push((tmp.clone(), vty.clone()));
                 saves.push(Inst::Copy {
                     dest: tmp.clone(),
                     src: src.clone(),
                 });
-                Val::Var(tmp, vty.clone())
+                Expr::Var(VarExpr { name:tmp, dtype:vty.clone()} )
             }
             other => other.clone(),
         };
@@ -428,50 +388,50 @@ impl<'ctx> Cx<'ctx> {
         )
     }
 
-    fn val(&self, op: Option<Operand<'ctx>>) -> Result<Val, String> {
+    fn val(&self, op: Option<Operand<'ctx>>) -> Result<Expr, String> {
         let bve = op
             .and_then(|o| o.value())
             .ok_or("missing or non-value operand")?;
         match bve {
             BasicValueEnum::IntValue(i) => {
                 if let Some(inst) = i.as_instruction() {
-                    Ok(Val::Var(self.name(inst)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr { name: self.name(inst)?, dtype:Ty::from(bve)}))
                 } else if i.is_const() {
                     let bits = i.get_type().get_bit_width() as usize;
                     let value = i
                         .get_sign_extended_constant()
                         .ok_or("integer constant wider than 64 bits")?;
-                    Ok(Val::Int { value, bits })
+                    Ok(Expr::Literal(super::Lit::Int { value:value as u64,  bits, signed: true } ))
                 } else {
                     let raw = i.get_name().to_string_lossy().into_owned();
-                    Ok(Val::Var(self.param(&raw)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr { name:self.param(&raw)?, dtype:Ty::from(bve)}))
                 }
             }
             BasicValueEnum::FloatValue(f) => {
                 if let Some(inst) = f.as_instruction() {
-                    Ok(Val::Var(self.name(inst)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr { name: self.name(inst)?, dtype: Ty::from(bve)}))
                 } else if f.is_const() {
                     let bits = f.get_type().get_bit_width() as usize;
                     let (value, _lossy) = f.get_constant().ok_or("unreadable float constant")?;
-                    Ok(Val::Float { value, bits })
+                    Ok(Expr::Literal(super::Lit::Float { bits, value }))
                 } else {
                     let raw = f.get_name().to_string_lossy().into_owned();
-                    Ok(Val::Var(self.param(&raw)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr { name:self.param(&raw)?, dtype:Ty::from(bve)}))
                 }
             }
             BasicValueEnum::PointerValue(p) => {
                 if let Some(inst) = p.as_instruction() {
                     let n = self.name(inst)?;
                     if inst.get_opcode() == Op::Alloca {
-                        Ok(Val::Addr(n))
+                        Ok(Expr::Addr(n))
                     } else {
-                        Ok(Val::Var(n, Ty::from(bve)))
+                        Ok(Expr::Var(VarExpr{name:n, dtype:Ty::from(bve)}))
                     }
                 } else if p.is_null() {
-                    Ok(Val::Null)
+                    Ok(Expr::Literal(super::Lit::NullPtr))
                 } else {
                     let raw = p.get_name().to_string_lossy().into_owned();
-                    Ok(Val::Var(self.param(&raw)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr{name:self.param(&raw)?, dtype:Ty::from(bve)}))
                 }
             }
             _ => Err("unsupported operand kind (struct/vector/array value)".to_string()),
@@ -628,7 +588,7 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                             .ok_or("expected a block operand")?;
                         let copies = edge_copies(&phis, *bb, target)?;
                         insts.extend(parallel_copy(copies, &mut vnames, &mut locals));
-                        term = Some(Term::Br(cx.label(opnd(0))?));
+                        term = Some(Stmt::Break(BreakStmt { cx.label(opnd(0))?}));
                     }
                     // LLVM operand order for a conditional br: cond, false, true
                     3 => {
@@ -648,29 +608,29 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                                 edge_blocks.push(FlatBlock {
                                     label: split.clone(),
                                     insts: copy_insts,
-                                    term: Term::Br(label),
+                                    term: Stmt::Break,
                                 });
                                 resolved.push(split);
                             }
                         }
                         let else_bb = resolved.pop().ok_or("conditional br lost its targets")?;
                         let then_bb = resolved.pop().ok_or("conditional br lost its targets")?;
-                        term = Some(Term::CondBr {
-                            cond,
-                            then_bb,
-                            else_bb,
-                        });
+                        term = Some(Stmt::Branch(BranchStmt {
+                            cond: Some(cond),
+                            then_block: then_bb,
+                            else_block: Some(else_bb),
+                        }) );
                     }
                     n => return Err(format!("br with {n} operands")),
                 },
                 Op::Return => {
                     term = Some(if inst.get_num_operands() == 0 {
-                        Term::Ret(None)
+                        Stmt::Ret(RetStmt { value: None } )
                     } else {
-                        Term::Ret(Some(cx.val(opnd(0))?))
+                        Stmt::Ret(RetStmt { value: cx.val(opnd(0)).ok()})
                     });
                 }
-                Op::Unreachable => term = Some(Term::Unreachable),
+                Op::Unreachable => term = Some(Stmt::Break),
                 other => {
                     if let Some(kind) = CastKind::from_opcode(other) {
                         insts.push(Inst::Cast {
