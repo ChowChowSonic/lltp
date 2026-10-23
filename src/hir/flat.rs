@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
-use std::error::Error;
-use std::fmt;
 
+use crate::errors::LowerError;
 use inkwell::basic_block::BasicBlock;
 use inkwell::module::Module;
 use inkwell::types::BasicTypeEnum;
@@ -121,22 +120,8 @@ pub struct FlatModule {
     pub funcs: Vec<FlatFunction>,
 }
 
-#[derive(Debug)]
-pub struct RecoverError {
-    pub func: String,
-    pub detail: String,
-}
-
-impl fmt::Display for RecoverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "cannot recover `{}`: {}", self.func, self.detail)
-    }
-}
-
-impl Error for RecoverError {}
-
 impl FlatModule {
-    pub fn from_module(module: &Module<'_>) -> Result<Self, RecoverError> {
+    pub fn from_module(module: &Module<'_>) -> Result<Self, LowerError> {
         // Function names are reserved so no local gets the same C identifier.
         let reserved: HashSet<String> = module
             .get_functions()
@@ -159,8 +144,8 @@ impl FlatFunction {
     pub fn from_llvm(
         f: &FunctionValue<'_>,
         reserved: &HashSet<String>,
-    ) -> Result<Self, RecoverError> {
-        let mut flat = build(f, reserved).map_err(|detail| RecoverError {
+    ) -> Result<Self, LowerError> {
+        let mut flat = build(f, reserved).map_err(|detail| LowerError::RecoverError {
             func: f.get_name().to_string_lossy().into_owned(),
             detail,
         })?;

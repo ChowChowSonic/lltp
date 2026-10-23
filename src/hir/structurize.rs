@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use crate::errors::StructurizeError;
 use crate::hir::expr::{BinaryExpr, VarExpr};
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
@@ -7,7 +8,7 @@ use crate::hir::flow::{
     t1t2_reduce, unify_loop_exits,
 };
 use crate::hir::stmt::{BranchStmt, IfStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt};
-use crate::hir::{Block, Cfg, Expr, Lit, Stmt, StructurizeError, Ty};
+use crate::hir::{Block, Cfg, Expr, Lit, Stmt, Ty};
 
 pub struct LoopTree {
     pub loops: Vec<NaturalLoop>,
@@ -1143,12 +1144,14 @@ impl LoopTree {
 mod test {
     use std::collections::BTreeSet;
 
-    use crate::hir::{
-        cfg::Cfg,
-        error::StructurizeError,
-        flow::{dominators, reachable, reducible, unify_loop_exits},
-        structurize::{LoopTree, split_fork, split_nodes, structurize},
-        verify::{are_equivalent, structured_to_cfg},
+    use crate::{
+        errors::StructurizeError,
+        hir::{
+            cfg::Cfg,
+            flow::{dominators, reachable, reducible, unify_loop_exits},
+            structurize::{LoopTree, split_fork, split_nodes, structurize},
+            verify::{are_equivalent, structured_to_cfg},
+        },
     };
 
     fn tree(cfg: &Cfg) -> LoopTree {

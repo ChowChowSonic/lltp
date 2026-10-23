@@ -7,10 +7,10 @@ use inkwell::{
 };
 use tracing::{debug, warn};
 
+use crate::errors::LowerError;
 use crate::hir::{
     Lit,
     cfg::Cfg,
-    error::LowerError,
     expr::{BinaryExpr, CallExpr, Expr, VarExpr},
     func::Function,
     stmt::{BranchStmt, CatchClause, GotoStmt, LetStmt, RetStmt, Stmt, TryCatchStmt},

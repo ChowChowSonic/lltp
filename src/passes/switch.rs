@@ -2,10 +2,11 @@ use inkwell::values::InstructionOpcode::ICmp;
 use tracing::info;
 
 use crate::backend::Language;
+use crate::errors::LowerError;
 use crate::hir::expr::BinaryExpr;
 use crate::hir::stmt::{CatchClause, IfStmt, SwitchStmt, TryCatchStmt};
 use crate::hir::{Expr, Function, Lit, Stmt};
-use crate::passes::{LowerError, Lowering};
+use crate::passes::Lowering;
 
 /// Library-owned structural pass: lowers `Stmt::Switch` into a nested
 /// `Stmt::If` chain when the target cannot express `switch`

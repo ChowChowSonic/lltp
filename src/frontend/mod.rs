@@ -1,8 +1,6 @@
 //! Frontend driver: run the source language's native toolchain and return unoptimized LLVM IR as text.
 
-use std::error::Error;
-use std::fmt;
-use std::io;
+use crate::errors::FrontendError;
 use std::path::Path;
 use std::process::Command;
 
@@ -30,42 +28,6 @@ impl Default for FrontendConfig {
 pub struct Compiled {
     pub ir: String,
     pub diagnostics: String,
-}
-
-#[derive(Debug)]
-pub enum FrontendError {
-    /// The compiler executable could not be started.
-    Spawn {
-        clang: String,
-        source: io::Error,
-    },
-    /// clang ran but exited non-zero (e.g. a C syntax error).
-    Compile {
-        stderr: String,
-    },
-    NotUtf8,
-}
-
-impl fmt::Display for FrontendError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Spawn { clang, source } => write!(
-                f,
-                "could not run `{clang}` ({source}); is it installed? set LLTP_CLANG to override"
-            ),
-            Self::Compile { stderr } => write!(f, "clang failed:\n{stderr}"),
-            Self::NotUtf8 => write!(f, "clang produced non-UTF-8 output"),
-        }
-    }
-}
-
-impl Error for FrontendError {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match self {
-            Self::Spawn { source, .. } => Some(source),
-            _ => None,
-        }
-    }
 }
 
 /// Compile a C file to unoptimized textual LLVM IR.

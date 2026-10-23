@@ -1,6 +1,6 @@
+use crate::errors::StructurizeError;
+use crate::hir::{BranchInfo, Stmt, stmt::BranchStmt};
 use std::collections::{BTreeMap, HashMap};
-
-use crate::hir::{BranchInfo, Stmt, StructurizeError, stmt::BranchStmt};
 
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct Block {

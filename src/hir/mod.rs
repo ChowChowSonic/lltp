@@ -1,6 +1,5 @@
 pub mod cfg;
 pub mod coalesce;
-pub mod error;
 pub mod expr;
 pub mod flat;
 pub mod flow;
@@ -13,8 +12,8 @@ pub mod structurize;
 pub mod ty;
 pub mod verify;
 
+pub use crate::errors::{HirError, LowerError, StructurizeError};
 pub use cfg::{Block, Cfg};
-pub use error::{HirError, LowerError, StructurizeError};
 pub use expr::Expr;
 pub use func::Function;
 pub use stmt::{BranchInfo, Stmt};

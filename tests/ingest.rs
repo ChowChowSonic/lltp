@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 
 use inkwell::context::Context;
 use inkwell::module::Module;
+use lltp::errors::IngestError;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
-use lltp::{IngestError, IrFormat, load_module};
+use lltp::{IrFormat, load_module};
 
 fn out_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ingest");
