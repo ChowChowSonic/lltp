@@ -1,8 +1,9 @@
 //! Reaching conditions (SoW 2.3.2): which branch outcomes lead from a source
-//! block to a sink block. The graph slice picks the blocks involved and
-//! `Cond` is the boolean algebra the conditions are written in.
+//! block to a sink block. The graph slice picks the blocks involved,
+//! `Cond` is the boolean algebra the conditions are written in, and
+//! `reaching_conditions` ties the two together.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ops::Not;
 
 use crate::hir::Cfg;
@@ -132,6 +133,66 @@ fn join(a: Cond, b: Cond, is_and: bool) -> Cond {
     }
 }
 
+/// The condition for taking the edge `from -> to`. A block with one target
+/// always takes it. With two targets the first (by name) is the plain atom and
+/// the other its negation, so the two arms of an if/else cancel out where
+/// they meet. With more targets each edge is its own atom.
+fn edge_cond(cfg: &Cfg, from: &str, to: &str) -> Cond {
+    let targets: BTreeSet<&String> = cfg.blocks[from].succ.iter().collect();
+    match targets.len() {
+        1 => Cond::True,
+        2 => {
+            let first = targets.iter().next().unwrap();
+            let atom = Cond::edge(from, first);
+            if first.as_str() == to { atom } else { !atom }
+        }
+        _ => Cond::edge(from, to),
+    }
+}
+
+/// For every block in the `source`-to-`sink` slice, the condition under which
+/// control reaches it from `source`: `source` itself is `True`, any other
+/// block is the OR over its slice predecessors of (their condition AND the
+/// edge taken). Empty map when `sink` is unreachable. `None` when the slice
+/// still has a cycle after skipping the edges in `skip`.
+// shortcut: picks the next ready block by scanning (quadratic), upgrade to a
+// work queue if large functions get slow.
+pub fn reaching_conditions(
+    cfg: &Cfg,
+    source: &str,
+    sink: &str,
+    skip: &EdgeSet,
+) -> Option<BTreeMap<String, Cond>> {
+    let slice = graph_slice(cfg, source, sink, skip);
+    let slice_preds = |n: &str| -> BTreeSet<String> {
+        cfg.blocks[n]
+            .pred
+            .iter()
+            .filter(|p| slice.contains(*p) && !skip.contains(&((*p).clone(), n.to_string())))
+            .cloned()
+            .collect()
+    };
+    let mut done: BTreeMap<String, Cond> = BTreeMap::new();
+    let mut pending = slice.clone();
+    while !pending.is_empty() {
+        let (n, preds) = pending.iter().find_map(|n| {
+            let preds = slice_preds(n.as_str());
+            let ready = preds.iter().all(|p| done.contains_key(p));
+            ready.then(|| (n.clone(), preds))
+        })?;
+        let cond = if n == source {
+            Cond::True
+        } else {
+            preds.iter().fold(Cond::False, |acc, p| {
+                acc.or(done[p].clone().and(edge_cond(cfg, p, &n)))
+            })
+        };
+        pending.remove(&n);
+        done.insert(n, cond);
+    }
+    Some(done)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -227,5 +288,88 @@ mod tests {
             a.clone().and(b.clone().and(c.clone()))
         );
         assert_eq!(a.clone().or(b.clone()).or(c.clone()), a.or(b.or(c)));
+    }
+
+    #[test]
+    fn diamond_arms_cancel_at_the_join() {
+        let cfg = Cfg::cfg_from(
+            "entry",
+            &[
+                ("entry", "a"),
+                ("entry", "b"),
+                ("a", "join"),
+                ("b", "join"),
+                ("join", "exit"),
+            ],
+        );
+        let cr = reaching_conditions(&cfg, "entry", "exit", &EdgeSet::new()).unwrap();
+        let took_a = Cond::edge("entry", "a");
+        assert_eq!(cr["entry"], Cond::True);
+        assert_eq!(cr["a"], took_a);
+        assert_eq!(cr["b"], !took_a);
+        assert_eq!(cr["join"], Cond::True);
+        assert_eq!(cr["exit"], Cond::True);
+    }
+
+    #[test]
+    fn nested_branch_ands_its_edges() {
+        let cfg = Cfg::cfg_from(
+            "entry",
+            &[
+                ("entry", "a"),
+                ("entry", "join"),
+                ("a", "b"),
+                ("a", "join"),
+                ("b", "join"),
+            ],
+        );
+        let cr = reaching_conditions(&cfg, "entry", "join", &EdgeSet::new()).unwrap();
+        assert_eq!(cr["b"], Cond::edge("entry", "a").and(Cond::edge("a", "b")));
+    }
+
+    #[test]
+    fn three_way_branch_uses_one_atom_per_edge() {
+        let cfg = Cfg::cfg_from(
+            "entry",
+            &[
+                ("entry", "a"),
+                ("entry", "b"),
+                ("entry", "c"),
+                ("a", "join"),
+                ("b", "join"),
+                ("c", "join"),
+            ],
+        );
+        let cr = reaching_conditions(&cfg, "entry", "join", &EdgeSet::new()).unwrap();
+        let (a, b, c) = (
+            Cond::edge("entry", "a"),
+            Cond::edge("entry", "b"),
+            Cond::edge("entry", "c"),
+        );
+        assert_eq!(cr["b"], b.clone());
+        assert_eq!(cr["join"], a.or(b).or(c));
+    }
+
+    #[test]
+    fn loop_needs_its_back_edge_skipped() {
+        let cfg = Cfg::cfg_from(
+            "entry",
+            &[("entry", "h"), ("h", "body"), ("body", "h"), ("h", "exit")],
+        );
+        assert!(reaching_conditions(&cfg, "h", "exit", &EdgeSet::new()).is_none());
+        let back: EdgeSet = [("body".to_string(), "h".to_string())].into();
+        let cr = reaching_conditions(&cfg, "h", "exit", &back).unwrap();
+        assert_eq!(cr["h"], Cond::True);
+        assert_eq!(cr["exit"], !Cond::edge("h", "body"));
+        assert!(!cr.contains_key("body"));
+    }
+
+    #[test]
+    fn unreachable_sink_gives_empty_map() {
+        let cfg = Cfg::cfg_from("e", &[("e", "a"), ("e", "b")]);
+        assert_eq!(
+            reaching_conditions(&cfg, "a", "b", &EdgeSet::new()),
+            Some(BTreeMap::new())
+        );
     }
 }
