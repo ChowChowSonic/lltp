@@ -81,8 +81,8 @@ impl ReBuilder {
         let mut cur = Some(entry.clone());
         for s in stmts {
             match s {
-                Stmt::Let { .. } => {}
-                Stmt::Ret { .. } => cur = None,
+                Stmt::Let { .. } | Stmt::Eval(_) => {}
+                Stmt::Ret { .. } | Stmt::Unreachable => cur = None,
                 Stmt::Break => {
                     if let Some(c) = &cur {
                         let j: &str = brk.expect("Break outside any loop");

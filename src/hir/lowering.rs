@@ -11,8 +11,9 @@ use crate::errors::LowerError;
 use crate::hir::{
     Lit,
     cfg::Cfg,
-    expr::{BinaryExpr, CallExpr, Expr, VarExpr},
+    expr::{BinaryExpr, CallExpr, CmpExpr, Expr, VarExpr},
     func::Function,
+    op::{BinOp, Cmp, FloatCmp, IntCmp},
     stmt::{BranchStmt, CatchClause, GotoStmt, LetStmt, RetStmt, Stmt, TryCatchStmt},
     ty::Ty,
 };
@@ -337,7 +338,7 @@ impl<'c> TryFrom<InstructionValue<'c>> for Expr {
     fn try_from(op: InstructionValue<'c>) -> Result<Self, Self::Error> {
         match op.get_opcode() {
             Add | FAdd | Sub | FSub | Mul | FMul | SDiv | UDiv | FDiv | SRem | URem | FRem
-            | Shl | LShr | AShr | And | Or | Xor | ICmp | FCmp => {
+            | Shl | LShr | AShr | And | Or | Xor => {
                 let mut ops = op.get_operands();
                 let op1 = ops
                     .next()
@@ -355,8 +356,44 @@ impl<'c> TryFrom<InstructionValue<'c>> for Expr {
                     })?;
                 let op1_expr = Expr::try_from(op1)?;
                 let op2_expr = Expr::try_from(op2)?;
+                let binop =
+                    BinOp::from_opcode(op.get_opcode()).ok_or(LowerError::UnsupportedOpcode(
+                        format!("{:?} without a BinOp mapping", op.get_opcode()),
+                    ))?;
                 Ok(Expr::BinaryOp(BinaryExpr {
-                    op: op.get_opcode(),
+                    op: binop,
+                    arg1: Box::new(op1_expr),
+                    arg2: Box::new(op2_expr),
+                }))
+            }
+            ICmp | FCmp => {
+                let mut ops = op.get_operands();
+                let op1 = ops
+                    .next()
+                    .and_then(|o| o)
+                    .ok_or(LowerError::MissingOperand {
+                        op: "BinaryOp",
+                        index: 0,
+                    })?;
+                let op2 = ops
+                    .next()
+                    .and_then(|o| o)
+                    .ok_or(LowerError::MissingOperand {
+                        op: "BinaryOp",
+                        index: 1,
+                    })?;
+                let op1_expr = Expr::try_from(op1)?;
+                let op2_expr = Expr::try_from(op2)?;
+                let pred = match op.get_opcode() {
+                    ICmp => Cmp::Int(IntCmp::from(op.get_icmp_predicate().ok_or(
+                        LowerError::UnsupportedOpcode("icmp without predicate".into()),
+                    )?)),
+                    _ => Cmp::Float(FloatCmp::from(op.get_fcmp_predicate().ok_or(
+                        LowerError::UnsupportedOpcode("fcmp without predicate".into()),
+                    )?)),
+                };
+                Ok(Expr::Cmp(CmpExpr {
+                    pred,
                     arg1: Box::new(op1_expr),
                     arg2: Box::new(op2_expr),
                 }))

@@ -1,6 +1,7 @@
 use crate::hir::{
     Block, Cfg, Expr, Lit, Stmt, Ty,
-    expr::{BinaryExpr, VarExpr},
+    expr::VarExpr,
+    op::{Cmp, IntCmp},
     stmt::{BranchStmt, LetStmt, SwitchStmt},
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -214,18 +215,18 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
             unified_block.pred = preds.into_iter().collect();
 
             if targets.len() == 2 {
-                let cond = Expr::BinaryOp(BinaryExpr {
-                    op: inkwell::values::InstructionOpcode::ICmp,
-                    arg1: Box::new(Expr::Var(VarExpr {
+                let cond = Expr::cmp(
+                    Cmp::Int(IntCmp::Eq),
+                    Expr::Var(VarExpr {
                         name: tag_name.clone(),
                         dtype: Ty::Int(32, true),
-                    })),
-                    arg2: Box::new(Expr::Literal(Lit::Int {
+                    }),
+                    Expr::Literal(Lit::Int {
                         value: 0,
                         bits: 32,
                         signed: true,
-                    })),
-                });
+                    }),
+                );
                 unified_block.stmts.push(Stmt::Branch(BranchStmt {
                     cond: Some(cond),
                     then_block: targets[0].clone(),

@@ -1,14 +1,6 @@
 use crate::hir::{Expr, Lit, Ty, expr::VarExpr};
 
-/// Information extracted from a basic block's terminating branch.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BranchInfo {
-    pub cond: Option<Expr>,
-    pub then_block: String,
-    pub else_block: Option<String>,
-}
-
-impl BranchInfo {
+impl BranchStmt {
     pub fn is_conditional(&self) -> bool {
         self.cond.is_some()
     }
@@ -74,17 +66,6 @@ pub struct TryCatchStmt {
     pub catches: Vec<CatchClause>,
     pub finally_body: Option<Vec<Stmt>>,
 }
-#[derive(Debug, Clone)]
-pub enum Term {
-    Br(String),
-    CondBr {
-        cond: Val,
-        then_bb: String,
-        else_bb: String,
-    },
-    Ret(Option<Val>),
-    Unreachable,
-}
 /// Pure HIR statement AST node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -95,8 +76,13 @@ pub enum Stmt {
     /// Structured switch, produced by recovery; lowered to `If` chains when
     /// the target cannot express it (`Language::allows_switch`).
     Switch(SwitchStmt),
-    /// Represents a new SSA binding.
+    /// Represents a new SSA binding. `dest` is a place: either a plain name or
+    /// `AddrOf(name)` when the target is a memory cell.
     Let(LetStmt),
+    /// Evaluate an expression for its effect only — a void call has no def.
+    Eval(Expr),
+    /// `unreachable`: a block that cannot be entered.
+    Unreachable,
     /// Structured loop with an optional pre-condition (`while (cond)` or infinite `loop`).
     Loop(LoopStmt),
     Break,

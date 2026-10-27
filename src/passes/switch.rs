@@ -1,9 +1,8 @@
-use inkwell::values::InstructionOpcode::ICmp;
 use tracing::info;
 
 use crate::backend::Language;
 use crate::errors::LowerError;
-use crate::hir::expr::BinaryExpr;
+use crate::hir::op::{Cmp, IntCmp};
 use crate::hir::stmt::{CatchClause, IfStmt, SwitchStmt, TryCatchStmt};
 use crate::hir::{Expr, Function, Lit, Stmt};
 use crate::passes::Lowering;
@@ -80,11 +79,7 @@ fn lower_stmt(stmt: Stmt) -> Vec<Stmt> {
 }
 
 fn eq(value: Expr, case: Lit) -> Expr {
-    Expr::BinaryOp(BinaryExpr {
-        op: ICmp,
-        arg1: Box::new(value),
-        arg2: Box::new(Expr::Literal(case)),
-    })
+    Expr::cmp(Cmp::Int(IntCmp::Eq), value, Expr::Literal(case))
 }
 
 #[cfg(test)]

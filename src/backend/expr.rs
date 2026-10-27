@@ -2,7 +2,7 @@ use std::fmt::{self, Formatter};
 
 use crate::hir::{
     Expr, Lit,
-    expr::{BinaryExpr, CallExpr, CastExpr, FieldExpr, IndexExpr, UnaryExpr, VarExpr},
+    expr::{BinaryExpr, CallExpr, CastExpr, CmpExpr, FieldExpr, IndexExpr, UnaryExpr, VarExpr},
 };
 
 pub trait ExprEmitter {
@@ -16,6 +16,7 @@ pub trait ExprEmitter {
             Expr::Var(i) => self.emit_variable(i, out),
             Expr::UnaryOp(i) => self.emit_unary_op(i, out),
             Expr::BinaryOp(i) => self.emit_binary_op(i, out),
+            Expr::Cmp(i) => self.emit_cmp(i, out),
             Expr::Call(i) => self.emit_call(i, out),
             Expr::Index(i) => self.emit_index(i, out),
             Expr::Field(i) => self.emit_field(i, out),
@@ -39,6 +40,12 @@ pub trait ExprEmitter {
         let _ = (expr, out);
         unreachable!(
             "`emit_binary_op` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+        )
+    }
+    fn emit_cmp(&self, expr: &CmpExpr, out: &mut Formatter) -> fmt::Result {
+        let _ = (expr, out);
+        unreachable!(
+            "`emit_cmp` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
         )
     }
     fn emit_unary_op(&self, expr: &UnaryExpr, out: &mut Formatter) -> fmt::Result {

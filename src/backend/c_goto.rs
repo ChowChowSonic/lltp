@@ -2,9 +2,12 @@
 
 use std::fmt::Write;
 
-use crate::hir::flat::{FlatFunction, FlatModule, FnSig, Inst, Term, Val};
-use crate::hir::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp};
+use crate::hir::expr::{CallExpr, UnaryExpr, VarExpr};
+use crate::hir::flat::{FlatFunction, FlatModule, FnSig};
+use crate::hir::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
+use crate::hir::stmt::{BranchStmt, LetStmt, RetStmt};
 use crate::hir::ty::Ty;
+use crate::hir::{Expr, Lit, Stmt};
 
 /// Emit a whole module as one C translation unit.
 pub fn emit_module(m: &FlatModule) -> Result<String, String> {
@@ -33,8 +36,8 @@ fn emit_function(f: &FlatFunction, o: &mut String) -> Result<(), String> {
     }
     for b in &f.blocks {
         writeln!(o, "{}:", b.label).expect("write to String");
-        for i in &b.insts {
-            writeln!(o, "    {}", inst(i)?).expect("write to String");
+        for s in &b.stmts {
+            writeln!(o, "    {}", stmt(s)?).expect("write to String");
         }
         writeln!(o, "    {}", term(&b.term)?).expect("write to String");
     }
@@ -93,21 +96,44 @@ fn uty(bits: Option<usize>) -> Result<&'static str, String> {
     }
 }
 
-fn val(v: &Val) -> Result<String, String> {
+fn val(v: &Expr) -> Result<String, String> {
     Ok(match v {
-        Val::Var(n, _) => n.clone(),
-        Val::Addr(n) => format!("(&{n})"),
-        Val::Null => "((void *)0)".to_string(),
-        Val::Int { value, bits: 1 } => String::from(if *value != 0 { "1" } else { "0" }),
-        Val::Int { value, bits } => {
+        Expr::Var(VarExpr { name, .. }) => name.clone(),
+        Expr::UnaryOp(UnaryExpr {
+            op: UnOp::AddrOf,
+            arg,
+        }) => format!("(&{})", val(arg)?),
+        // In C a variable is already the cell, so reading one prints its name.
+        Expr::UnaryOp(UnaryExpr {
+            op: UnOp::ValuAt,
+            arg,
+        }) => match arg.as_ref() {
+            Expr::Var(VarExpr { name, .. }) => name.clone(),
+            other => format!("(*{})", val(other)?),
+        },
+        Expr::Literal(Lit::Int { value, bits: 1, .. }) => {
+            String::from(if *value != 0 { "1" } else { "0" })
+        }
+        Expr::Literal(Lit::Int {
+            value,
+            bits,
+            signed,
+        }) => {
             let t = c_ty(&Ty::Int(*bits, true))?;
-            if *value == i64::MIN {
-                format!("(({t})(-9223372036854775807LL - 1))")
+            if *signed {
+                let v = *value as i64;
+                if v == i64::MIN {
+                    format!("(({t})(-9223372036854775807LL - 1))")
+                } else {
+                    format!("(({t}){v}LL)")
+                }
             } else {
-                format!("(({t}){value}LL)")
+                format!("(({t}){value}ULL)")
             }
         }
-        Val::Float { value, bits } => {
+        Expr::Literal(Lit::Bool(b)) => String::from(if *b { "1" } else { "0" }),
+        Expr::Literal(Lit::NullPtr) => "((void *)0)".to_string(),
+        Expr::Literal(Lit::Float { value, bits }) => {
             if !value.is_finite() {
                 return Err("inf/NaN float constants are not supported yet".to_string());
             }
@@ -117,49 +143,33 @@ fn val(v: &Val) -> Result<String, String> {
                 other => return Err(format!("{other}-bit float constants are not supported")),
             }
         }
-    })
-}
-
-fn inst(i: &Inst) -> Result<String, String> {
-    Ok(match i {
-        Inst::Load { dest, ptr } => format!("{dest} = {ptr};"),
-        Inst::Store { ptr, value } => format!("{ptr} = {};", val(value)?),
-        Inst::Copy { dest, src } => format!("{dest} = {};", val(src)?),
-        Inst::Bin {
-            dest,
-            ty,
-            op,
-            lhs,
-            rhs,
-        } => format!("{dest} = {};", bin(*op, ty, lhs, rhs)?),
-        Inst::Cmp {
-            dest,
-            pred,
-            lhs,
-            rhs,
-        } => format!("{dest} = {};", cmp(*pred, lhs, rhs)?),
-        Inst::Cast {
-            dest,
-            ty,
-            kind,
-            src,
-        } => format!("{dest} = {};", cast(*kind, ty, src)?),
-        Inst::Call { dest, callee, args } => {
+        Expr::Literal(Lit::Void) => String::new(),
+        Expr::BinaryOp(b) => bin(b.op, &b.arg1, &b.arg2)?,
+        Expr::Cmp(c) => cmp(c.pred, &c.arg1, &c.arg2)?,
+        Expr::Cast(c) => cast(c.kind, &c.dtype, &c.data)?,
+        Expr::Call(CallExpr { name, args }) => {
             let args = args
                 .iter()
                 .map(val)
                 .collect::<Result<Vec<_>, _>>()?
                 .join(", ");
-            match dest {
-                Some(d) => format!("{d} = {callee}({args});"),
-                None => format!("{callee}({args});"),
-            }
+            format!("{name}({args})")
         }
+        Expr::Nop => String::new(),
+        other => return Err(format!("cannot emit {other:?} in the goto baseline")),
     })
 }
 
-fn bin(op: BinOp, ty: &Ty, l: &Val, r: &Val) -> Result<String, String> {
-    let t = c_ty(ty)?;
+fn stmt(s: &Stmt) -> Result<String, String> {
+    Ok(match s {
+        Stmt::Let(LetStmt { dest, src }) => format!("{} = {};", val(dest)?, val(src)?),
+        Stmt::Eval(e) => format!("{};", val(e)?),
+        other => return Err(format!("cannot emit {other:?} in the goto baseline")),
+    })
+}
+
+fn bin(op: BinOp, l: &Expr, r: &Expr) -> Result<String, String> {
+    let t = c_ty(&l.ty())?;
     let (a, b) = (val(l)?, val(r)?);
     let bits = int_bits(&l.ty());
     let body = match op {
@@ -181,7 +191,7 @@ fn bin(op: BinOp, ty: &Ty, l: &Val, r: &Val) -> Result<String, String> {
     Ok(format!("({t})({body})"))
 }
 
-fn cmp(p: Cmp, l: &Val, r: &Val) -> Result<String, String> {
+fn cmp(p: Cmp, l: &Expr, r: &Expr) -> Result<String, String> {
     let (a, b) = (val(l)?, val(r)?);
     Ok(match p {
         Cmp::Int(ip) => {
@@ -225,7 +235,7 @@ fn cmp(p: Cmp, l: &Val, r: &Val) -> Result<String, String> {
     })
 }
 
-fn cast(kind: CastKind, ty: &Ty, src: &Val) -> Result<String, String> {
+fn cast(kind: CastKind, ty: &Ty, src: &Expr) -> Result<String, String> {
     let t = c_ty(ty)?;
     let s = val(src)?;
     let sbits = int_bits(&src.ty());
@@ -240,16 +250,26 @@ fn cast(kind: CastKind, ty: &Ty, src: &Val) -> Result<String, String> {
     })
 }
 
-fn term(t: &Term) -> Result<String, String> {
+fn term(t: &Stmt) -> Result<String, String> {
     Ok(match t {
-        Term::Br(l) => format!("goto {l};"),
-        Term::CondBr {
-            cond,
-            then_bb,
-            else_bb,
-        } => format!("if ({}) goto {then_bb}; else goto {else_bb};", val(cond)?),
-        Term::Ret(Some(v)) => format!("return {};", val(v)?),
-        Term::Ret(None) => "return;".to_string(),
-        Term::Unreachable => "__builtin_unreachable();".to_string(),
+        Stmt::Branch(BranchStmt {
+            cond: None,
+            then_block,
+            ..
+        }) => format!("goto {then_block};"),
+        Stmt::Branch(BranchStmt {
+            cond: Some(c),
+            then_block,
+            else_block,
+        }) => {
+            let else_bb = else_block
+                .as_ref()
+                .ok_or("conditional branch without an else target")?;
+            format!("if ({}) goto {then_block}; else goto {else_bb};", val(c)?)
+        }
+        Stmt::Ret(RetStmt { value: Some(v) }) => format!("return {};", val(v)?),
+        Stmt::Ret(RetStmt { value: None }) => "return;".to_string(),
+        Stmt::Unreachable => "__builtin_unreachable();".to_string(),
+        other => return Err(format!("cannot emit {other:?} as a terminator")),
     })
 }

@@ -1,5 +1,5 @@
 use crate::errors::StructurizeError;
-use crate::hir::{BranchInfo, Stmt, stmt::BranchStmt};
+use crate::hir::{Stmt, stmt::BranchStmt};
 use std::collections::{BTreeMap, HashMap};
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -18,6 +18,9 @@ impl Block {
             succ: Vec::new(),
             pred: Vec::new(),
         }
+    }
+    pub fn term(&self) -> Option<&Stmt> {
+        self.stmts.last()
     }
 }
 
@@ -206,7 +209,7 @@ impl Cfg {
     pub fn split_block(
         &self,
         name: &str,
-    ) -> Result<(Vec<Stmt>, Option<BranchInfo>), StructurizeError> {
+    ) -> Result<(Vec<Stmt>, Option<BranchStmt>), StructurizeError> {
         let block = self
             .blocks
             .get(name)
@@ -218,7 +221,7 @@ impl Cfg {
                 then_block,
                 else_block,
             })) => {
-                let br = BranchInfo {
+                let br = BranchStmt {
                     cond: cond.clone(),
                     then_block: then_block.clone(),
                     else_block: else_block.clone(),

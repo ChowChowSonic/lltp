@@ -18,6 +18,8 @@ pub trait StmtEmitter {
             Stmt::Ret(i) => self.emit_return(i, out),
             Stmt::Switch(i) => self.emit_switch(i, out),
             Stmt::Let(i) => self.emit_assignment(i, out),
+            Stmt::Eval(i) => self.emit_eval(i, out),
+            Stmt::Unreachable => Ok(()),
             Stmt::Break => self.emit_break(stmt, out),
             Stmt::Continue => self.emit_continue(stmt, out),
             Stmt::Goto(i) => self.emit_goto(i, out),
@@ -38,6 +40,12 @@ pub trait StmtEmitter {
         )
     }
 
+    fn emit_eval(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
+        let _ = (expr, out);
+        unreachable!(
+            "`emit_eval` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+        )
+    }
     fn emit_assignment(&self, expr: &LetStmt, out: &mut Formatter) -> fmt::Result {
         let _ = (expr, out);
         unreachable!(

@@ -27,7 +27,7 @@ pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Result<Module<'ctx>,
 pub fn pipeline<T: Language>(ir: &str) -> Result<(), LowerError> {
     let ctxt = Context::create();
     let module = build_module(&ctxt, ir).expect("Unable to build module");
-    let flat = match FlatModule::from_module(&module) {
+    let _flat = match FlatModule::from_module(&module) {
         Ok(m) => m,
         Err(_) => {
             return Err(LowerError::Other(

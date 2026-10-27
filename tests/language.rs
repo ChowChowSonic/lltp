@@ -1,13 +1,21 @@
 use lltp::backend::{ExprEmitter, Language, StmtEmitter};
-use lltp::hir::expr::{BinaryExpr, CallExpr, CastExpr, IndexExpr, UnaryExpr};
+use lltp::hir::expr::{BinaryExpr, CallExpr, CastExpr, CmpExpr, IndexExpr, UnaryExpr};
+use lltp::hir::op::{BinOp, Cmp, IntCmp};
 use lltp::hir::stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt, TryCatchStmt};
-use lltp::hir::{Lit, Stmt};
+use lltp::hir::{Lit, Stmt, Ty};
 use std::fmt::{Formatter, Result};
 pub struct CLanguage;
 
 impl Language for CLanguage {
     fn name(&self) -> &str {
         "C"
+    }
+
+    fn emit_ty(&self, ty: &Ty, out: &mut Formatter) -> std::fmt::Result {
+        match ty {
+            Ty::Void => write!(out, "void"),
+            other => unreachable!("toy emitter does not support type `{other:?}`"),
+        }
     }
 }
 impl StmtEmitter for CLanguage {
@@ -131,29 +139,29 @@ impl ExprEmitter for CLanguage {
         }
     }
     fn emit_cast(&self, expr: &CastExpr, out: &mut Formatter) -> std::fmt::Result {
-        self.emit_expr(&expr.dtype, out)?;
+        self.emit_ty(&expr.dtype, out)?;
         write!(out, " ")?;
         self.emit_expr(&expr.data, out)
+    }
+    fn emit_cmp(&self, expr: &CmpExpr, out: &mut Formatter) -> std::fmt::Result {
+        self.emit_expr(&expr.arg1, out)?;
+        match expr.pred {
+            Cmp::Int(IntCmp::Eq) => write!(out, " == ")?,
+            other => unreachable!("toy emitter does not support predicate `{other:?}`"),
+        }
+        self.emit_expr(&expr.arg2, out)
     }
     fn emit_binary_op(&self, expr: &BinaryExpr, out: &mut Formatter) -> std::fmt::Result {
         self.emit_expr(&expr.arg1, out)?;
         match expr.op {
-            inkwell::values::InstructionOpcode::FAdd | inkwell::values::InstructionOpcode::Add => {
-                write!(out, " + ")?;
-            }
-            inkwell::values::InstructionOpcode::Sub | inkwell::values::InstructionOpcode::FSub => {
-                write!(out, " - ")?
-            }
-            inkwell::values::InstructionOpcode::FDiv
-            | inkwell::values::InstructionOpcode::SDiv
-            | inkwell::values::InstructionOpcode::UDiv => write!(out, " / ")?,
-            inkwell::values::InstructionOpcode::And => write!(out, " & ")?,
-            inkwell::values::InstructionOpcode::AShr => write!(out, " > ")?,
-            inkwell::values::InstructionOpcode::Shl => write!(out, " < ")?,
-            inkwell::values::InstructionOpcode::Mul | inkwell::values::InstructionOpcode::FMul => {
-                write!(out, " * ")?
-            }
-            _ => unreachable!("Illegal binary operation"),
+            BinOp::Add | BinOp::FAdd => write!(out, " + ")?,
+            BinOp::Sub | BinOp::FSub => write!(out, " - ")?,
+            BinOp::SDiv | BinOp::UDiv | BinOp::FDiv => write!(out, " / ")?,
+            BinOp::And => write!(out, " & ")?,
+            BinOp::AShr => write!(out, " > ")?,
+            BinOp::Shl => write!(out, " < ")?,
+            BinOp::Mul | BinOp::FMul => write!(out, " * ")?,
+            other => unreachable!("Illegal binary operation `{other:?}`"),
         }
         self.emit_expr(&expr.arg2, out)
     }
@@ -167,10 +175,9 @@ impl ExprEmitter for CLanguage {
 mod test {
     use std::fmt::Formatter;
 
-    use inkwell::values::InstructionOpcode;
-
     use lltp::backend::{ExprEmitter, Language, StmtEmitter};
     use lltp::hir::expr::{CallExpr, CastExpr, IndexExpr};
+    use lltp::hir::op::{BinOp, CastKind};
     use lltp::hir::stmt::{BranchStmt, CatchClause, GotoStmt, LabelStmt, LoopStmt, TryCatchStmt};
     use lltp::hir::{Expr, Lit, Stmt, Ty};
 
@@ -263,18 +270,18 @@ mod test {
     fn binary_operators() {
         // Shifts currently render as `<`/`>` rather than `<<`/`>>`.
         let cases = [
-            (InstructionOpcode::Add, " + "),
-            (InstructionOpcode::FAdd, " + "),
-            (InstructionOpcode::Sub, " - "),
-            (InstructionOpcode::FSub, " - "),
-            (InstructionOpcode::Mul, " * "),
-            (InstructionOpcode::FMul, " * "),
-            (InstructionOpcode::SDiv, " / "),
-            (InstructionOpcode::UDiv, " / "),
-            (InstructionOpcode::FDiv, " / "),
-            (InstructionOpcode::And, " & "),
-            (InstructionOpcode::Shl, " < "),
-            (InstructionOpcode::AShr, " > "),
+            (BinOp::Add, " + "),
+            (BinOp::FAdd, " + "),
+            (BinOp::Sub, " - "),
+            (BinOp::FSub, " - "),
+            (BinOp::Mul, " * "),
+            (BinOp::FMul, " * "),
+            (BinOp::SDiv, " / "),
+            (BinOp::UDiv, " / "),
+            (BinOp::FDiv, " / "),
+            (BinOp::And, " & "),
+            (BinOp::Shl, " < "),
+            (BinOp::AShr, " > "),
         ];
         for (op, sym) in cases {
             assert_eq!(
@@ -313,9 +320,10 @@ mod test {
     fn cast_writes_the_dtype_then_the_value() {
         let expr = Expr::Cast(CastExpr {
             data: Box::new(int(1)),
-            dtype: Box::new(Expr::var("int", Ty::Void)),
+            dtype: Ty::Void,
+            kind: CastKind::Trunc,
         });
-        assert_eq!(emit_expr(&expr), "int 132");
+        assert_eq!(emit_expr(&expr), "void 132");
     }
 
     #[test]
@@ -417,11 +425,7 @@ mod test {
         let stmts = [
             binding("flag", Expr::bool(true)),
             Stmt::Loop(LoopStmt {
-                cond: Some(Expr::binary(
-                    InstructionOpcode::And,
-                    var("flag"),
-                    Expr::bool(false),
-                )),
+                cond: Some(Expr::binary(BinOp::And, var("flag"), Expr::bool(false))),
                 body: vec![Stmt::if_then_else(
                     var("flag"),
                     vec![Stmt::Break],

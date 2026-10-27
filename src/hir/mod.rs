@@ -16,7 +16,7 @@ pub use crate::errors::{HirError, LowerError, StructurizeError};
 pub use cfg::{Block, Cfg};
 pub use expr::Expr;
 pub use func::Function;
-pub use stmt::{BranchInfo, Stmt};
+pub use stmt::Stmt;
 pub use ty::Ty;
 
 #[derive(Debug, Clone, PartialEq)]

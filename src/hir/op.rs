@@ -167,3 +167,11 @@ impl CastKind {
         })
     }
 }
+/// Unary operators. `AddrOf`/`ValuAt` are not LLVM opcodes: they are the two
+/// directions of a memory cell. `AddrOf(Var(x))` is the cell itself (a store
+/// target), `ValuAt(Var(x))` is what is stored in it (a load).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnOp {
+    AddrOf,
+    ValuAt,
+}

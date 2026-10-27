@@ -7,6 +7,7 @@ use crate::hir::flow::{
     DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, reachable, reachable_from,
     t1t2_reduce, unify_loop_exits,
 };
+use crate::hir::op::BinOp;
 use crate::hir::stmt::{BranchStmt, IfStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt};
 use crate::hir::{Block, Cfg, Expr, Lit, Stmt, Ty};
 
@@ -140,7 +141,7 @@ fn structure_loop(
                 .and_then(|b| b.cond.clone())
                 .unwrap_or(Expr::Nop);
             Expr::BinaryOp(BinaryExpr {
-                op: inkwell::values::InstructionOpcode::Xor,
+                op: BinOp::Xor,
                 arg1: Box::new(c),
                 arg2: Box::new(Expr::Literal(Lit::Bool(true))),
             })

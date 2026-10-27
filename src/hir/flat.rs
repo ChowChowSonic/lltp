@@ -1,7 +1,6 @@
-use std::collections::{HashMap, HashSet};
-use super::stmt::{RetStmt};
+use super::stmt::{LetStmt, RetStmt};
 use crate::errors::LowerError;
-use crate::hir::expr::VarExpr;
+use crate::hir::expr::{CallExpr, CastExpr, VarExpr};
 use crate::hir::stmt::BranchStmt;
 use crate::hir::{Expr, Stmt};
 use inkwell::basic_block::BasicBlock;
@@ -10,48 +9,17 @@ use inkwell::types::BasicTypeEnum;
 use inkwell::values::{
     BasicValueEnum, FunctionValue, InstructionOpcode as Op, InstructionValue, Operand, PhiValue,
 };
+use std::collections::{HashMap, HashSet};
 
-use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp};
+use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
 use super::ty::Ty;
-
-#[derive(Debug, Clone)]
-pub enum Inst {
-    /// `dest = *ptr` where `ptr` is an alloca slot.
-    Load { dest: String, ptr: String },
-    /// `*ptr = value` where `ptr` is an alloca slot.
-    Store { ptr: String, value: Expr },
-    Bin {
-        dest: String,
-        ty: Ty,
-        op: BinOp,
-        lhs: Expr,
-        rhs: Expr,
-    },
-    Cmp {
-        dest: String,
-        pred: Cmp,
-        lhs: Expr,
-        rhs: Expr,
-    },
-    Cast {
-        dest: String,
-        ty: Ty,
-        kind: CastKind,
-        src: Expr,
-    },
-    Call {
-        dest: Option<String>,
-        callee: String,
-        args: Vec<Expr>,
-    },
-    /// `dest = src`: a lowered phi edge copy.
-    Copy { dest: String, src: Expr },
-}
 
 #[derive(Debug, Clone)]
 pub struct FlatBlock {
     pub label: String,
-    pub insts: Vec<Inst>,
+    /// Statements in source order. The terminator is kept separate so liveness
+    /// can read its successors without guessing which statement is last.
+    pub stmts: Vec<Stmt>,
     pub term: Stmt,
 }
 
@@ -232,7 +200,7 @@ fn phi_ty(inst: InstructionValue<'_>) -> Result<Ty, String> {
 }
 
 /// Incoming `(dest, type, [(predecessor, value)])` for each phi of a block.
-type PhiIn<'ctx> = Vec<(String, Ty, Vec<(BasicBlock<'ctx>, Val)>)>;
+type PhiIn<'ctx> = Vec<(String, Ty, Vec<(BasicBlock<'ctx>, Expr)>)>;
 
 /// The `(phi local, type, incoming value)` copies for the edge `from -> to`.
 fn edge_copies<'ctx>(
@@ -258,35 +226,56 @@ fn parallel_copy(
     copies: Vec<(String, Ty, Expr)>,
     vnames: &mut Namer,
     locals: &mut Vec<(String, Ty)>,
-) -> Vec<Inst> {
+) -> Vec<Stmt> {
     let dests: HashSet<String> = copies.iter().map(|(d, _, _)| d.clone()).collect();
     let mut saves = Vec::new();
-    let mut copy_insts = Vec::new();
-    for (dest, _, src) in &copies {
-        if let Expr::Var(VarExpr {name:n, ..}) = src
+    let mut copy_stmts = Vec::new();
+    for (dest, ty, src) in &copies {
+        if let Expr::Var(VarExpr { name: n, .. }) = src
             && n == dest
         {
             continue;
         }
         let src = match src {
-            Expr::Var(VarExpr{name:n, dtype:vty}) if dests.contains(n) => {
+            Expr::Var(VarExpr {
+                name: n,
+                dtype: vty,
+            }) if dests.contains(n) => {
                 let tmp = vnames.value("phi_tmp");
                 locals.push((tmp.clone(), vty.clone()));
-                saves.push(Inst::Copy {
-                    dest: tmp.clone(),
-                    src: src.clone(),
-                });
-                Expr::Var(VarExpr { name:tmp, dtype:vty.clone()} )
+                saves.push(assign(
+                    Expr::Var(VarExpr {
+                        name: tmp.clone(),
+                        dtype: vty.clone(),
+                    }),
+                    src.clone(),
+                ));
+                Expr::Var(VarExpr {
+                    name: tmp,
+                    dtype: vty.clone(),
+                })
             }
             other => other.clone(),
         };
-        copy_insts.push(Inst::Copy {
-            dest: dest.clone(),
+        copy_stmts.push(assign(
+            Expr::Var(VarExpr {
+                name: dest.clone(),
+                dtype: ty.clone(),
+            }),
             src,
-        });
+        ));
     }
-    saves.extend(copy_insts);
+    saves.extend(copy_stmts);
     saves
+}
+
+/// `dest = src` as a statement. `dest` is a place: a plain name, or
+/// `AddrOf(name)` when it is a memory cell.
+fn assign(dest: Expr, src: Expr) -> Stmt {
+    Stmt::Let(LetStmt {
+        dest: Box::new(dest),
+        src: Box::new(src),
+    })
 }
 
 #[derive(PartialEq)]
@@ -347,6 +336,9 @@ struct Cx<'ctx> {
     names: HashMap<InstructionValue<'ctx>, String>,
     params: HashMap<String, String>,
     labels: HashMap<BasicBlock<'ctx>, String>,
+    /// Recorded type of every named local, so a `VarExpr` carries the type the
+    /// pass 1 named it with rather than re-deriving it from the operand.
+    types: HashMap<String, Ty>,
 }
 
 impl<'ctx> Cx<'ctx> {
@@ -355,6 +347,14 @@ impl<'ctx> Cx<'ctx> {
             .get(&inst)
             .cloned()
             .ok_or_else(|| format!("no name recorded for `{:?}`", inst.get_opcode()))
+    }
+
+    /// A reference to a recorded local.
+    fn var(&self, name: &str) -> Expr {
+        Expr::Var(VarExpr {
+            name: name.to_string(),
+            dtype: self.types.get(name).cloned().unwrap_or(Ty::Void),
+        })
     }
 
     fn param(&self, raw: &str) -> Result<String, String> {
@@ -395,43 +395,66 @@ impl<'ctx> Cx<'ctx> {
         match bve {
             BasicValueEnum::IntValue(i) => {
                 if let Some(inst) = i.as_instruction() {
-                    Ok(Expr::Var(VarExpr { name: self.name(inst)?, dtype:Ty::from(bve)}))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.name(inst)?,
+                        dtype: Ty::from(bve),
+                    }))
                 } else if i.is_const() {
                     let bits = i.get_type().get_bit_width() as usize;
                     let value = i
                         .get_sign_extended_constant()
                         .ok_or("integer constant wider than 64 bits")?;
-                    Ok(Expr::Literal(super::Lit::Int { value:value as u64,  bits, signed: true } ))
+                    Ok(Expr::Literal(super::Lit::Int {
+                        value: value as u64,
+                        bits,
+                        signed: true,
+                    }))
                 } else {
                     let raw = i.get_name().to_string_lossy().into_owned();
-                    Ok(Expr::Var(VarExpr { name:self.param(&raw)?, dtype:Ty::from(bve)}))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.param(&raw)?,
+                        dtype: Ty::from(bve),
+                    }))
                 }
             }
             BasicValueEnum::FloatValue(f) => {
                 if let Some(inst) = f.as_instruction() {
-                    Ok(Expr::Var(VarExpr { name: self.name(inst)?, dtype: Ty::from(bve)}))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.name(inst)?,
+                        dtype: Ty::from(bve),
+                    }))
                 } else if f.is_const() {
                     let bits = f.get_type().get_bit_width() as usize;
                     let (value, _lossy) = f.get_constant().ok_or("unreadable float constant")?;
                     Ok(Expr::Literal(super::Lit::Float { bits, value }))
                 } else {
                     let raw = f.get_name().to_string_lossy().into_owned();
-                    Ok(Expr::Var(VarExpr { name:self.param(&raw)?, dtype:Ty::from(bve)}))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.param(&raw)?,
+                        dtype: Ty::from(bve),
+                    }))
                 }
             }
             BasicValueEnum::PointerValue(p) => {
                 if let Some(inst) = p.as_instruction() {
                     let n = self.name(inst)?;
                     if inst.get_opcode() == Op::Alloca {
-                        Ok(Expr::Addr(n))
+                        // An alloca used as a value is the cell itself.
+                        Ok(Expr::unary(UnOp::AddrOf, self.var(&n)))
                     } else {
-                        Ok(Expr::Var(VarExpr{name:n, dtype:Ty::from(bve)}))
+                        Ok(Expr::Var(VarExpr {
+                            name: n,
+                            dtype: Ty::from(bve),
+                        }))
                     }
                 } else if p.is_null() {
                     Ok(Expr::Literal(super::Lit::NullPtr))
                 } else {
                     let raw = p.get_name().to_string_lossy().into_owned();
-                    Ok(Expr::Var(VarExpr{name:self.param(&raw)?, dtype:Ty::from(bve)}))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.param(&raw)?,
+                        dtype: Ty::from(bve),
+                    }))
                 }
             }
             _ => Err("unsupported operand kind (struct/vector/array value)".to_string()),
@@ -498,10 +521,13 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
         }
     }
 
+    let types: HashMap<String, Ty> = locals.iter().cloned().collect();
+
     let cx = Cx {
         names,
         params,
         labels,
+        types,
     };
 
     // phi incoming values per block (needs `cx` to resolve operands)
@@ -529,38 +555,44 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
     let mut out_blocks = Vec::new();
     let mut edge_blocks = Vec::new();
     for bb in &blocks {
-        let mut insts = Vec::new();
+        let mut stmts = Vec::new();
         let mut term = None;
         for inst in bb.get_instructions() {
             let opc = inst.get_opcode();
             let opnd = |i: u32| inst.get_operand(i);
             match opc {
                 Op::Alloca => {}
-                Op::Load => insts.push(Inst::Load {
-                    dest: cx.name(inst)?,
-                    ptr: cx.slot(opnd(0))?,
-                }),
-                Op::Store => insts.push(Inst::Store {
-                    value: cx.val(opnd(0))?,
-                    ptr: cx.slot(opnd(1))?,
-                }),
+                Op::Load => {
+                    let dest = cx.var(&cx.name(inst)?);
+                    let slot = cx.slot(opnd(0))?;
+                    stmts.push(assign(dest, Expr::unary(UnOp::ValuAt, cx.var(&slot))));
+                }
+                Op::Store => {
+                    let value = cx.val(opnd(0))?;
+                    let slot = cx.slot(opnd(1))?;
+                    stmts.push(assign(Expr::unary(UnOp::AddrOf, cx.var(&slot)), value));
+                }
                 Op::ICmp => {
                     let p = inst.get_icmp_predicate().ok_or("icmp without predicate")?;
-                    insts.push(Inst::Cmp {
-                        dest: cx.name(inst)?,
-                        pred: Cmp::Int(IntCmp::from(p)),
-                        lhs: cx.val(opnd(0))?,
-                        rhs: cx.val(opnd(1))?,
-                    });
+                    stmts.push(assign(
+                        cx.var(&cx.name(inst)?),
+                        Expr::cmp(
+                            Cmp::Int(IntCmp::from(p)),
+                            cx.val(opnd(0))?,
+                            cx.val(opnd(1))?,
+                        ),
+                    ));
                 }
                 Op::FCmp => {
                     let p = inst.get_fcmp_predicate().ok_or("fcmp without predicate")?;
-                    insts.push(Inst::Cmp {
-                        dest: cx.name(inst)?,
-                        pred: Cmp::Float(FloatCmp::from(p)),
-                        lhs: cx.val(opnd(0))?,
-                        rhs: cx.val(opnd(1))?,
-                    });
+                    stmts.push(assign(
+                        cx.var(&cx.name(inst)?),
+                        Expr::cmp(
+                            Cmp::Float(FloatCmp::from(p)),
+                            cx.val(opnd(0))?,
+                            cx.val(opnd(1))?,
+                        ),
+                    ));
                 }
                 Op::Call => match call_kind(inst)? {
                     CallKind::Skip => {}
@@ -569,15 +601,14 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                         let args = (0..n - 1)
                             .map(|i| cx.val(opnd(i)))
                             .collect::<Result<Vec<_>, _>>()?;
-                        insts.push(Inst::Call {
-                            dest: if kind == CallKind::Value {
-                                Some(cx.name(inst)?)
-                            } else {
-                                None
-                            },
-                            callee: callee_name(inst)?,
+                        let call = Expr::Call(CallExpr {
+                            name: callee_name(inst)?,
                             args,
                         });
+                        match kind {
+                            CallKind::Value => stmts.push(assign(cx.var(&cx.name(inst)?), call)),
+                            _ => stmts.push(Stmt::Eval(call)),
+                        }
                     }
                 },
                 Op::Phi => {}
@@ -587,8 +618,12 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                             .and_then(|o| o.block())
                             .ok_or("expected a block operand")?;
                         let copies = edge_copies(&phis, *bb, target)?;
-                        insts.extend(parallel_copy(copies, &mut vnames, &mut locals));
-                        term = Some(Stmt::Break(BreakStmt { cx.label(opnd(0))?}));
+                        stmts.extend(parallel_copy(copies, &mut vnames, &mut locals));
+                        term = Some(Stmt::Branch(BranchStmt {
+                            cond: None,
+                            then_block: cx.label(opnd(0))?,
+                            else_block: None,
+                        }));
                     }
                     // LLVM operand order for a conditional br: cond, false, true
                     3 => {
@@ -600,15 +635,21 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                                 .ok_or("expected a block operand")?;
                             let label = cx.label(opnd(idx))?;
                             let copies = edge_copies(&phis, *bb, target)?;
-                            let copy_insts = parallel_copy(copies, &mut vnames, &mut locals);
-                            if copy_insts.is_empty() {
+                            let copy_stmts = parallel_copy(copies, &mut vnames, &mut locals);
+                            if copy_stmts.is_empty() {
                                 resolved.push(label);
                             } else {
                                 let split = lnames.value(&format!("{}_to_{label}", cx.labels[bb]));
+                                // The copies happen on the edge, so the split block
+                                // falls through to its target.
                                 edge_blocks.push(FlatBlock {
                                     label: split.clone(),
-                                    insts: copy_insts,
-                                    term: Stmt::Break,
+                                    stmts: copy_stmts,
+                                    term: Stmt::Branch(BranchStmt {
+                                        cond: None,
+                                        then_block: label,
+                                        else_block: None,
+                                    }),
                                 });
                                 resolved.push(split);
                             }
@@ -619,34 +660,35 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                             cond: Some(cond),
                             then_block: then_bb,
                             else_block: Some(else_bb),
-                        }) );
+                        }));
                     }
                     n => return Err(format!("br with {n} operands")),
                 },
                 Op::Return => {
                     term = Some(if inst.get_num_operands() == 0 {
-                        Stmt::Ret(RetStmt { value: None } )
+                        Stmt::Ret(RetStmt { value: None })
                     } else {
-                        Stmt::Ret(RetStmt { value: cx.val(opnd(0)).ok()})
+                        Stmt::Ret(RetStmt {
+                            value: cx.val(opnd(0)).ok(),
+                        })
                     });
                 }
-                Op::Unreachable => term = Some(Stmt::Break),
+                Op::Unreachable => term = Some(Stmt::Unreachable),
                 other => {
                     if let Some(kind) = CastKind::from_opcode(other) {
-                        insts.push(Inst::Cast {
-                            dest: cx.name(inst)?,
-                            ty: result_ty(inst)?,
-                            kind,
-                            src: cx.val(opnd(0))?,
-                        });
+                        stmts.push(assign(
+                            cx.var(&cx.name(inst)?),
+                            Expr::Cast(CastExpr {
+                                data: Box::new(cx.val(opnd(0))?),
+                                dtype: result_ty(inst)?,
+                                kind,
+                            }),
+                        ));
                     } else if let Some(op) = BinOp::from_opcode(other) {
-                        insts.push(Inst::Bin {
-                            dest: cx.name(inst)?,
-                            ty: result_ty(inst)?,
-                            op,
-                            lhs: cx.val(opnd(0))?,
-                            rhs: cx.val(opnd(1))?,
-                        });
+                        stmts.push(assign(
+                            cx.var(&cx.name(inst)?),
+                            Expr::binary(op, cx.val(opnd(0))?, cx.val(opnd(1))?),
+                        ));
                     } else {
                         return Err(format!("unsupported instruction `{other:?}`"));
                     }
@@ -656,7 +698,7 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
         let label = cx.labels[bb].clone();
         out_blocks.push(FlatBlock {
             label,
-            insts,
+            stmts,
             term: term.ok_or("basic block without a supported terminator")?,
         });
     }

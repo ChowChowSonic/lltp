@@ -7,10 +7,9 @@
 
 use std::fmt::{self, Formatter};
 
-use inkwell::values::InstructionOpcode;
-
 use lltp::backend::{ExprEmitter, Language, StmtEmitter};
-use lltp::hir::expr::{BinaryExpr, VarExpr};
+use lltp::hir::expr::{CmpExpr, VarExpr};
+use lltp::hir::op::{Cmp, IntCmp};
 use lltp::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
 use lltp::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
 use lltp::passes::SwitchToIfElse;
@@ -26,6 +25,7 @@ impl ExprEmitter for ToyBackend {
             Expr::Var(VarExpr { name, .. }) => write!(out, "{name}"),
             Expr::Literal(i) => self.emit_literal(i, out),
             Expr::BinaryOp(b) => self.emit_binary_op(b, out),
+            Expr::Cmp(c) => self.emit_cmp(c, out),
             other => unreachable!("toy emitter does not support {other:?}"),
         }
     }
@@ -38,11 +38,11 @@ impl ExprEmitter for ToyBackend {
         }
     }
 
-    fn emit_binary_op(&self, expr: &BinaryExpr, out: &mut Formatter) -> fmt::Result {
+    fn emit_cmp(&self, expr: &CmpExpr, out: &mut Formatter) -> fmt::Result {
         self.emit_expr(&expr.arg1, out)?;
-        match expr.op {
-            InstructionOpcode::ICmp => write!(out, " == ")?,
-            other => unreachable!("toy emitter does not support `{other:?}`"),
+        match expr.pred {
+            Cmp::Int(IntCmp::Eq) => write!(out, " == ")?,
+            other => unreachable!("toy emitter does not support predicate `{other:?}`"),
         }
         self.emit_expr(&expr.arg2, out)
     }
@@ -62,6 +62,7 @@ impl StmtEmitter for ToyBackend {
             Stmt::Continue => unreachable!("Continues are not emitted"),
             Stmt::Label(_i) => unreachable!("Labels are not emitted"),
             Stmt::Goto(_i) => unreachable!("Gotos are not emitted"),
+            Stmt::Eval(_) | Stmt::Unreachable => unreachable!("Eval/Unreachable are not emitted"),
         }
     }
 
