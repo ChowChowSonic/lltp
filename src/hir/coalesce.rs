@@ -8,9 +8,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::hir::expr::{BinaryExpr, CallExpr, CastExpr, CmpExpr, IndexExpr, UnaryExpr, VarExpr};
 use crate::hir::stmt::LetStmt;
-use crate::hir::{Expr, Stmt};
+use crate::hir::{Block, Expr, Stmt};
 
-use super::flat::{FlatBlock, FlatFunction};
+use super::flat::FlatFunction;
 use super::op::UnOp;
 use super::ty::Ty;
 
@@ -42,7 +42,7 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
     let copies: Vec<(String, String)> = func
         .blocks
         .iter()
-        .flat_map(|b| b.stmts.iter().chain(std::iter::once(&b.term)))
+        .flat_map(|b| b.stmts.iter().chain(std::iter::once(b.term())))
         .filter_map(copy_pair)
         .collect();
 
@@ -86,7 +86,7 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
         for stmt in &mut block.stmts {
             rename_stmt(stmt, &rename);
         }
-        rename_stmt(&mut block.term, &rename);
+        rename_stmt(block.term_mut(), &rename);
         block.stmts.retain(|stmt| {
             !matches!(stmt, Stmt::Let(LetStmt { dest, src }) if
                     is_plain_var(dest) && same_name(dest, src))
@@ -106,7 +106,7 @@ fn fixed_names(func: &FlatFunction) -> Names {
                 collect_slots(e, &mut fixed);
             }
         }
-        for e in exprs(&block.term) {
+        for e in exprs(&block.term()) {
             collect_slots(e, &mut fixed);
         }
     }
@@ -270,9 +270,9 @@ fn add_uses(vals: Vec<&Expr>, live: &mut Names) {
     }
 }
 
-fn live_in_of(block: &FlatBlock, live_out: &Names) -> Names {
+fn live_in_of(block: &Block, live_out: &Names) -> Names {
     let mut live = live_out.clone();
-    add_uses(uses(&block.term), &mut live);
+    add_uses(uses(&block.term()), &mut live);
     for stmt in block.stmts.iter().rev() {
         if let Some(d) = def_name(stmt) {
             live.remove(d);
@@ -287,7 +287,7 @@ fn liveness(func: &FlatFunction) -> Vec<Names> {
         .blocks
         .iter()
         .enumerate()
-        .map(|(i, b)| (b.label.as_str(), i))
+        .map(|(i, b)| (b.name.as_str(), i))
         .collect();
     let n = func.blocks.len();
     let mut live_in = vec![Names::new(); n];
@@ -297,7 +297,7 @@ fn liveness(func: &FlatFunction) -> Vec<Names> {
         for i in (0..n).rev() {
             let block = &func.blocks[i];
             let mut out = Names::new();
-            for s in succs(&block.term) {
+            for s in succs(&block.term()) {
                 if let Some(&j) = index.get(s) {
                     out.extend(live_in[j].iter().cloned());
                 }
@@ -327,7 +327,7 @@ fn interference(func: &FlatFunction, live_out: &[Names]) -> BTreeMap<String, Nam
     let mut adj: BTreeMap<String, Names> = BTreeMap::new();
     for (block, out) in func.blocks.iter().zip(live_out) {
         let mut live = out.clone();
-        add_uses(uses(&block.term), &mut live);
+        add_uses(uses(&block.term()), &mut live);
         for stmt in block.stmts.iter().rev() {
             if let Some(d) = def_name(stmt) {
                 // The two ends of a copy are the pair this pass wants to merge,
@@ -407,10 +407,10 @@ fn rename_stmt(stmt: &mut Stmt, f: &dyn Fn(&str) -> String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::Lit;
     use crate::hir::flat::FnSig;
     use crate::hir::op::{BinOp, Cmp, IntCmp};
     use crate::hir::stmt::{BranchStmt, LetStmt, RetStmt};
+    use crate::hir::{Block, Lit};
     use crate::hir::{Expr, Stmt};
 
     fn i32t() -> Ty {
@@ -481,15 +481,11 @@ mod tests {
         Stmt::Ret(RetStmt { value: v })
     }
 
-    fn block(label: &str, stmts: Vec<Stmt>, term: Stmt) -> FlatBlock {
-        FlatBlock {
-            label: label.to_string(),
-            stmts,
-            term,
-        }
+    fn block(label: &str, stmts: Vec<Stmt>, term: Stmt) -> Block {
+        Block::build(label, stmts, Some(term))
     }
 
-    fn function(locals: &[&str], blocks: Vec<FlatBlock>) -> FlatFunction {
+    fn function(locals: &[&str], blocks: Vec<Block>) -> FlatFunction {
         FlatFunction {
             sig: FnSig {
                 name: "f".to_string(),
@@ -528,12 +524,12 @@ mod tests {
     /// Tiny interpreter: enough to run the by-hand loops.
     fn eval(func: &FlatFunction) -> u64 {
         let mut env: BTreeMap<String, u64> = BTreeMap::new();
-        let mut label = func.blocks[0].label.clone();
+        let mut label = func.blocks[0].name.clone();
         for _ in 0..1000 {
             let block = func
                 .blocks
                 .iter()
-                .find(|b| b.label == label)
+                .find(|b| b.name == label)
                 .expect("branch to a missing block");
             for stmt in &block.stmts {
                 let Stmt::Let(LetStmt { dest, src }) = stmt else {
@@ -544,7 +540,7 @@ mod tests {
                     .to_string();
                 env.insert(name, get(&env, src));
             }
-            match &block.term {
+            match &block.term() {
                 Stmt::Branch(b) => label = b.then_block.clone(),
                 Stmt::Ret(RetStmt { value: Some(v) }) => return get(&env, v),
                 other => panic!("unsupported terminator {other:?}"),
@@ -745,7 +741,7 @@ mod tests {
         assert_eq!(format!("{first:?}"), format!("{second:?}"));
     }
 
-    fn function_with_param(locals: &[&str], blocks: Vec<FlatBlock>) -> FlatFunction {
+    fn function_with_param(locals: &[&str], blocks: Vec<Block>) -> FlatFunction {
         let mut f = function(locals, blocks);
         f.sig.params = vec![i32t()];
         f.param_names = vec!["x".to_string()];
@@ -770,7 +766,7 @@ mod tests {
         assert_eq!(f.param_names, ["x"]);
         let names: Vec<&str> = f.locals.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["add"]);
-        assert_eq!(f.blocks[0].stmts.len(), 1);
+        assert_eq!(f.blocks[0].stmts.len() - 1, 1);
         assert!(
             matches!(&f.blocks[0].stmts[0], Stmt::Let(LetStmt { dest, src }) if
             place_name(dest) == Some("add")

@@ -35,11 +35,11 @@ fn emit_function(f: &FlatFunction, o: &mut String) -> Result<(), String> {
         writeln!(o, "    {} {name};", c_ty(ty)?).expect("write to String");
     }
     for b in &f.blocks {
-        writeln!(o, "{}:", b.label).expect("write to String");
+        writeln!(o, "{}:", b.name).expect("write to String");
         for s in &b.stmts {
             writeln!(o, "    {}", stmt(s)?).expect("write to String");
         }
-        writeln!(o, "    {}", term(&b.term)?).expect("write to String");
+        writeln!(o, "    {}", term(&b.term())?).expect("write to String");
     }
     writeln!(o, "}}").expect("write to String");
     Ok(())

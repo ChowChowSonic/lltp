@@ -2,7 +2,7 @@ use super::stmt::{LetStmt, RetStmt};
 use crate::errors::LowerError;
 use crate::hir::expr::{CallExpr, CastExpr, VarExpr};
 use crate::hir::stmt::BranchStmt;
-use crate::hir::{Expr, Stmt};
+use crate::hir::{Block, Expr, Stmt};
 use inkwell::basic_block::BasicBlock;
 use inkwell::module::Module;
 use inkwell::types::BasicTypeEnum;
@@ -13,15 +13,6 @@ use std::collections::{HashMap, HashSet};
 
 use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
 use super::ty::Ty;
-
-#[derive(Debug, Clone)]
-pub struct FlatBlock {
-    pub label: String,
-    /// Statements in source order. The terminator is kept separate so liveness
-    /// can read its successors without guessing which statement is last.
-    pub stmts: Vec<Stmt>,
-    pub term: Stmt,
-}
 
 #[derive(Debug, Clone)]
 pub struct FnSig {
@@ -38,7 +29,7 @@ pub struct FlatFunction {
     /// Every alloca slot and every instruction result, declared at function
     /// top by the emitter (so `goto` never jumps over an initialization).
     pub locals: Vec<(String, Ty)>,
-    pub blocks: Vec<FlatBlock>,
+    pub blocks: Vec<Block>,
 }
 
 #[derive(Debug, Clone)]
@@ -642,15 +633,15 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                                 let split = lnames.value(&format!("{}_to_{label}", cx.labels[bb]));
                                 // The copies happen on the edge, so the split block
                                 // falls through to its target.
-                                edge_blocks.push(FlatBlock {
-                                    label: split.clone(),
-                                    stmts: copy_stmts,
-                                    term: Stmt::Branch(BranchStmt {
+                                edge_blocks.push(Block::build(
+                                    split.clone(),
+                                    copy_stmts,
+                                    Some(Stmt::Branch(BranchStmt {
                                         cond: None,
                                         then_block: label,
                                         else_block: None,
-                                    }),
-                                });
+                                    })),
+                                ));
                                 resolved.push(split);
                             }
                         }
@@ -696,11 +687,7 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
             }
         }
         let label = cx.labels[bb].clone();
-        out_blocks.push(FlatBlock {
-            label,
-            stmts,
-            term: term.ok_or("basic block without a supported terminator")?,
-        });
+        out_blocks.push(Block::build(label, stmts, term));
     }
 
     out_blocks.extend(edge_blocks);

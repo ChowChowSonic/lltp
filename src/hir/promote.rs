@@ -56,7 +56,7 @@ pub fn promotable_slots(func: &FlatFunction) -> BTreeSet<String> {
             }
             note_escapes(src, &mut rejected);
         }
-        for e in exprs(&block.term) {
+        for e in exprs(&block.term()) {
             note_escapes(e, &mut rejected);
         }
     }
@@ -168,10 +168,10 @@ mod tests {
     use super::*;
     use crate::hir::Lit;
     use crate::hir::coalesce::coalesce;
-    use crate::hir::flat::{FlatBlock, FnSig};
+    use crate::hir::flat::FnSig;
     use crate::hir::op::UnOp;
     use crate::hir::stmt::{LetStmt, RetStmt};
-    use crate::hir::{Expr, Stmt};
+    use crate::hir::{Block, Expr, Stmt};
 
     fn i32t() -> Ty {
         Ty::Int(32, true)
@@ -233,11 +233,7 @@ mod tests {
                 .into_iter()
                 .map(|(n, t)| (n.to_string(), t))
                 .collect(),
-            blocks: vec![FlatBlock {
-                label: "entry".to_string(),
-                stmts,
-                term,
-            }],
+            blocks: vec![Block::build("entry", stmts, Some(term))],
         }
     }
 
@@ -386,10 +382,10 @@ mod tests {
         let names: Vec<&str> = f.locals.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["x"]);
         let stmts = &f.blocks[0].stmts;
-        assert_eq!(stmts.len(), 1);
+        assert_eq!(stmts.len() - 1, 1);
         assert!(writes(&stmts[0], "x"));
         assert!(
-            matches!(&f.blocks[0].term, Stmt::Ret(RetStmt { value: Some(v) }) if is_name(v, "x"))
+            matches!(f.blocks[0].term(), Stmt::Ret(RetStmt { value: Some(v) }) if is_name(v, "x"))
         );
     }
 

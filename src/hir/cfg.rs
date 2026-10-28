@@ -11,6 +11,20 @@ pub struct Block {
 }
 
 impl Block {
+    pub fn build(name: impl Into<String>, stmts: Vec<Stmt>, term: Option<Stmt>) -> Self {
+        let mut succ = Vec::new();
+        let mut pred = Vec::new();
+        let mut new_stmts: Vec<Stmt> = stmts.clone();
+        if let Some(t) = term {
+            new_stmts.push(t);
+        }
+        Block {
+            name: name.into(),
+            stmts: new_stmts,
+            succ,
+            pred,
+        }
+    }
     pub fn new(name: impl Into<String>) -> Self {
         Block {
             name: name.into(),
@@ -19,8 +33,21 @@ impl Block {
             pred: Vec::new(),
         }
     }
-    pub fn term(&self) -> Option<&Stmt> {
-        self.stmts.last()
+    pub fn term_mut(&mut self) -> &mut Stmt {
+        match self.stmts.last_mut() {
+            Some(x) => x,
+            _ => unreachable!(
+                "Attempt to retrieve the terminator of a (malformed) block with no stmts!"
+            ),
+        }
+    }
+    pub fn term(&self) -> &Stmt {
+        match self.stmts.last() {
+            Some(x) => x,
+            _ => unreachable!(
+                "Attempt to retrieve the terminator of a (malformed) block with no stmts!"
+            ),
+        }
     }
 }
 
