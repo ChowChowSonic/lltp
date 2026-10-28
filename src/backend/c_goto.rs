@@ -36,10 +36,15 @@ fn emit_function(f: &FlatFunction, o: &mut String) -> Result<(), String> {
     }
     for b in &f.blocks {
         writeln!(o, "{}:", b.name).expect("write to String");
-        for s in &b.stmts {
+        // The terminator is the block's last statement, so the body is
+        // everything before it; printing `stmts` whole would emit it twice.
+        if b.stmts.is_empty() {
+            return Err(format!("block `{}` has no terminator", b.name));
+        }
+        for s in &b.stmts[..b.stmts.len() - 1] {
             writeln!(o, "    {}", stmt(s)?).expect("write to String");
         }
-        writeln!(o, "    {}", term(&b.term())?).expect("write to String");
+        writeln!(o, "    {}", term(b.term())?).expect("write to String");
     }
     writeln!(o, "}}").expect("write to String");
     Ok(())
@@ -272,4 +277,22 @@ fn term(t: &Stmt) -> Result<String, String> {
         Stmt::Unreachable => "__builtin_unreachable();".to_string(),
         other => return Err(format!("cannot emit {other:?} as a terminator")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::build_module;
+    use crate::hir::flat::FlatModule;
+    use inkwell::context::Context;
+
+    /// The terminator is the last statement of a `Block`, so it must be printed
+    /// by `term` exactly once, not also as a body statement.
+    #[test]
+    fn terminator_is_printed_once() {
+        let ctxt = Context::create();
+        let module = build_module(&ctxt, "define i32 @f() {\nentry:\n  ret i32 1\n}\n").unwrap();
+        let flat = FlatModule::from_module(&module).expect("flat module");
+        let out = super::emit_module(&flat).expect("emit");
+        assert_eq!(out.matches("return").count(), 1, "{out}");
+    }
 }

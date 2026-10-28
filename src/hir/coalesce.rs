@@ -106,7 +106,7 @@ fn fixed_names(func: &FlatFunction) -> Names {
                 collect_slots(e, &mut fixed);
             }
         }
-        for e in exprs(&block.term()) {
+        for e in exprs(block.term()) {
             collect_slots(e, &mut fixed);
         }
     }
@@ -272,7 +272,7 @@ fn add_uses(vals: Vec<&Expr>, live: &mut Names) {
 
 fn live_in_of(block: &Block, live_out: &Names) -> Names {
     let mut live = live_out.clone();
-    add_uses(uses(&block.term()), &mut live);
+    add_uses(uses(block.term()), &mut live);
     for stmt in block.stmts.iter().rev() {
         if let Some(d) = def_name(stmt) {
             live.remove(d);
@@ -297,7 +297,7 @@ fn liveness(func: &FlatFunction) -> Vec<Names> {
         for i in (0..n).rev() {
             let block = &func.blocks[i];
             let mut out = Names::new();
-            for s in succs(&block.term()) {
+            for s in succs(block.term()) {
                 if let Some(&j) = index.get(s) {
                     out.extend(live_in[j].iter().cloned());
                 }
@@ -327,7 +327,7 @@ fn interference(func: &FlatFunction, live_out: &[Names]) -> BTreeMap<String, Nam
     let mut adj: BTreeMap<String, Names> = BTreeMap::new();
     for (block, out) in func.blocks.iter().zip(live_out) {
         let mut live = out.clone();
-        add_uses(uses(&block.term()), &mut live);
+        add_uses(uses(block.term()), &mut live);
         for stmt in block.stmts.iter().rev() {
             if let Some(d) = def_name(stmt) {
                 // The two ends of a copy are the pair this pass wants to merge,

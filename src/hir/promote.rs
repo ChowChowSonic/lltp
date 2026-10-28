@@ -56,7 +56,7 @@ pub fn promotable_slots(func: &FlatFunction) -> BTreeSet<String> {
             }
             note_escapes(src, &mut rejected);
         }
-        for e in exprs(&block.term()) {
+        for e in exprs(block.term()) {
             note_escapes(e, &mut rejected);
         }
     }

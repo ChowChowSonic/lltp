@@ -12,8 +12,8 @@ pub struct Block {
 
 impl Block {
     pub fn build(name: impl Into<String>, stmts: Vec<Stmt>, term: Option<Stmt>) -> Self {
-        let mut succ = Vec::new();
-        let mut pred = Vec::new();
+        let succ = Vec::new();
+        let pred = Vec::new();
         let mut new_stmts: Vec<Stmt> = stmts.clone();
         if let Some(t) = term {
             new_stmts.push(t);
