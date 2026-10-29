@@ -6,7 +6,6 @@ use std::collections::{BTreeSet, HashMap};
 
 struct ReBuilder {
     succ: HashMap<String, Vec<String>>,
-    pred: HashMap<String, Vec<String>>,
     all: Vec<String>,
     next: usize,
 }
@@ -25,10 +24,6 @@ impl ReBuilder {
         let s = self.succ.entry(from.to_string()).or_default();
         if !s.contains(&to.to_string()) {
             s.push(to.to_string());
-        }
-        let p = self.pred.entry(to.to_string()).or_default();
-        if !p.contains(&from.to_string()) {
-            p.push(from.to_string());
         }
     }
     fn collect_labels(&mut self, stmts: &[Stmt], labels: &mut HashMap<String, String>) {
@@ -229,6 +224,15 @@ impl ReBuilder {
                     cur = None;
                 }
 
+                Stmt::Invoke(i) => {
+                    let Some(c) = cur else { continue };
+                    // The control arm only, and only where the tree labels it:
+                    // in a straight-line region the fallthrough is implicit.
+                    if let Some(node) = labels.get(&i.normal) {
+                        self.edge(&c, node);
+                    }
+                    cur = None;
+                }
                 Stmt::Branch { .. } => unreachable!("structured input must not contain Branch"),
             }
         }
@@ -239,7 +243,6 @@ impl ReBuilder {
 pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
     let mut b = ReBuilder {
         succ: HashMap::new(),
-        pred: HashMap::new(),
         all: Vec::new(),
         next: 0,
     };
@@ -249,13 +252,7 @@ pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
     for n in &b.all {
         b.succ.entry(n.clone()).or_default();
     }
-    let exits: Vec<String> = b
-        .succ
-        .iter()
-        .filter(|(_, v)| v.is_empty())
-        .map(|(k, _)| k.clone())
-        .collect();
-    Cfg::new(entry, b.succ, b.pred, exits)
+    Cfg::from_edges(entry, b.succ)
 }
 
 pub fn color_fingerprint(cfg: &Cfg) -> String {
@@ -299,16 +296,18 @@ pub fn are_equivalent(a: &Cfg, b: &Cfg) -> bool {
 }
 
 // fresh(): "b0","b1",…
-// edge(&mut self, from, to): record both succ and pred, dedupe
+// edge(&mut self, from, to): record the successor, deduped; `pred` is derived
+// by `Cfg::from_edges`.
 
 // Returns the block the path continues from (Some), or None when the path
 // terminated (Ret / Break / Continue / Goto).
 #[cfg(test)]
 mod tests {
     use super::{are_equivalent, structured_to_cfg};
+    use crate::hir::exception_targets;
     use crate::hir::{
         Cfg, Expr, Lit, Stmt,
-        stmt::{IfStmt, LetStmt, LoopStmt, RetStmt, TryCatchStmt},
+        stmt::{IfStmt, LetStmt, LoopStmt, RetStmt},
     };
 
     fn cond() -> Expr {
@@ -469,37 +468,31 @@ declare void @pers()
         let module = crate::build_module(&ctxt, ir).expect("invoke IR should parse");
         let func_val = module.get_first_function().expect("module has a function");
 
-        // The invoke forks the graph: the normal edge to the success block and
-        // the unwind edge to the landingpad.
+        // Control edges carry the normal arm only; the unwind arm is an
+        // exception arm recorded on the node.
         let cfg = Cfg::try_from(&func_val).expect("CFG build should succeed");
         assert_eq!(cfg.entry, "entry");
-        let succs = &cfg.blocks["entry"].succ;
-        assert_eq!(succs.len(), 2);
-        assert!(succs.contains(&"ok".to_string()));
-        assert!(succs.contains(&"lp".to_string()));
-        assert_eq!(cfg.blocks["lp"].pred, vec!["entry".to_string()]);
+        assert_eq!(cfg.blocks["entry"].succ, vec!["ok".to_string()]);
+        assert_eq!(
+            exception_targets(cfg.blocks["entry"].term()),
+            vec!["lp".to_string()]
+        );
+        assert!(cfg.blocks["lp"].pred.is_empty());
+        assert_eq!(cfg.exits, vec!["end".to_string()]);
 
         let mut func =
             crate::hir::lowering::lower_function(&func_val).expect("Function lowering failed");
         let func_imut = func.clone();
 
-        // `InvokeInst` operands are [normal dest, unwind dest, callee], so the
-        // invoke must lower to a Branch with the success block as the then arm
-        // and the landingpad as the else arm.
+        // `InvokeInst` operands are [args..., normal dest, unwind dests,
+        // callee]: the node records the control arm and the exception arms.
         match &func.cfg.blocks["entry"].stmts[0] {
-            Stmt::TryCatch(TryCatchStmt {
-                try_body, catches, ..
-            }) => {
-                assert!(
-                    !catches.is_empty(),
-                    "the invoked callee failed to be recovered"
-                );
-                assert!(
-                    !try_body.is_empty(),
-                    "Try body should have at least one statement"
-                );
+            Stmt::Invoke(i) => {
+                assert_eq!(i.callee, "callee".to_string());
+                assert_eq!(i.normal, "ok".to_string());
+                assert_eq!(i.catches, vec!["lp".to_string()]);
             }
-            other => panic!("invoke should lower to a Branch, got {other:?}"),
+            other => panic!("invoke should recover to an Invoke node, got {other:?}"),
         }
 
         // A landingpad is not a recoverable statement, but its block must
@@ -508,10 +501,43 @@ declare void @pers()
         assert_eq!(lp.stmts.len(), 1);
         assert!(matches!(lp.stmts[0], Stmt::Branch { .. }));
 
-        // Structurization must not panic and must round-trip.
+        // Structurization must not panic and must round-trip the control view.
+        // `are_equivalent` fuses straight-line chains before restricting to the
+        // reachable set, so the landingpad join would be counted through the
+        // exception path; restricting to control-reachable blocks first makes the
+        // comparison the one that the tree can actually represent.
         let body = func.structurize().expect("structurization failed").to_vec();
-        assert!(matches!(body[0], Stmt::If { .. }));
-        assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(&body)));
+        assert!(matches!(body[0], Stmt::Invoke { .. }), "got {body:?}");
+        let control = crate::hir::flow::keep_reachable(&func_imut.cfg).collapse_chains();
+        assert!(are_equivalent(&control, &structured_to_cfg(&body)));
+    }
+
+    /// The canonical recovery reports exception instructions as unsupported
+    /// with a clean error rather than dropping them.
+    #[test]
+    fn canonical_recovery_reports_invoke_as_unsupported() {
+        let ir = r#"
+define void @f() personality ptr @pers {
+entry:
+  invoke void @callee() to label %ok unwind label %lp
+ok:
+  ret void
+lp:
+  %ex = landingpad ptr catch ptr null
+  ret void
+}
+
+declare void @callee()
+declare void @pers()
+"#;
+        let ctxt = inkwell::context::Context::create();
+        let module = crate::build_module(&ctxt, ir).expect("invoke IR should parse");
+        let err = crate::hir::Module::from_module(&module)
+            .expect_err("invoke must be reported as unsupported");
+        assert!(
+            err.to_string().contains("Invoke"),
+            "unexpected error: {err}"
+        );
     }
 
     /// A straight-line chain collapses down to a single block: the fused

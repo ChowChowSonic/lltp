@@ -3,16 +3,29 @@ use crate::hir::{Stmt, stmt::BranchStmt};
 use std::collections::{BTreeMap, HashMap};
 
 /// The blocks `term` can transfer control to. A terminator is the only source
-/// of edges, so recovery and the passes must agree on this one definition.
+/// of control edges, so recovery and the passes must agree on this one
+/// definition. Exception arms are not control edges: they live on the node, and
+/// `exception_targets` reports them.
 pub fn successors_of(term: &Stmt) -> Vec<String> {
-    let Stmt::Branch(b) = term else {
-        return Vec::new();
-    };
-    let mut ret = vec![b.then_block.clone()];
-    if let Some(e) = &b.else_block {
-        ret.push(e.clone());
+    match term {
+        Stmt::Branch(b) => {
+            let mut ret = vec![b.then_block.clone()];
+            if let Some(e) = &b.else_block {
+                ret.push(e.clone());
+            }
+            ret
+        }
+        Stmt::Invoke(i) => vec![i.normal.clone()],
+        _ => Vec::new(),
     }
-    ret
+}
+
+/// The exception arms of a terminator, in the order recovery recorded them.
+pub fn exception_targets(term: &Stmt) -> Vec<String> {
+    match term {
+        Stmt::Invoke(i) => i.catches.clone(),
+        _ => Vec::new(),
+    }
 }
 
 #[derive(Default, Debug, Clone, PartialEq)]
@@ -107,47 +120,62 @@ impl Cfg {
             nodes.insert((*b).to_string());
         }
         let mut succ: HashMap<String, Vec<String>> = HashMap::new();
-        let mut pred: HashMap<String, Vec<String>> = HashMap::new();
         for n in &nodes {
             succ.entry(n.clone()).or_default();
-            pred.entry(n.clone()).or_default();
         }
         for (a, b) in edges {
             succ.entry((*a).to_string())
                 .or_default()
                 .push((*b).to_string());
-            pred.entry((*b).to_string())
-                .or_default()
-                .push((*a).to_string());
         }
-        let exits: Vec<String> = nodes
-            .iter()
-            .filter(|n| succ.get(*n).is_some_and(|s| s.is_empty()))
-            .cloned()
-            .collect();
-        Cfg::new(entry.to_string(), succ, pred, exits)
+        Cfg::from_edges(entry.to_string(), succ)
     }
-    pub fn new(
-        entry: String,
-        successors: HashMap<String, Vec<String>>,
-        preds: HashMap<String, Vec<String>>,
-        exits: Vec<String>,
-    ) -> Self {
-        let mut blocks: BTreeMap<String, Block> = BTreeMap::new();
-        for (k, v) in successors {
-            let blk = blocks.entry(k.clone()).or_insert_with(|| Block::new(&k));
-            blk.succ.extend(v);
+    /// Assemble a graph from an edge list. Order is the sorted keys (no
+    /// recovery order here), `pred` and `exits` are derived from these
+    /// successors, and duplicate edges are recorded once.
+    pub fn from_edges(entry: impl Into<String>, successors: HashMap<String, Vec<String>>) -> Cfg {
+        let entry_str = entry.into();
+        let mut cfg = Cfg {
+            entry: entry_str.clone(),
+            blocks: BTreeMap::new(),
+            order: Vec::new(),
+            exits: Vec::new(),
+        };
+        for name in successors.keys().cloned().collect::<Vec<_>>() {
+            let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let mut succ: Vec<String> = Vec::new();
+            for s in successors.get(&name).cloned().unwrap_or_default() {
+                if seen.insert(s.clone()) {
+                    succ.push(s);
+                }
+            }
+            let blk = cfg
+                .blocks
+                .entry(name.clone())
+                .or_insert_with(|| Block::new(&name));
+            blk.succ = succ;
         }
-        for (k, v) in preds {
-            let blk = blocks.entry(k.clone()).or_insert_with(|| Block::new(&k));
-            blk.pred.extend(v);
+        cfg.order = cfg.blocks.keys().cloned().collect();
+        cfg.link_edges();
+        cfg
+    }
+
+    /// Assemble a graph from blocks in recovery order. `pred` and `exits` have
+    /// one producer: `link_edges`, reading the successors each terminator
+    /// recorded.
+    pub fn assemble(entry: impl Into<String>, blocks: Vec<Block>) -> Cfg {
+        let entry_str = entry.into();
+        let mut cfg = Cfg {
+            entry: entry_str,
+            blocks: BTreeMap::new(),
+            order: Vec::new(),
+            exits: Vec::new(),
+        };
+        for b in blocks {
+            cfg.push_block(b);
         }
-        Cfg {
-            order: blocks.keys().cloned().collect(),
-            entry,
-            blocks,
-            exits,
-        }
+        cfg.link_edges();
+        cfg
     }
 
     /// Construct an empty CFG with the given entry block name.
@@ -173,6 +201,8 @@ impl Cfg {
     }
 
     /// Rebuild `pred` and `exits` from the recorded successors, in `order`.
+    /// Exits are the reachable sinks, so a block LLVM emitted that nothing can
+    /// reach stays a node rather than an exit.
     pub fn link_edges(&mut self) {
         let names: Vec<String> = self.order.clone();
         for n in &names {
@@ -193,12 +223,19 @@ impl Cfg {
                 }
             }
         }
-        self.exits = names
-            .iter()
-            .filter_map(|n| self.blocks.get(n))
-            .filter(|b| b.succ.is_empty())
-            .map(|b| b.name.clone())
-            .collect();
+        let reach = crate::hir::flow::reachable(self);
+        let mut exits: Vec<String> = Vec::new();
+        for n in &self.order {
+            if !reach.contains(n) {
+                continue;
+            }
+            if let Some(b) = self.blocks.get(n)
+                && b.succ.is_empty()
+            {
+                exits.push(b.name.clone());
+            }
+        }
+        self.exits = exits;
     }
 
     /// The blocks in recovery order.
@@ -326,12 +363,7 @@ impl Cfg {
                 break;
             }
         }
-        let exits: Vec<String> = succ
-            .iter()
-            .filter(|(_, v)| v.is_empty())
-            .map(|(k, _)| k.clone())
-            .collect();
-        Cfg::new(self.entry.clone(), succ, pred, exits)
+        Cfg::from_edges(self.entry.clone(), succ)
     }
 
     /// Split a block into its prefix statements and its terminating branch.

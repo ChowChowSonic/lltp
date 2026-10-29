@@ -122,6 +122,7 @@ pub(super) fn exprs(stmt: &Stmt) -> Vec<&Expr> {
         Stmt::Eval(e) => vec![e],
         Stmt::Branch(b) => b.cond.iter().collect(),
         Stmt::Ret(r) => r.value.iter().collect(),
+        Stmt::Invoke(i) => i.args.iter().collect(),
         _ => vec![],
     }
 }
@@ -201,6 +202,11 @@ pub(super) fn uses(stmt: &Stmt) -> Vec<&Expr> {
         Stmt::Ret(r) => {
             if let Some(v) = &r.value {
                 out.push(v);
+            }
+        }
+        Stmt::Invoke(i) => {
+            for a in &i.args {
+                collect_names(a, &mut out);
             }
         }
         _ => {}
@@ -390,6 +396,13 @@ fn rename_stmt(stmt: &mut Stmt, f: &dyn Fn(&str) -> String) {
             if let Some(v) = &mut r.value {
                 rename_expr(v, f);
             }
+        }
+        Stmt::Invoke(i) => {
+            for a in &mut i.args {
+                rename_expr(a, f);
+            }
+            // `normal` and `catches` name blocks, not variables, so a variable
+            // rename must not touch them.
         }
         _ => {}
     }

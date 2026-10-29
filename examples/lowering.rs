@@ -58,6 +58,7 @@ impl StmtEmitter for ToyBackend {
             Stmt::Branch(_i) => unreachable!("raw IR branches are not emitted"),
             Stmt::Loop(_i) => unreachable!("Loops are not emitted"),
             Stmt::TryCatch(_i) => unreachable!("Try/Catch are not emitted"),
+            Stmt::Invoke(i) => self.emit_invoke(i, out),
             Stmt::Break => unreachable!("Breaks are not emitted"),
             Stmt::Continue => unreachable!("Continues are not emitted"),
             Stmt::Label(_i) => unreachable!("Labels are not emitted"),

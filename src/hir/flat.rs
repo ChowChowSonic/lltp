@@ -50,7 +50,7 @@ const C_KEYWORDS: &[&str] = &[
     "union", "unsigned", "void", "volatile", "while", "_Bool",
 ];
 
-fn sanitize(raw: &str) -> String {
+pub(crate) fn sanitize(raw: &str) -> String {
     let mut s: String = raw
         .chars()
         .map(|c| {
@@ -70,21 +70,21 @@ fn sanitize(raw: &str) -> String {
     s
 }
 
-struct Namer {
+pub(crate) struct Namer {
     used: HashSet<String>,
     next_tmp: usize,
 }
 
 impl Namer {
-    fn new(reserved: &HashSet<String>) -> Self {
+    pub(crate) fn new(reserved: &HashSet<String>) -> Self {
         Namer {
             used: reserved.clone(),
             next_tmp: 0,
         }
     }
 
-    /// Unique C identifier derived from `hint.
-    fn value(&mut self, hint: &str) -> String {
+    /// Unique C identifier derived from `hint`.
+    pub(crate) fn value(&mut self, hint: &str) -> String {
         let base = if hint.is_empty() {
             let t = format!("t{}", self.next_tmp);
             self.next_tmp += 1;
@@ -106,12 +106,38 @@ impl Namer {
     }
 }
 
+/// The label a block gets in the recovered graph: sanitized, deduped, with a
+/// positional fallback for anonymous blocks. Both graph builders must name a
+/// block the same way or the same function yields two different graphs.
+pub(crate) fn block_label(namer: &mut Namer, raw: &str, index: usize) -> String {
+    let hint = if raw.is_empty() {
+        format!("bb{index}")
+    } else {
+        raw.to_string()
+    };
+    namer.value(&hint)
+}
+
 pub(crate) fn value_name(v: &BasicValueEnum<'_>) -> String {
     match v {
         BasicValueEnum::IntValue(x) => x.get_name().to_string_lossy().into_owned(),
         BasicValueEnum::FloatValue(x) => x.get_name().to_string_lossy().into_owned(),
         BasicValueEnum::PointerValue(x) => x.get_name().to_string_lossy().into_owned(),
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anonymous_and_colliding_block_labels_are_disambiguated() {
+        let mut namer = Namer::new(&HashSet::new());
+        assert_eq!(block_label(&mut namer, "", 0), "bb0".to_string());
+        // A real label that collides with the positional fallback gets a suffix.
+        assert_eq!(block_label(&mut namer, "bb0", 1), "bb0_1".to_string());
+        assert_eq!(block_label(&mut namer, "if.then", 2), "if_then".to_string());
     }
 }
 
@@ -454,12 +480,7 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<Function, 
     let mut labels = HashMap::new();
     for (i, bb) in blocks.iter().enumerate() {
         let raw = bb.get_name().to_string_lossy().into_owned();
-        let hint = if raw.is_empty() {
-            format!("bb{i}")
-        } else {
-            raw
-        };
-        labels.insert(*bb, lnames.value(&hint));
+        labels.insert(*bb, block_label(&mut lnames, &raw, i));
     }
     // The function's entry is the first basic block LLVM emitted.
     let entry_label = labels[&blocks[0]].clone();

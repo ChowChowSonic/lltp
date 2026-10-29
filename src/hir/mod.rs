@@ -15,7 +15,7 @@ pub mod ty;
 pub mod verify;
 
 pub use crate::errors::{HirError, LowerError, StructurizeError};
-pub use cfg::{Block, Cfg};
+pub use cfg::{Block, Cfg, exception_targets, successors_of};
 pub use expr::Expr;
 pub use func::{FnSig, Function, Param};
 pub use module::Module;

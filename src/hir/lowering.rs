@@ -1,7 +1,6 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use inkwell::{
-    basic_block::BasicBlock,
     module::Module,
     values::{FunctionValue, InstructionOpcode::*, InstructionValue, Operand},
 };
@@ -9,83 +8,145 @@ use tracing::{debug, warn};
 
 use crate::errors::LowerError;
 use crate::hir::{
-    Lit,
-    cfg::Cfg,
-    expr::{BinaryExpr, CallExpr, CmpExpr, Expr, VarExpr},
+    Block, Cfg, Lit,
+    cfg::successors_of,
+    expr::{BinaryExpr, CmpExpr, Expr, VarExpr},
+    flat::{Namer, block_label},
     func::{FnSig, Function, Param},
     op::{BinOp, Cmp, FloatCmp, IntCmp},
-    stmt::{BranchStmt, CatchClause, GotoStmt, LetStmt, RetStmt, Stmt, TryCatchStmt},
+    stmt::{BranchStmt, InvokeStmt, LetStmt, RetStmt, Stmt},
     ty::Ty,
 };
 
-/// Build a CFG from an LLVM function value.
+/// Build a CFG from an LLVM function value: one block per basic block, named
+/// the way `hir::flat` names it, in the order LLVM emitted it, with control
+/// edges taken from each terminator. Exception arms are not control edges;
+/// `hir::cfg::exception_targets` reports them.
 pub fn build_graph(func: &FunctionValue) -> Result<Cfg, LowerError> {
-    let first = func
-        .get_first_basic_block()
-        .ok_or(LowerError::NoFirstBlock)?;
-    let entry_name = first.get_name().to_string_lossy().to_string();
-
-    let basic_blocks = func.get_basic_blocks();
-    let mut successors: HashMap<String, Vec<String>> = HashMap::with_capacity(basic_blocks.len());
-    let mut preds: HashMap<String, Vec<String>> = HashMap::with_capacity(basic_blocks.len());
-
-    for bb in &basic_blocks {
-        let name = bb.get_name().to_string_lossy().to_string();
-        successors.entry(name.clone()).or_default();
-        preds.entry(name).or_default();
+    let blocks = func.get_basic_blocks();
+    if blocks.is_empty() {
+        return Err(LowerError::NoFirstBlock);
     }
 
-    for bb in &basic_blocks {
-        let src_name = bb.get_name().to_string_lossy().to_string();
-        for target in get_neighbors(bb) {
-            let target_name = target.get_name().to_string_lossy().to_string();
-            successors
-                .entry(src_name.clone())
-                .or_default()
-                .push(target_name.clone());
-            preds.entry(target_name).or_default().push(src_name.clone());
-        }
+    let mut namer = Namer::new(&HashSet::new());
+    let mut raw_to_node: HashMap<String, String> = HashMap::new();
+    let mut names: Vec<String> = Vec::new();
+    for (i, bb) in blocks.iter().enumerate() {
+        let raw = bb.get_name().to_string_lossy().to_string();
+        let node = block_label(&mut namer, &raw, i);
+        raw_to_node.insert(raw, node.clone());
+        names.push(node);
     }
 
-    let exits: Vec<String> = basic_blocks
-        .iter()
-        .filter_map(|bb| {
-            let name = bb.get_name().to_string_lossy().to_string();
-            let has_succ = successors.get(&name).is_some_and(|s| !s.is_empty());
-            let has_pred = preds.get(&name).is_some_and(|p| !p.is_empty());
-            let is_first = *bb == first;
-            if (is_first || has_pred) && !has_succ {
-                Some(name)
+    let mut built: Vec<Block> = Vec::new();
+    for (i, bb) in blocks.iter().enumerate() {
+        let name = names[i].clone();
+        let termin = bb
+            .get_terminator()
+            .ok_or_else(|| LowerError::MalformedBlock(name.clone()))?;
+        let term = Stmt::try_from(termin).ok();
+
+        let mut stmts: Vec<Stmt> = Vec::new();
+        for inst in bb.get_instructions() {
+            if let Ok(s) = Stmt::try_from(inst) {
+                stmts.push(s);
+            } else if let Ok(e) = Expr::try_from(inst) {
+                let dest: String = inst
+                    .get_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .to_string();
+                let dtype = Ty::try_from(inst.get_type()).unwrap_or(Ty::Void);
+                if !dest.is_empty() {
+                    stmts.push(Stmt::Let(LetStmt {
+                        dest: Box::new(Expr::Var(VarExpr { name: dest, dtype })),
+                        src: Box::new(e),
+                    }));
+                } else {
+                    tracing::debug!("Skipping unnamed value");
+                }
             } else {
-                None
+                tracing::debug!(%name, "skipping unrecovered instruction");
             }
-        })
-        .collect();
+        }
 
-    let mut cfg = Cfg::new(entry_name, successors, preds, exits);
-    cfg.order = func
-        .get_basic_blocks()
-        .iter()
-        .enumerate()
-        .map(|(i, b)| {
-            let x = b.get_name().to_string_lossy().to_string();
-            if x.is_empty() { format!("bb{i}") } else { x }
-        })
-        .collect();
-    Ok(cfg)
+        let mut block = Block::new(name);
+        block.stmts = stmts;
+        if let Some(t) = &term {
+            // `get_instructions` may already have yielded the terminator, so the
+            // statement list is not extended twice.
+            if block.stmts.last() != Some(t) {
+                block.stmts.push(t.clone());
+            }
+        }
+        for s in &mut block.stmts {
+            resolve_block_target(s, &raw_to_node);
+        }
+        let arms = if let Some(t) = &term {
+            // Arms come from the resolved statement, not from the raw IR names.
+            successors_of(block.stmts.last().unwrap_or(t))
+        } else {
+            // No AST node for this terminator yet: a `switch`'s arms are bodies,
+            // not targets, so its edges come from the IR operand scan until the
+            // node carries an arm order.
+            let mut resolved: Vec<String> = Vec::new();
+            for target in scan_block_operands(bb) {
+                resolved.push(raw_to_node.get(&target).cloned().unwrap_or(target));
+            }
+            tracing::debug!(%block.name, "terminator has no node; edges from the IR scan");
+            resolved
+        };
+        block.succ = arms;
+        built.push(block);
+    }
+
+    Ok(Cfg::assemble(names[0].clone(), built))
 }
 
-/// Retrieve the successor basic blocks of a given basic block by inspecting its terminator.
-pub fn get_neighbors<'ctx>(bb: &BasicBlock<'ctx>) -> Vec<BasicBlock<'ctx>> {
-    //TODO: Verify this fn correctly identifies unwinding/landingpad destinations
+/// Point a terminator's arms at the graph's block names rather than the IR's,
+/// so edges and statements name the same block.
+fn resolve_block_target(stmt: &mut Stmt, map: &HashMap<String, String>) {
+    match stmt {
+        Stmt::Branch(b) => {
+            if let Some(n) = map.get(&b.then_block) {
+                b.then_block = n.clone();
+            }
+            if let Some(e) = &mut b.else_block
+                && let Some(n) = map.get(e)
+            {
+                *e = n.clone();
+            }
+        }
+        Stmt::Goto(g) => {
+            if let Some(n) = map.get(&g.target) {
+                g.target = n.clone();
+            }
+        }
+        Stmt::Invoke(i) => {
+            if let Some(n) = map.get(&i.normal) {
+                i.normal = n.clone();
+            }
+            for c in &mut i.catches {
+                if let Some(n) = map.get(c) {
+                    *c = n.clone();
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The blocks a terminator's operand list names. Used only for terminators
+/// that have no HIR node; once a node carries its arms, `successors_of` is the
+/// definition.
+fn scan_block_operands(bb: &inkwell::basic_block::BasicBlock<'_>) -> Vec<String> {
     let mut ret = Vec::new();
-    if let Some(terminator) = bb.get_terminator() {
-        for i in 0..terminator.get_num_operands() {
-            match terminator.get_operand(i) {
-                Some(Operand::Block(op)) => ret.push(op),
-                Some(Operand::Value(_)) => {}
-                None => {
-                    tracing::error!("Malformed BasicBlock operand");
+    if let Some(termin) = bb.get_terminator() {
+        for i in 0..termin.get_num_operands() {
+            if let Some(Operand::Block(op)) = termin.get_operand(i) {
+                let name = op.get_name().to_string_lossy().to_string();
+                if !ret.contains(&name) {
+                    ret.push(name);
                 }
             }
         }
@@ -116,19 +177,6 @@ pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
         }
     };
 
-    let mut stmt_blocks = Vec::new();
-    for block in val.get_basic_block_iter() {
-        let bname = block.get_name().to_string_lossy().to_string();
-        let last = block
-            .get_last_instruction()
-            .ok_or_else(|| LowerError::MissingInstruction(bname.clone()))?;
-        let stmt = Stmt::try_from(last)?;
-        stmt_blocks.push(stmt);
-    }
-
-    let mut cfg = build_graph(val)?;
-    collect_instructions(val, &mut cfg);
-
     let mut func = Function {
         sig: FnSig {
             name,
@@ -137,44 +185,12 @@ pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
             variadic: val.get_type().is_var_arg(),
         },
         locals: Vec::new(),
-        cfg,
-        body: stmt_blocks,
+        cfg: build_graph(val)?,
+        body: Vec::new(),
     };
     func.structurize()
         .map_err(|e| LowerError::Other(e.to_string()))?;
     Ok(func)
-}
-
-fn collect_instructions(val: &FunctionValue, cfg: &mut Cfg) {
-    for bb in val.get_basic_block_iter() {
-        let name = bb.get_name().to_string_lossy().to_string();
-        let mut stmts = Vec::new();
-        for inst in bb.get_instructions() {
-            if let Ok(s) = Stmt::try_from(inst) {
-                stmts.push(s); // terminators: Branch/Ret (last)
-            } else if let Ok(e) = Expr::try_from(inst) {
-                let dest: String = inst
-                    .get_name()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .to_string();
-                let dtype = Ty::try_from(inst.get_type()).unwrap_or(Ty::Void);
-                if !dest.is_empty() {
-                    stmts.push(Stmt::Let(LetStmt {
-                        dest: Box::new(Expr::Var(VarExpr { name: dest, dtype })),
-                        src: Box::new(e),
-                    }));
-                } else {
-                    tracing::debug!("Skipping unnamed value");
-                }
-            } else {
-                tracing::debug!(%name, "skipping unrecovered instruction");
-            }
-        }
-        if let Some(block) = cfg.blocks.get_mut(&name) {
-            block.stmts = stmts;
-        }
-    }
 }
 
 /// Collect and lower all functions in an LLVM module, through the canonical
@@ -272,16 +288,20 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                     }
                 }
 
-                if blocks.len() < 2 {
+                if blocks.is_empty() {
                     return Err(LowerError::MissingOperand {
                         op: "Invoke",
                         index: 0,
                     });
                 }
-                let _normal_block = blocks.remove(0);
-                let unwind_blocks: Vec<String> = blocks
-                    .into_iter()
-                    .map(|o| o.get_name().to_string_lossy().to_string())
+                // InvokeInst operands are [args..., normal dest, unwind dests,
+                // callee]: the first block is the control arm, the rest are the
+                // exception arms in operand order.
+                let normal = blocks[0].get_name().to_string_lossy().to_string();
+                let catches: Vec<String> = blocks
+                    .iter()
+                    .skip(1)
+                    .map(|b| b.get_name().to_string_lossy().to_string())
                     .collect();
                 let callee_val = value_operands
                     .pop()
@@ -291,40 +311,12 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                     let oprnd = Expr::try_from(inkwell::values::Operand::Value(v))?;
                     args.push(oprnd);
                 }
-                let call_expr = Expr::Call(CallExpr {
-                    name: callee_val.get_name().to_string_lossy().to_string(),
+                let callee_name = callee_val.get_name().to_string_lossy().to_string();
+                Ok(Stmt::Invoke(InvokeStmt {
+                    callee: callee_name,
                     args,
-                });
-                let dest_name = op
-                    .get_name()
-                    .map(|s| s.to_string_lossy().to_string())
-                    .unwrap_or_default();
-                let try_stmt = if !dest_name.is_empty() {
-                    let dtype = Ty::try_from(op.get_type()).unwrap_or(Ty::Void);
-                    Stmt::Let(LetStmt {
-                        dest: Box::new(Expr::Var(VarExpr {
-                            name: dest_name,
-                            dtype,
-                        })),
-                        src: Box::new(call_expr),
-                    })
-                } else {
-                    Stmt::Let(LetStmt {
-                        dest: Box::new(Expr::Nop),
-                        src: Box::new(call_expr),
-                    })
-                };
-                Ok(Stmt::TryCatch(TryCatchStmt {
-                    try_body: vec![try_stmt],
-                    catches: unwind_blocks
-                        .into_iter()
-                        .map(|x| CatchClause {
-                            param: None,
-                            exception_ty: None,
-                            body: vec![Stmt::Goto(GotoStmt { target: x })],
-                        })
-                        .collect(),
-                    finally_body: None,
+                    normal,
+                    catches,
                 }))
             }
             Return => {
@@ -337,6 +329,7 @@ impl<'c> TryFrom<InstructionValue<'c>> for Stmt {
                     Ok(Stmt::Ret(RetStmt { value: None }))
                 }
             }
+            Unreachable => Ok(Stmt::Unreachable),
             other => Err(LowerError::UnsupportedOpcode(format!("{other:?}"))),
         }
     }
@@ -694,6 +687,77 @@ tail:
         assert!(cfg.blocks["entry"].pred.is_empty());
     }
 
+    /// The graph keeps LLVM's emission order, which is what the goto baseline
+    /// falls through along.
+    #[test]
+    fn graph_order_follows_llvm_emission_order() {
+        let ir = r#"
+define void @f() {
+entry:
+  br label %second
+second:
+  br label %third
+third:
+  ret void
+}
+"#;
+        let cfg = build_cfg(ir);
+        assert_eq!(
+            cfg.order,
+            vec![
+                "entry".to_string(),
+                "second".to_string(),
+                "third".to_string()
+            ]
+        );
+    }
+
+    /// A dotted label is named the same way by the graph key and by the
+    /// statement that points at it, so the two paths cannot name one function
+    /// two different ways.
+    #[test]
+    fn dotted_labels_name_the_graph_and_the_statement_the_same_way() {
+        let ir = r#"
+define void @f(i1 %c) {
+entry:
+  br i1 %c, label %if.then, label %if.end
+if.then:
+  br label %if.end
+if.end:
+  ret void
+}
+"#;
+        let cfg = build_cfg(ir);
+        assert!(cfg.blocks.contains_key("if_then"));
+        assert_eq!(
+            cfg.blocks["entry"].succ,
+            vec!["if_then".to_string(), "if_end".to_string()]
+        );
+        assert_eq!(
+            cfg.blocks["if_end"].pred,
+            vec!["entry".to_string(), "if_then".to_string()]
+        );
+    }
+
+    /// An edge is recorded once, even when a terminator names the same block
+    /// twice, so `collapse_chains` and the colour fingerprint see the same
+    /// multiplicity as the other builder.
+    #[test]
+    fn a_duplicate_target_is_recorded_once() {
+        let ir = r#"
+define void @f(i32 %x) {
+entry:
+  switch i32 %x, label %join [ i32 0, label %join
+    i32 1, label %join ]
+join:
+  ret void
+}
+"#;
+        let cfg = build_cfg(ir);
+        assert_eq!(cfg.blocks["entry"].succ, vec!["join".to_string()]);
+        assert_eq!(cfg.blocks["join"].pred, vec!["entry".to_string()]);
+    }
+
     #[test]
     fn switch_terminator_edges() {
         let ir = r#"
@@ -734,9 +798,12 @@ f:
 }
 "#;
         let cfg = build_cfg(ir);
+        // Arm order is the node's: the then arm, then the else arm. LLVM stores
+        // a conditional branch as [cond, else, then], so this is not the operand
+        // order.
         assert_eq!(
             cfg.blocks["entry"].succ,
-            vec!["f".to_string(), "t".to_string()]
+            vec!["t".to_string(), "f".to_string()]
         );
         assert_eq!(cfg.blocks["t"].pred, vec!["entry".to_string()]);
         assert_eq!(cfg.blocks["f"].pred, vec!["entry".to_string()]);
@@ -831,7 +898,10 @@ nonpos:
         let func_imut = func.clone();
         let body = func.structurize().unwrap();
 
-        assert!(matches!(body[0], Stmt::If { .. }));
+        // The structured body carries the statements, so the comparison is the
+        // assignment then the fork.
+        assert!(matches!(body[0], Stmt::Let { .. }), "got {body:?}");
+        assert!(matches!(body[1], Stmt::If { .. }), "got {body:?}");
         assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(body)));
     }
 }

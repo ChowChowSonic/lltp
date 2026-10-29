@@ -54,6 +54,16 @@ pub struct GotoStmt {
 pub struct LabelStmt {
     pub name: String,
 }
+/// An `invoke`. Its arms are defined here rather than inherited from IR
+/// operand order: `normal` is the control arm, `catches` are the exception arms
+/// in the order recovery recorded them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvokeStmt {
+    pub callee: String,
+    pub args: Vec<Expr>,
+    pub normal: String,
+    pub catches: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatchClause {
     pub param: Option<VarExpr>,
@@ -90,6 +100,9 @@ pub enum Stmt {
     Goto(GotoStmt),
     Label(LabelStmt),
     TryCatch(TryCatchStmt),
+    /// `invoke`: control flows to `normal`; `catches` are exception arms, kept
+    /// out of the graph's control edges.
+    Invoke(InvokeStmt),
 }
 
 impl Stmt {

@@ -65,8 +65,9 @@ nonpos:
         assert_eq!(cfg.entry, "entry");
         assert_eq!(
             cfg.blocks["entry"].succ,
-            vec!["nonpos".to_string(), "pos".to_string()]
+            vec!["pos".to_string(), "nonpos".to_string()]
         );
+
         assert_eq!(cfg.blocks["pos"].pred, vec!["entry".to_string()]);
         assert_eq!(cfg.blocks["nonpos"].pred, vec!["entry".to_string()]);
         assert!(cfg.blocks["pos"].succ.is_empty());

@@ -2,7 +2,10 @@ use std::fmt::{self, Formatter};
 
 use crate::hir::{
     Expr, Stmt,
-    stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt, TryCatchStmt},
+    stmt::{
+        GotoStmt, IfStmt, InvokeStmt, LabelStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt,
+        TryCatchStmt,
+    },
 };
 
 pub trait StmtEmitter {
@@ -25,6 +28,7 @@ pub trait StmtEmitter {
             Stmt::Goto(i) => self.emit_goto(i, out),
             Stmt::Label(i) => self.emit_label(i, out),
             Stmt::TryCatch(i) => self.emit_try_catch(i, out),
+            Stmt::Invoke(i) => self.emit_invoke(i, out),
         }
     }
     fn emit_label(&self, stmt: &LabelStmt, out: &mut Formatter) -> fmt::Result {
@@ -99,6 +103,14 @@ pub trait StmtEmitter {
         let _ = (stmt, out);
         unreachable!(
             "`emit_try_catch` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+        )
+    }
+    /// A backend that cannot express `invoke` should report it as unsupported
+    /// rather than print control flow for an exception arm it cannot reach.
+    fn emit_invoke(&self, stmt: &InvokeStmt, out: &mut Formatter) -> fmt::Result {
+        let _ = (stmt, out);
+        unreachable!(
+            "`emit_invoke` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
         )
     }
     fn emit_thread(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
