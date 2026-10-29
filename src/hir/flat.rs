@@ -1,10 +1,10 @@
 use super::stmt::{LetStmt, RetStmt};
 use crate::errors::LowerError;
 use crate::hir::expr::{CallExpr, CastExpr, VarExpr};
+use crate::hir::func::{FnSig, Function};
 use crate::hir::stmt::BranchStmt;
-use crate::hir::{Block, Expr, Stmt};
+use crate::hir::{Block, Cfg, Expr, Param, Stmt, Ty};
 use inkwell::basic_block::BasicBlock;
-use inkwell::module::Module;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{
     BasicValueEnum, FunctionValue, InstructionOpcode as Op, InstructionValue, Operand, PhiValue,
@@ -12,65 +12,30 @@ use inkwell::values::{
 use std::collections::{HashMap, HashSet};
 
 use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
-use super::ty::Ty;
 
-#[derive(Debug, Clone)]
-pub struct FnSig {
-    pub name: String,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub variadic: bool,
+/// Recover one function: name every value, translate each instruction, then run
+/// the variable-recovery passes over the result.
+pub fn recover_function(
+    f: &FunctionValue<'_>,
+    reserved: &HashSet<String>,
+) -> Result<Function, LowerError> {
+    let mut func = build(f, reserved).map_err(|detail| LowerError::RecoverError {
+        func: f.get_name().to_string_lossy().into_owned(),
+        detail,
+    })?;
+    super::promote::promote_slots(&mut func);
+    super::coalesce::coalesce(&mut func);
+    Ok(func)
 }
 
-#[derive(Debug, Clone)]
-pub struct FlatFunction {
-    pub sig: FnSig,
-    pub param_names: Vec<String>,
-    /// Every alloca slot and every instruction result, declared at function
-    /// top by the emitter (so `goto` never jumps over an initialization).
-    pub locals: Vec<(String, Ty)>,
-    pub blocks: Vec<Block>,
-}
+impl<'c> TryFrom<&FunctionValue<'c>> for Function {
+    type Error = LowerError;
 
-#[derive(Debug, Clone)]
-pub struct FlatModule {
-    /// External declarations
-    pub decls: Vec<FnSig>,
-    pub funcs: Vec<FlatFunction>,
-}
+    fn try_from(val: &FunctionValue<'c>) -> Result<Self, Self::Error> {
+        let reserved: HashSet<String> =
+            HashSet::from([val.get_name().to_string_lossy().into_owned()]);
 
-impl FlatModule {
-    pub fn from_module(module: &Module<'_>) -> Result<Self, LowerError> {
-        // Function names are reserved so no local gets the same C identifier.
-        let reserved: HashSet<String> = module
-            .get_functions()
-            .map(|f| f.get_name().to_string_lossy().into_owned())
-            .collect();
-        let mut decls = Vec::new();
-        let mut funcs = Vec::new();
-        for f in module.get_functions() {
-            if f.count_basic_blocks() == 0 {
-                decls.push(sig_of(&f));
-            } else {
-                funcs.push(FlatFunction::from_llvm(&f, &reserved)?);
-            }
-        }
-        Ok(FlatModule { decls, funcs })
-    }
-}
-
-impl FlatFunction {
-    pub fn from_llvm(
-        f: &FunctionValue<'_>,
-        reserved: &HashSet<String>,
-    ) -> Result<Self, LowerError> {
-        let mut flat = build(f, reserved).map_err(|detail| LowerError::RecoverError {
-            func: f.get_name().to_string_lossy().into_owned(),
-            detail,
-        })?;
-        super::promote::promote_slots(&mut flat);
-        super::coalesce::coalesce(&mut flat);
-        Ok(flat)
+        recover_function(val, &reserved)
     }
 }
 
@@ -141,7 +106,7 @@ impl Namer {
     }
 }
 
-fn value_name(v: &BasicValueEnum<'_>) -> String {
+pub(crate) fn value_name(v: &BasicValueEnum<'_>) -> String {
     match v {
         BasicValueEnum::IntValue(x) => x.get_name().to_string_lossy().into_owned(),
         BasicValueEnum::FloatValue(x) => x.get_name().to_string_lossy().into_owned(),
@@ -154,11 +119,18 @@ fn value_name(v: &BasicValueEnum<'_>) -> String {
 // recovery
 // ---------------------------------------------------------------------------
 
-fn sig_of(f: &FunctionValue<'_>) -> FnSig {
+pub fn sig_of(f: &FunctionValue<'_>) -> FnSig {
     let ft = f.get_type();
     FnSig {
         name: f.get_name().to_string_lossy().into_owned(),
-        params: f.get_params().iter().map(|p| Ty::from(*p)).collect(),
+        params: f
+            .get_params()
+            .iter()
+            .map(|p| Param {
+                name: value_name(p),
+                ty: Ty::from(*p),
+            })
+            .collect(),
         ret: ft.get_return_type().map(Ty::from).unwrap_or(Ty::Void),
         variadic: ft.is_var_arg(),
     }
@@ -453,14 +425,14 @@ impl<'ctx> Cx<'ctx> {
     }
 }
 
-fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFunction, String> {
+fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<Function, String> {
     let sig = sig_of(f);
     let mut vnames = Namer::new(reserved);
     let mut lnames = Namer::new(&HashSet::new());
 
     // parameters
-    let mut param_names = Vec::new();
     let mut params = HashMap::new();
+    let mut named_params = Vec::new();
     for (i, p) in f.get_params().iter().enumerate() {
         let raw = value_name(p);
         if raw.is_empty() {
@@ -471,7 +443,10 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
         }
         let c = vnames.value(&raw);
         params.insert(raw, c.clone());
-        param_names.push(c);
+        named_params.push(Param {
+            name: c,
+            ty: Ty::from(*p),
+        });
     }
 
     // block labels
@@ -486,6 +461,8 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
         };
         labels.insert(*bb, lnames.value(&hint));
     }
+    // The function's entry is the first basic block LLVM emitted.
+    let entry_label = labels[&blocks[0]].clone();
 
     // pass 1: name every value-producing instruction
     let mut names = HashMap::new();
@@ -692,10 +669,21 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
 
     out_blocks.extend(edge_blocks);
 
-    Ok(FlatFunction {
-        sig,
-        param_names,
+    let mut cfg = Cfg::empty(entry_label);
+    for b in out_blocks {
+        cfg.push_block(b);
+    }
+    cfg.link_edges();
+
+    Ok(Function {
+        sig: FnSig {
+            name: sig.name,
+            params: named_params,
+            ret: sig.ret,
+            variadic: sig.variadic,
+        },
         locals,
-        blocks: out_blocks,
+        cfg,
+        body: Vec::new(),
     })
 }

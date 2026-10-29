@@ -10,37 +10,39 @@ use crate::hir::expr::{BinaryExpr, CallExpr, CastExpr, CmpExpr, IndexExpr, Unary
 use crate::hir::stmt::LetStmt;
 use crate::hir::{Block, Expr, Stmt};
 
-use super::flat::FlatFunction;
+use super::func::Function;
 use super::op::UnOp;
 use super::ty::Ty;
 
 type Names = BTreeSet<String>;
 
 /// Coalesce copy-related variables in `func`. Returns how many variables were merged.
-pub fn coalesce(func: &mut FlatFunction) -> usize {
+pub fn coalesce(func: &mut Function) -> usize {
     let fixed = fixed_names(func);
-    let params: Names = func.param_names.iter().cloned().collect();
+    let params: Names = func.sig.params.iter().map(|p| p.name.clone()).collect();
     // Parameters sort before every local, so a merge always keeps the parameter.
     let order: BTreeMap<String, usize> = func
-        .param_names
+        .sig
+        .params
         .iter()
+        .map(|p| &p.name)
         .chain(func.locals.iter().map(|(n, _)| n))
         .enumerate()
         .map(|(i, n)| (n.clone(), i))
         .collect();
-    let mut ty_of: BTreeMap<String, Ty> = func.locals.iter().cloned().collect();
-    ty_of.extend(
-        func.param_names
-            .iter()
-            .cloned()
-            .zip(func.sig.params.iter().cloned()),
-    );
+    let ty_of: BTreeMap<String, Ty> = func
+        .sig
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.clone()))
+        .chain(func.locals.iter().cloned())
+        .collect();
 
     let live_out = liveness(func);
     let mut adj = interference(func, &live_out);
 
     let copies: Vec<(String, String)> = func
-        .blocks
+        .blocks()
         .iter()
         .flat_map(|b| b.stmts.iter().chain(std::iter::once(b.term())))
         .filter_map(copy_pair)
@@ -82,7 +84,7 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
         return 0;
     }
     let rename = |n: &str| find(&rep, n);
-    for block in &mut func.blocks {
+    for block in func.blocks_mut() {
         for stmt in &mut block.stmts {
             rename_stmt(stmt, &rename);
         }
@@ -98,9 +100,9 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
 
 /// Names that must keep their identity: slots that are still reached through
 /// `load`/`store` or have their address taken.
-fn fixed_names(func: &FlatFunction) -> Names {
+fn fixed_names(func: &Function) -> Names {
     let mut fixed = Names::new();
-    for block in &func.blocks {
+    for block in func.blocks() {
         for stmt in &block.stmts {
             for e in exprs(stmt) {
                 collect_slots(e, &mut fixed);
@@ -251,17 +253,6 @@ fn same_name(dest: &Expr, src: &Expr) -> bool {
     }
 }
 
-fn succs(term: &Stmt) -> Vec<&str> {
-    let mut ret: Vec<&str> = vec![];
-    if let Stmt::Branch(b) = term {
-        ret.push(&b.then_block);
-        if let Some(e) = &b.else_block {
-            ret.push(e);
-        }
-    }
-    ret
-}
-
 fn add_uses(vals: Vec<&Expr>, live: &mut Names) {
     for v in vals {
         if let Expr::Var(VarExpr { name, .. }) = v {
@@ -282,23 +273,23 @@ fn live_in_of(block: &Block, live_out: &Names) -> Names {
     live
 }
 
-fn liveness(func: &FlatFunction) -> Vec<Names> {
-    let index: BTreeMap<&str, usize> = func
-        .blocks
+fn liveness(func: &Function) -> Vec<Names> {
+    let blocks = func.blocks();
+    let index: BTreeMap<&str, usize> = blocks
         .iter()
         .enumerate()
         .map(|(i, b)| (b.name.as_str(), i))
         .collect();
-    let n = func.blocks.len();
+    let n = blocks.len();
     let mut live_in = vec![Names::new(); n];
     let mut live_out = vec![Names::new(); n];
     loop {
         let mut changed = false;
         for i in (0..n).rev() {
-            let block = &func.blocks[i];
+            let block = blocks[i];
             let mut out = Names::new();
-            for s in succs(block.term()) {
-                if let Some(&j) = index.get(s) {
+            for s in block.successors() {
+                if let Some(&j) = index.get(s.as_str()) {
                     out.extend(live_in[j].iter().cloned());
                 }
             }
@@ -323,9 +314,9 @@ fn add_edge(adj: &mut BTreeMap<String, Names>, a: &str, b: &str) {
     adj.entry(b.to_string()).or_default().insert(a.to_string());
 }
 
-fn interference(func: &FlatFunction, live_out: &[Names]) -> BTreeMap<String, Names> {
+fn interference(func: &Function, live_out: &[Names]) -> BTreeMap<String, Names> {
     let mut adj: BTreeMap<String, Names> = BTreeMap::new();
-    for (block, out) in func.blocks.iter().zip(live_out) {
+    for (block, out) in func.blocks().into_iter().zip(live_out) {
         let mut live = out.clone();
         add_uses(uses(block.term()), &mut live);
         for stmt in block.stmts.iter().rev() {
@@ -407,10 +398,9 @@ fn rename_stmt(stmt: &mut Stmt, f: &dyn Fn(&str) -> String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::flat::FnSig;
     use crate::hir::op::{BinOp, Cmp, IntCmp};
     use crate::hir::stmt::{BranchStmt, LetStmt, RetStmt};
-    use crate::hir::{Block, Lit};
+    use crate::hir::{Block, Cfg, Lit, Param};
     use crate::hir::{Expr, Stmt};
 
     fn i32t() -> Ty {
@@ -485,23 +475,19 @@ mod tests {
         Block::build(label, stmts, Some(term))
     }
 
-    fn function(locals: &[&str], blocks: Vec<Block>) -> FlatFunction {
-        FlatFunction {
-            sig: FnSig {
-                name: "f".to_string(),
-                params: vec![],
-                ret: i32t(),
-                variadic: false,
-            },
-            param_names: vec![],
-            locals: locals.iter().map(|n| (n.to_string(), i32t())).collect(),
-            blocks,
+    fn function(locals: &[&str], blocks: Vec<Block>) -> Function {
+        let mut f = Function::new("f", vec![], i32t(), Cfg::empty(blocks[0].name.clone()));
+        f.locals = locals.iter().map(|n| (n.to_string(), i32t())).collect();
+        for b in blocks {
+            f.cfg.push_block(b);
         }
+        f.cfg.link_edges();
+        f
     }
 
-    fn copies_in(func: &FlatFunction) -> usize {
-        func.blocks
-            .iter()
+    fn copies_in(func: &Function) -> usize {
+        func.blocks()
+            .into_iter()
             .flat_map(|b| b.stmts.iter())
             .filter(|s| copy_pair(s).is_some())
             .count()
@@ -522,12 +508,12 @@ mod tests {
     }
 
     /// Tiny interpreter: enough to run the by-hand loops.
-    fn eval(func: &FlatFunction) -> u64 {
+    fn eval(func: &Function) -> u64 {
         let mut env: BTreeMap<String, u64> = BTreeMap::new();
-        let mut label = func.blocks[0].name.clone();
+        let blocks = func.blocks();
+        let mut label = blocks[0].name.clone();
         for _ in 0..1000 {
-            let block = func
-                .blocks
+            let block = blocks
                 .iter()
                 .find(|b| b.name == label)
                 .expect("branch to a missing block");
@@ -549,7 +535,7 @@ mod tests {
         panic!("did not terminate");
     }
 
-    fn swap_loop() -> FlatFunction {
+    fn swap_loop() -> Function {
         let done = Expr::Var(VarExpr {
             name: "done".to_string(),
             dtype: Ty::Bool,
@@ -601,7 +587,7 @@ mod tests {
         assert_eq!(names, ["a", "b", "i", "done", "phi_tmp_1"]);
         // the counter now updates in place: i = i + 1
         assert!(
-            matches!(&f.blocks[1].stmts[0], Stmt::Let(LetStmt { dest, .. }) if place_name(dest) == Some("i"))
+            matches!(&f.blocks()[1].stmts[0], Stmt::Let(LetStmt { dest, .. }) if place_name(dest) == Some("i"))
         );
     }
 
@@ -718,7 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn parameters_are_never_merged() {
+    fn a_copy_of_a_parameter_keeps_the_parameter_name() {
         let mut f = function(
             &["x"],
             vec![block(
@@ -727,9 +713,12 @@ mod tests {
                 ret(Some(var("x"))),
             )],
         );
-        f.param_names = vec!["p".to_string()];
-        assert_eq!(coalesce(&mut f), 0);
-        assert_eq!(copies_in(&f), 1);
+        f.sig.params = params(&["p"]);
+        // The parameter sorts before the local, so the merge keeps `p`.
+        assert_eq!(coalesce(&mut f), 1);
+        assert_eq!(f.param_names(), ["p".to_string()]);
+        assert!(f.locals.is_empty());
+        assert_eq!(copies_in(&f), 0);
     }
 
     #[test]
@@ -741,10 +730,19 @@ mod tests {
         assert_eq!(format!("{first:?}"), format!("{second:?}"));
     }
 
-    fn function_with_param(locals: &[&str], blocks: Vec<Block>) -> FlatFunction {
+    fn params(names: &[&str]) -> Vec<Param> {
+        names
+            .iter()
+            .map(|n| Param {
+                name: n.to_string(),
+                ty: i32t(),
+            })
+            .collect()
+    }
+
+    fn function_with_param(locals: &[&str], blocks: Vec<Block>) -> Function {
         let mut f = function(locals, blocks);
-        f.sig.params = vec![i32t()];
-        f.param_names = vec!["x".to_string()];
+        f.sig.params = params(&["x"]);
         f
     }
 
@@ -763,12 +761,12 @@ mod tests {
             )],
         );
         assert_eq!(coalesce(&mut f), 1);
-        assert_eq!(f.param_names, ["x"]);
+        assert_eq!(f.param_names(), ["x".to_string()]);
         let names: Vec<&str> = f.locals.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["add"]);
-        assert_eq!(f.blocks[0].stmts.len() - 1, 1);
+        assert_eq!(f.blocks()[0].stmts.len() - 1, 1);
         assert!(
-            matches!(&f.blocks[0].stmts[0], Stmt::Let(LetStmt { dest, src }) if
+            matches!(&f.blocks()[0].stmts[0], Stmt::Let(LetStmt { dest, src }) if
             place_name(dest) == Some("add")
                 && matches!(src.as_ref(), Expr::BinaryOp(BinaryExpr { arg1, .. }) if
                     place_name(arg1) == Some("x")))
@@ -804,8 +802,7 @@ mod tests {
                 ret(Some(var("b"))),
             )],
         );
-        f.sig.params = vec![i32t(), i32t()];
-        f.param_names = vec!["a".to_string(), "b".to_string()];
+        f.sig.params = params(&["a", "b"]);
         assert_eq!(coalesce(&mut f), 0);
         assert_eq!(copies_in(&f), 1);
     }

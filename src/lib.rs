@@ -1,4 +1,4 @@
-use inkwell::{context::Context, memory_buffer::MemoryBuffer, module::Module};
+use inkwell::{context::Context, memory_buffer::MemoryBuffer, module::Module as IrModule};
 pub mod backend;
 pub mod errors;
 pub mod frontend;
@@ -6,11 +6,11 @@ pub mod hir;
 pub mod ingest;
 pub mod passes;
 use crate::errors::{IngestError, LowerError};
-use crate::{backend::Language, hir::flat::FlatModule};
+use crate::{backend::Language, hir::Module};
 pub use ingest::{IrFormat, load_module};
 
 /// Parse textual IR
-pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Result<Module<'ctx>, IngestError> {
+pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Result<IrModule<'ctx>, IngestError> {
     let mut bytes = ir.as_bytes().to_vec();
     if bytes.last() != Some(&0) {
         bytes.push(0);
@@ -27,11 +27,11 @@ pub fn build_module<'ctx>(ctxt: &'ctx Context, ir: &str) -> Result<Module<'ctx>,
 pub fn pipeline<T: Language>(ir: &str) -> Result<(), LowerError> {
     let ctxt = Context::create();
     let module = build_module(&ctxt, ir).expect("Unable to build module");
-    let _flat = match FlatModule::from_module(&module) {
+    let _recovered = match Module::from_module(&module) {
         Ok(m) => m,
         Err(_) => {
             return Err(LowerError::Other(
-                "Failed to retrieve FlatModule from Module".to_string(),
+                "Failed to recover Module from Module".to_string(),
             ));
         }
     };

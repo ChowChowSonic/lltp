@@ -479,7 +479,8 @@ declare void @pers()
         assert!(succs.contains(&"lp".to_string()));
         assert_eq!(cfg.blocks["lp"].pred, vec!["entry".to_string()]);
 
-        let mut func = crate::hir::Function::try_from(&func_val).expect("Function lowering failed");
+        let mut func =
+            crate::hir::lowering::lower_function(&func_val).expect("Function lowering failed");
         let func_imut = func.clone();
 
         // `InvokeInst` operands are [normal dest, unwind dest, callee], so the

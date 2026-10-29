@@ -21,7 +21,7 @@ impl Lowering for SwitchToIfElse {
         if target.allows_switch() {
             return Ok(());
         }
-        info!(func = %func.name, "switch -> if/else lowering");
+        info!(func = %func.sig.name, "switch -> if/else lowering");
         func.body = lower_stmts(std::mem::take(&mut func.body));
         Ok(())
     }
@@ -87,7 +87,7 @@ mod tests {
     use crate::backend::{ExprEmitter, Language, StmtEmitter};
     use crate::hir::expr::VarExpr;
     use crate::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
-    use crate::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
+    use crate::hir::{Cfg, Expr, FnSig, Function, Lit, Param, Stmt, Ty};
     use crate::passes::{Lowering, SwitchToIfElse};
 
     struct TestLang {
@@ -158,9 +158,16 @@ mod tests {
 
     fn switch_func() -> Function {
         Function {
-            name: "f".to_string(),
-            params: vec![Ty::Int(64, true)],
-            return_ty: Ty::Int(64, true),
+            sig: FnSig {
+                name: "f".to_string(),
+                params: vec![Param {
+                    name: "x".to_string(),
+                    ty: Ty::Int(64, true),
+                }],
+                ret: Ty::Int(64, true),
+                variadic: false,
+            },
+            locals: Vec::new(),
             cfg: Cfg::default(),
             body: vec![Stmt::Switch(SwitchStmt {
                 value: Expr::Var(VarExpr {

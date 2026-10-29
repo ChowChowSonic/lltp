@@ -2,6 +2,19 @@ use crate::errors::StructurizeError;
 use crate::hir::{Stmt, stmt::BranchStmt};
 use std::collections::{BTreeMap, HashMap};
 
+/// The blocks `term` can transfer control to. A terminator is the only source
+/// of edges, so recovery and the passes must agree on this one definition.
+pub fn successors_of(term: &Stmt) -> Vec<String> {
+    let Stmt::Branch(b) = term else {
+        return Vec::new();
+    };
+    let mut ret = vec![b.then_block.clone()];
+    if let Some(e) = &b.else_block {
+        ret.push(e.clone());
+    }
+    ret
+}
+
 #[derive(Default, Debug, Clone, PartialEq)]
 pub struct Block {
     pub name: String,
@@ -12,19 +25,36 @@ pub struct Block {
 
 impl Block {
     pub fn build(name: impl Into<String>, stmts: Vec<Stmt>, term: Option<Stmt>) -> Self {
-        let succ = Vec::new();
-        let pred = Vec::new();
         let mut new_stmts: Vec<Stmt> = stmts.clone();
-        if let Some(t) = term {
-            new_stmts.push(t);
-        }
+        let succ = match &term {
+            Some(t) => {
+                let s = successors_of(t);
+                new_stmts.push(t.clone());
+                s
+            }
+            None => Vec::new(),
+        };
         Block {
             name: name.into(),
             stmts: new_stmts,
             succ,
-            pred,
+            pred: Vec::new(),
         }
     }
+
+    /// The blocks this block's terminator can transfer control to.
+    pub fn successors(&self) -> Vec<String> {
+        match self.stmts.last() {
+            Some(t) => successors_of(t),
+            None => Vec::new(),
+        }
+    }
+
+    /// Whether this block terminates the function rather than flowing on.
+    pub fn is_exit(&self) -> bool {
+        matches!(self.stmts.last(), Some(Stmt::Ret(_) | Stmt::Unreachable))
+    }
+
     pub fn new(name: impl Into<String>) -> Self {
         Block {
             name: name.into(),
@@ -55,6 +85,11 @@ impl Block {
 pub struct Cfg {
     pub entry: String,
     pub blocks: BTreeMap<String, Block>,
+    /// Blocks in recovery order. Emission and the passes depend on this order
+    /// (the goto baseline falls through from a block to its successor), so it
+    /// is kept separate from the name-keyed map; an empty `order` means the
+    /// sorted keys.
+    pub order: Vec<String>,
     pub exits: Vec<String>,
 }
 
@@ -108,6 +143,7 @@ impl Cfg {
             blk.pred.extend(v);
         }
         Cfg {
+            order: blocks.keys().cloned().collect(),
             entry,
             blocks,
             exits,
@@ -120,10 +156,76 @@ impl Cfg {
         let mut blocks = BTreeMap::new();
         blocks.insert(entry_str.clone(), Block::new(&entry_str));
         Cfg {
-            entry: entry_str,
+            entry: entry_str.clone(),
+            order: vec![entry_str],
             blocks,
             exits: Vec::new(),
         }
+    }
+
+    /// Add a block, keeping insertion order. Its successors come from its
+    /// terminator; `pred` is filled by `link_edges` once the graph is complete.
+    pub fn push_block(&mut self, block: Block) {
+        if !self.blocks.contains_key(&block.name) {
+            self.order.push(block.name.clone());
+        }
+        self.blocks.insert(block.name.clone(), block);
+    }
+
+    /// Rebuild `pred` and `exits` from the recorded successors, in `order`.
+    pub fn link_edges(&mut self) {
+        let names: Vec<String> = self.order.clone();
+        for n in &names {
+            if let Some(b) = self.blocks.get_mut(n) {
+                b.pred.clear();
+            }
+        }
+        for n in &names {
+            let Some(b) = self.blocks.get(n) else {
+                continue;
+            };
+            let succs = b.succ.clone();
+            for s in succs {
+                if let Some(t) = self.blocks.get_mut(&s)
+                    && !t.pred.contains(n)
+                {
+                    t.pred.push(n.clone());
+                }
+            }
+        }
+        self.exits = names
+            .iter()
+            .filter_map(|n| self.blocks.get(n))
+            .filter(|b| b.succ.is_empty())
+            .map(|b| b.name.clone())
+            .collect();
+    }
+
+    /// The blocks in recovery order.
+    pub fn ordered(&self) -> Vec<&Block> {
+        if self.order.is_empty() {
+            return self.blocks.values().collect();
+        }
+        self.order
+            .iter()
+            .filter_map(|n| self.blocks.get(n))
+            .collect()
+    }
+
+    /// The blocks in recovery order, mutably.
+    pub fn ordered_mut(&mut self) -> Vec<&mut Block> {
+        let mut all: Vec<&mut Block> = self.blocks.values_mut().collect();
+        if self.order.is_empty() {
+            return all;
+        }
+        let order = self.order.clone();
+        all.sort_by_key(|b| {
+            order
+                .iter()
+                .position(|n| *n == b.name)
+                .unwrap_or(order.len())
+        });
+        all
     }
 
     /// Number of blocks in this CFG.

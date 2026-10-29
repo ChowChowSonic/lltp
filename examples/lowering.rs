@@ -11,7 +11,7 @@ use lltp::backend::{ExprEmitter, Language, StmtEmitter};
 use lltp::hir::expr::{CmpExpr, VarExpr};
 use lltp::hir::op::{Cmp, IntCmp};
 use lltp::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
-use lltp::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
+use lltp::hir::{Cfg, Expr, FnSig, Function, Lit, Param, Stmt, Ty};
 use lltp::passes::SwitchToIfElse;
 
 /// A toy C-like backend that can print the small HIR subset this example
@@ -136,8 +136,8 @@ impl Language for ToyBackend {
 
     /// Entry point of the emit chain: function header, then its body block.
     fn emit_function(&self, func: &Function, out: &mut Formatter) -> fmt::Result {
-        write!(out, "int {}(", func.name)?;
-        for (i, _) in func.params.iter().enumerate() {
+        write!(out, "int {}(", func.sig.name)?;
+        for i in 0..func.sig.params.len() {
             if i > 0 {
                 write!(out, ", ")?;
             }
@@ -209,13 +209,20 @@ fn i64(v: u64) -> Lit {
     }
 }
 
-/// A `Function` built by hand — until the recovery passes (de-SSA,
-/// structuring) land in M1, this is the direct route to lowering/emission.
+/// A `Function` built by hand, so the demo runs without an LLVM module in the
+/// picture.
 fn recovered_switch() -> Function {
     Function {
-        name: "classify".to_string(),
-        params: vec![Ty::Int(64, true)],
-        return_ty: Ty::Int(64, true),
+        sig: FnSig {
+            name: "classify".to_string(),
+            params: vec![Param {
+                name: "x".to_string(),
+                ty: Ty::Int(64, true),
+            }],
+            ret: Ty::Int(64, true),
+            variadic: false,
+        },
+        locals: Vec::new(),
         cfg: Cfg::default(),
         body: vec![Stmt::Switch(SwitchStmt {
             value: Expr::Var(VarExpr {

@@ -12,7 +12,7 @@ use crate::hir::{
     Lit,
     cfg::Cfg,
     expr::{BinaryExpr, CallExpr, CmpExpr, Expr, VarExpr},
-    func::Function,
+    func::{FnSig, Function, Param},
     op::{BinOp, Cmp, FloatCmp, IntCmp},
     stmt::{BranchStmt, CatchClause, GotoStmt, LetStmt, RetStmt, Stmt, TryCatchStmt},
     ty::Ty,
@@ -62,7 +62,17 @@ pub fn build_graph(func: &FunctionValue) -> Result<Cfg, LowerError> {
         })
         .collect();
 
-    Ok(Cfg::new(entry_name, successors, preds, exits))
+    let mut cfg = Cfg::new(entry_name, successors, preds, exits);
+    cfg.order = func
+        .get_basic_blocks()
+        .iter()
+        .enumerate()
+        .map(|(i, b)| {
+            let x = b.get_name().to_string_lossy().to_string();
+            if x.is_empty() { format!("bb{i}") } else { x }
+        })
+        .collect();
+    Ok(cfg)
 }
 
 /// Retrieve the successor basic blocks of a given basic block by inspecting its terminator.
@@ -83,12 +93,21 @@ pub fn get_neighbors<'ctx>(bb: &BasicBlock<'ctx>) -> Vec<BasicBlock<'ctx>> {
     ret
 }
 
-/// Lower an LLVM function into an HIR Function.
+/// Instruction-level recovery: one statement per instruction, with no value
+/// naming, slot promotion, or de-SSA. Exception-bearing IR still takes this
+/// path, because `invoke`/`landingpad` are not recovered by the canonical
+/// value-naming recovery in `hir::flat`.
 pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
     let name = val.get_name().to_string_lossy().to_string();
-    debug!(name = %name, "recovering function");
-    let llvm_params = val.get_params();
-    let param_types: Vec<Ty> = llvm_params.iter().map(|param| Ty::from(*param)).collect();
+    debug!(name = %name, "recovering function at instruction level");
+    let params: Vec<Param> = val
+        .get_params()
+        .iter()
+        .map(|param| Param {
+            name: crate::hir::flat::value_name(param),
+            ty: Ty::from(*param),
+        })
+        .collect();
     let ret_ty = match val.get_type().get_return_type() {
         Some(x) => Ty::from(x),
         None => {
@@ -111,9 +130,13 @@ pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
     collect_instructions(val, &mut cfg);
 
     let mut func = Function {
-        name,
-        params: param_types,
-        return_ty: ret_ty,
+        sig: FnSig {
+            name,
+            params,
+            ret: ret_ty,
+            variadic: val.get_type().is_var_arg(),
+        },
+        locals: Vec::new(),
         cfg,
         body: stmt_blocks,
     };
@@ -154,36 +177,23 @@ fn collect_instructions(val: &FunctionValue, cfg: &mut Cfg) {
     }
 }
 
-/// Collect and lower all functions in an LLVM module.
+/// Collect and lower all functions in an LLVM module, through the canonical
+/// recovery in `hir::flat`.
 pub fn collect_functions(module: &Module) -> Result<Vec<Function>, LowerError> {
-    let fns = module.get_functions();
-    let mut recovered = Vec::new();
-    for f in fns {
-        recovered.push(lower_function(&f)?);
-    }
-    debug!(count = recovered.len(), "recovered functions from module");
-    Ok(recovered)
+    let recovered = crate::hir::module::Module::from_module(module)?;
+    debug!(
+        count = recovered.funcs.len(),
+        "recovered functions from module"
+    );
+    Ok(recovered.funcs)
 }
 
 // ============================================================================
 // Conversion Trait Implementations
 // ============================================================================
 
-impl<'c> TryFrom<&FunctionValue<'c>> for Function {
-    type Error = LowerError;
-
-    fn try_from(val: &FunctionValue<'c>) -> Result<Self, Self::Error> {
-        lower_function(val)
-    }
-}
-
-impl<'c> TryFrom<FunctionValue<'c>> for Function {
-    type Error = LowerError;
-
-    fn try_from(val: FunctionValue<'c>) -> Result<Self, Self::Error> {
-        Self::try_from(&val)
-    }
-}
+// `TryFrom<&FunctionValue> for Function` lives with the canonical recovery in
+// `hir::flat`; these cover the graph and the instruction-level nodes.
 
 impl<'c> TryFrom<&FunctionValue<'c>> for Cfg {
     type Error = LowerError;

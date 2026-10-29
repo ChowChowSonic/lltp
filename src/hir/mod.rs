@@ -5,6 +5,7 @@ pub mod flat;
 pub mod flow;
 pub mod func;
 pub mod lowering;
+pub mod module;
 pub mod op;
 pub mod promote;
 pub mod reaching;
@@ -16,7 +17,8 @@ pub mod verify;
 pub use crate::errors::{HirError, LowerError, StructurizeError};
 pub use cfg::{Block, Cfg};
 pub use expr::Expr;
-pub use func::Function;
+pub use func::{FnSig, Function, Param};
+pub use module::Module;
 pub use stmt::Stmt;
 pub use ty::Ty;
 

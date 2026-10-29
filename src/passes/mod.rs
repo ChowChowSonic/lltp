@@ -23,7 +23,7 @@ pub trait Lowering {
 /// target. The `Language::lower` default wraps this driver (the A-veneer).
 pub fn run_pipeline(func: &mut Function, target: &dyn Language) -> Result<(), LowerError> {
     for pass in target.pipeline() {
-        debug!(pass = pass.name(), func = %func.name, "running lowering pass");
+        debug!(pass = pass.name(), func = %func.sig.name, "running lowering pass");
         pass.apply(func, target)?;
     }
     Ok(())

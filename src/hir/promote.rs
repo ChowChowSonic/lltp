@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use super::coalesce::{children, exprs, slot_name};
 use super::expr::{Expr, UnaryExpr, VarExpr};
-use super::flat::FlatFunction;
+use super::func::Function;
 use super::op::UnOp;
 use super::stmt::LetStmt;
 use super::ty::Ty;
@@ -18,7 +18,7 @@ use crate::hir::Stmt;
 /// scalar type, and every access uses exactly that type.
 /// A slot is rejected if its address escapes (an `AddrOf` of it anywhere)
 /// or if it is accessed through a different type.
-pub fn promotable_slots(func: &FlatFunction) -> BTreeSet<String> {
+pub fn promotable_slots(func: &Function) -> BTreeSet<String> {
     let ty_of: BTreeMap<&str, &Ty> = func
         .locals
         .iter()
@@ -28,7 +28,7 @@ pub fn promotable_slots(func: &FlatFunction) -> BTreeSet<String> {
     let mut slots: BTreeSet<String> = BTreeSet::new();
     let mut rejected: BTreeSet<String> = BTreeSet::new();
 
-    for block in &func.blocks {
+    for block in func.blocks() {
         for stmt in &block.stmts {
             let Stmt::Let(LetStmt { dest, src }) = stmt else {
                 for e in exprs(stmt) {
@@ -111,7 +111,7 @@ fn value_ty(e: &Expr, ty_of: &BTreeMap<&str, &Ty>) -> Ty {
 
 /// Rewrite `ValuAt(slot)` and `AddrOf(slot)` of promotable slots into plain
 /// variable references.
-pub fn promote_slots(func: &mut FlatFunction) -> usize {
+pub fn promote_slots(func: &mut Function) -> usize {
     let slots = promotable_slots(func);
     if slots.is_empty() {
         return 0;
@@ -133,7 +133,7 @@ pub fn promote_slots(func: &mut FlatFunction) -> usize {
         }
     };
 
-    for block in &mut func.blocks {
+    for block in func.blocks_mut() {
         for stmt in &mut block.stmts {
             let Stmt::Let(LetStmt { dest, src }) = stmt else {
                 continue;
@@ -168,10 +168,9 @@ mod tests {
     use super::*;
     use crate::hir::Lit;
     use crate::hir::coalesce::coalesce;
-    use crate::hir::flat::FnSig;
     use crate::hir::op::UnOp;
     use crate::hir::stmt::{LetStmt, RetStmt};
-    use crate::hir::{Block, Expr, Stmt};
+    use crate::hir::{Block, Cfg, Expr, Stmt};
 
     fn i32t() -> Ty {
         Ty::Int(32, true)
@@ -220,21 +219,15 @@ mod tests {
         }
     }
 
-    fn function(locals: Vec<(&str, Ty)>, stmts: Vec<Stmt>, term: Stmt) -> FlatFunction {
-        FlatFunction {
-            sig: FnSig {
-                name: "f".to_string(),
-                params: vec![],
-                ret: i32t(),
-                variadic: false,
-            },
-            param_names: vec![],
-            locals: locals
-                .into_iter()
-                .map(|(n, t)| (n.to_string(), t))
-                .collect(),
-            blocks: vec![Block::build("entry", stmts, Some(term))],
-        }
+    fn function(locals: Vec<(&str, Ty)>, stmts: Vec<Stmt>, term: Stmt) -> Function {
+        let mut f = Function::new("f", vec![], i32t(), Cfg::empty("entry"));
+        f.locals = locals
+            .into_iter()
+            .map(|(n, t)| (n.to_string(), t))
+            .collect();
+        f.cfg.push_block(Block::build("entry", stmts, Some(term)));
+        f.cfg.link_edges();
+        f
     }
 
     fn ret(name: &str) -> Stmt {
@@ -343,7 +336,7 @@ mod tests {
             ret("t0"),
         );
         assert_eq!(promote_slots(&mut f), 1);
-        let stmts = &f.blocks[0].stmts;
+        let stmts = &f.blocks()[0].stmts;
         assert!(
             matches!(&stmts[0], Stmt::Let(LetStmt { dest, src }) if is_name(dest, "x") && is_literal(src))
         );
@@ -364,7 +357,7 @@ mod tests {
             ret("t0"),
         );
         assert_eq!(promote_slots(&mut f), 0);
-        let stmts = &f.blocks[0].stmts;
+        let stmts = &f.blocks()[0].stmts;
         assert!(writes(&stmts[0], "x"));
         assert!(is_deref(&stmts[2], "x"));
     }
@@ -381,11 +374,11 @@ mod tests {
 
         let names: Vec<&str> = f.locals.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["x"]);
-        let stmts = &f.blocks[0].stmts;
+        let stmts = &f.blocks()[0].stmts;
         assert_eq!(stmts.len() - 1, 1);
         assert!(writes(&stmts[0], "x"));
         assert!(
-            matches!(f.blocks[0].term(), Stmt::Ret(RetStmt { value: Some(v) }) if is_name(v, "x"))
+            matches!(f.blocks()[0].term(), Stmt::Ret(RetStmt { value: Some(v) }) if is_name(v, "x"))
         );
     }
 
