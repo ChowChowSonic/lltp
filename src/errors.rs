@@ -84,6 +84,8 @@ pub enum StructurizeError {
     ParallelJoinsNeedNodeSplitting { fork: String },
     #[error("unknown block in control flow graph: {0:?}")]
     UnknownBlock(String),
+    #[error("block {block:?} has no branch condition for the edge to {target:?}")]
+    BadBranchEdge { block: String, target: String },
 }
 
 #[derive(Error, Debug)]
