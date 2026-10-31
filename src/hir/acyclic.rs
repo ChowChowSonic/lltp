@@ -1,14 +1,14 @@
 //! Acyclic structuring (SoW 2.3.3): turn a source-to-sink region into an
-//! ordered sequence of guarded nodes. This part gives the order and writes
-//! reaching conditions as HIR expressions.
+//! ordered sequence of guarded nodes: the order, the reaching conditions
+//! written as HIR expressions, and the sequence built from both.
 
 use std::collections::BTreeSet;
 
 use crate::errors::StructurizeError;
 use crate::hir::op::BinOp;
-use crate::hir::reaching::{Cond, EdgeSet};
+use crate::hir::reaching::{Cond, EdgeSet, reaching_conditions};
 use crate::hir::stmt::BranchStmt;
-use crate::hir::{Cfg, Expr, Lit, Ty};
+use crate::hir::{Cfg, Expr, Lit, Stmt, Ty};
 
 /// Blocks of `region` reachable from `source`, in reverse postorder over the
 /// edges not in `skip`. On an acyclic region every edge points forward in
@@ -118,6 +118,89 @@ pub fn cond_to_expr(cfg: &Cfg, cond: &Cond) -> Result<Expr, StructurizeError> {
     }
 }
 
+/// Collect the blocks whose branch outcome `c` tests.
+fn tested_branches(c: &Cond, out: &mut BTreeSet<String>) {
+    match c {
+        Cond::Edge { from, .. } => {
+            out.insert(from.clone());
+        }
+        Cond::Not(inner) => tested_branches(inner, out),
+        Cond::And(terms) | Cond::Or(terms) => {
+            terms.iter().for_each(|t| tested_branches(t, out));
+        }
+        Cond::True | Cond::False => {}
+    }
+}
+
+/// Structure the region from `source` to `sink` as a flat sequence: each block
+/// in reverse postorder, its statements guarded by `if (reaching condition)`
+/// unless that condition is always true. A tested branch's condition is stored
+/// in a fresh boolean (`cond_var`) at the end of its block, and that boolean is
+/// added to `locals`. The sink's own statements are included, but whatever
+/// follows the sink is left to the caller.
+///
+/// Errors with `NotAcyclicRegion` when the region still has a cycle after
+/// skipping the edges in `skip`, when `sink` is unreachable, or when control
+/// can leave the region anywhere but the sink.
+// shortcut: every tested branch gets its own boolean even when one use would
+// do, upgrade when if/else grouping (2.3.4) leaves the extra locals cluttering
+// the output.
+pub fn structure_acyclic(
+    cfg: &Cfg,
+    source: &str,
+    sink: &str,
+    skip: &EdgeSet,
+    locals: &mut Vec<(String, Ty)>,
+) -> Result<Vec<Stmt>, StructurizeError> {
+    let bad = || StructurizeError::NotAcyclicRegion {
+        entry: source.to_string(),
+        exit: sink.to_string(),
+    };
+    let conds = reaching_conditions(cfg, source, sink, skip).ok_or_else(bad)?;
+    let region: BTreeSet<String> = conds.keys().cloned().collect();
+    if region.is_empty() {
+        return Err(bad());
+    }
+    let leaks = region.iter().filter(|n| n.as_str() != sink).any(|n| {
+        cfg.blocks[n]
+            .succ
+            .iter()
+            .any(|m| !region.contains(m) && !skip.contains(&(n.clone(), m.clone())))
+    });
+    if leaks {
+        return Err(bad());
+    }
+
+    let mut tested = BTreeSet::new();
+    for c in conds.values() {
+        tested_branches(c, &mut tested);
+    }
+
+    let mut out = Vec::new();
+    for n in reverse_postorder(cfg, source, &region, skip) {
+        let (mut body, branch) = cfg.split_block(&n)?;
+        if tested.contains(&n)
+            && let Some(BranchStmt { cond: Some(c), .. }) = branch
+        {
+            let name = cond_var(&n);
+            if !locals.iter().any(|(l, _)| *l == name) {
+                locals.push((name.clone(), Ty::Bool));
+            }
+            body.push(Stmt::let_binding(Expr::var(name, Ty::Bool), c));
+        }
+        if body.is_empty() {
+            continue;
+        }
+        if conds[&n] == Cond::True {
+            out.extend(body);
+        } else {
+            let guard = cond_to_expr(cfg, &conds[&n])?;
+            out.push(Stmt::if_then_else(guard, body, Vec::new()));
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -217,7 +300,11 @@ mod tests {
         Cfg::assemble(
             "entry",
             vec![
-                Block::build("entry", vec![], Some(branch(Some(flag("c")), "a", Some("b")))),
+                Block::build(
+                    "entry",
+                    vec![],
+                    Some(branch(Some(flag("c")), "a", Some("b"))),
+                ),
                 Block::build("a", vec![mark("a")], Some(branch(None, "join", None))),
                 Block::build("b", vec![mark("b")], Some(branch(None, "join", None))),
                 Block::build("join", vec![mark("join")], Some(Stmt::ret_void())),
@@ -248,10 +335,7 @@ mod tests {
         let cfg = diamond();
         assert_eq!(cond_to_expr(&cfg, &Cond::True), Ok(Expr::bool(true)));
         assert_eq!(cond_to_expr(&cfg, &Cond::False), Ok(Expr::bool(false)));
-        assert_eq!(
-            cond_to_expr(&cfg, &!Cond::edge("entry", "b")),
-            Ok(taken())
-        );
+        assert_eq!(cond_to_expr(&cfg, &!Cond::edge("entry", "b")), Ok(taken()));
     }
 
     #[test]
@@ -289,5 +373,100 @@ mod tests {
             cond_to_expr(&cfg, &Cond::edge("nope", "a")),
             Err(StructurizeError::UnknownBlock("nope".to_string()))
         );
+    }
+
+    fn run(cfg: &Cfg, source: &str, sink: &str) -> Result<Vec<Stmt>, StructurizeError> {
+        structure_acyclic(cfg, source, sink, &EdgeSet::new(), &mut Vec::new())
+    }
+
+    fn not_acyclic(entry: &str, exit: &str) -> StructurizeError {
+        StructurizeError::NotAcyclicRegion {
+            entry: entry.to_string(),
+            exit: exit.to_string(),
+        }
+    }
+
+    #[test]
+    fn diamond_becomes_guarded_nodes() {
+        let cfg = diamond();
+        let mut locals = Vec::new();
+        let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                Stmt::let_binding(taken(), flag("c")),
+                Stmt::if_then_else(taken(), vec![mark("a")], vec![]),
+                Stmt::if_then_else(not_taken(), vec![mark("b")], vec![]),
+                mark("join"),
+                Stmt::ret_void(),
+            ]
+        );
+        assert_eq!(locals, vec![(cond_var("entry"), Ty::Bool)]);
+    }
+
+    #[test]
+    fn straight_line_region_is_just_its_statements() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build(
+                    "entry",
+                    vec![mark("entry")],
+                    Some(branch(None, "mid", None)),
+                ),
+                Block::build("mid", vec![mark("mid")], Some(branch(None, "exit", None))),
+                Block::build("exit", vec![], Some(Stmt::ret_void())),
+            ],
+        );
+        let mut locals = Vec::new();
+        let out = structure_acyclic(&cfg, "entry", "exit", &EdgeSet::new(), &mut locals).unwrap();
+        assert_eq!(out, vec![mark("entry"), mark("mid"), Stmt::ret_void()]);
+        assert!(locals.is_empty());
+    }
+
+    #[test]
+    fn a_side_exit_makes_the_region_invalid() {
+        // `bail` leaves the function without passing through `join`.
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build(
+                    "entry",
+                    vec![],
+                    Some(branch(Some(flag("c")), "a", Some("bail"))),
+                ),
+                Block::build("a", vec![], Some(branch(None, "join", None))),
+                Block::build("bail", vec![], Some(Stmt::ret_void())),
+                Block::build("join", vec![], Some(Stmt::ret_void())),
+            ],
+        );
+        assert_eq!(
+            run(&cfg, "entry", "join"),
+            Err(not_acyclic("entry", "join"))
+        );
+    }
+
+    #[test]
+    fn a_loop_makes_the_region_invalid() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build("entry", vec![], Some(branch(None, "h", None))),
+                Block::build(
+                    "h",
+                    vec![],
+                    Some(branch(Some(flag("c")), "body", Some("exit"))),
+                ),
+                Block::build("body", vec![], Some(branch(None, "h", None))),
+                Block::build("exit", vec![], Some(Stmt::ret_void())),
+            ],
+        );
+        assert_eq!(run(&cfg, "h", "exit"), Err(not_acyclic("h", "exit")));
+    }
+
+    #[test]
+    fn unreachable_sink_makes_the_region_invalid() {
+        let cfg = diamond();
+        assert_eq!(run(&cfg, "a", "b"), Err(not_acyclic("a", "b")));
     }
 }

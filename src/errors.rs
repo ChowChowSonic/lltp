@@ -86,6 +86,8 @@ pub enum StructurizeError {
     UnknownBlock(String),
     #[error("block {block:?} has no branch condition for the edge to {target:?}")]
     BadBranchEdge { block: String, target: String },
+    #[error("region from {entry:?} to {exit:?} is not an acyclic region with a single exit")]
+    NotAcyclicRegion { entry: String, exit: String },
 }
 
 #[derive(Error, Debug)]
