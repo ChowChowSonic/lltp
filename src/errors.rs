@@ -123,5 +123,5 @@ pub enum PipelineError {
     )]
     DissallowedStmtError(String, String),
     #[error("Failed to emit function {0} due to reason:\n{1}")]
-    FunctionEmissionError(String, std::fmt::Error),
+    FunctionEmissionError(String, String),
 }

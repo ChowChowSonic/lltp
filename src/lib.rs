@@ -121,17 +121,24 @@ pub fn pipeline(lang: &impl Language, ir: &str) -> Result<String, PipelineError>
         Err(e) => return Err(e),
     }
     let mut code: String = String::new();
-    for func in &recovered.funcs {
-        match lang.emit_function(func, &mut code) {
-            Ok(_) => {
-                info!("Emitted function {}", func.sig.name);
+    for func in &mut recovered.funcs {
+        if func.structurize().is_ok() {
+            match lang.emit_function(func, &mut code) {
+                Ok(_) => {
+                    info!("Emitted function {}", func.sig.name);
+                }
+                Err(e) => {
+                    return Err(PipelineError::FunctionEmissionError(
+                        func.sig.name.to_string(),
+                        e.to_string(),
+                    ));
+                }
             }
-            Err(e) => {
-                return Err(PipelineError::FunctionEmissionError(
-                    func.sig.name.to_string(),
-                    e,
-                ));
-            }
+        } else {
+            return Err(PipelineError::FunctionEmissionError(
+                func.sig.name.to_string(),
+                "Failed to structurize the function".to_string(),
+            ));
         }
     }
     Ok(code)

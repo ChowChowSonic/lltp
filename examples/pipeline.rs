@@ -139,7 +139,8 @@ impl StmtEmitter for CLanguage {
     fn emit_assignment(&self, expr: &LetStmt, out: &mut impl Write) -> std::fmt::Result {
         self.emit_expr(&expr.dest, out)?;
         write!(out, " = ")?;
-        self.emit_expr(&expr.src, out)
+        self.emit_expr(&expr.src, out)?;
+        writeln!(out, ";")
     }
 }
 
@@ -170,7 +171,7 @@ impl ExprEmitter for CLanguage {
     }
     fn emit_literal(&self, expr: &Lit, out: &mut impl Write) -> std::fmt::Result {
         match expr {
-            Lit::Int { value, bits, .. } => write!(out, "{value}{bits}"),
+            Lit::Int { value, .. } => write!(out, "{value}"),
             Lit::Bool(b) => write!(out, "{b}"),
             Lit::Float { value, .. } => write!(out, "{value}"),
             Lit::NullPtr => write!(out, "null"),
