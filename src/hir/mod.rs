@@ -1,11 +1,11 @@
 pub mod cfg;
 pub mod coalesce;
-pub mod error;
 pub mod expr;
 pub mod flat;
 pub mod flow;
 pub mod func;
 pub mod lowering;
+pub mod module;
 pub mod op;
 pub mod promote;
 pub mod reaching;
@@ -14,11 +14,12 @@ pub mod structurize;
 pub mod ty;
 pub mod verify;
 
-pub use cfg::{Block, Cfg};
-pub use error::{HirError, LowerError, StructurizeError};
+pub use crate::errors::{HirError, LowerError, StructurizeError};
+pub use cfg::{Block, Cfg, exception_targets, successors_of};
 pub use expr::Expr;
-pub use func::Function;
-pub use stmt::{BranchInfo, Stmt};
+pub use func::{FnSig, Function, Param};
+pub use module::Module;
+pub use stmt::Stmt;
 pub use ty::Ty;
 
 #[derive(Debug, Clone, PartialEq)]

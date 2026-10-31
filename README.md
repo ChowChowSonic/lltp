@@ -26,6 +26,7 @@ instruction-level HIR is emitted back to C with one label per basic block and `g
 | Control-flow structuring (`hir::structurize`) | Implemented with unit tests; not yet wired into the C emitter |
 | `Language` trait, capability flags, `SwitchToIfElse` (2.5.1) | Done |
 | Variable recovery: phi lowering, slot promotion, coalescing (2.2.3, 2.2.4) | Done; parameters keep their names, slots fold into plain variables |
+| One HIR function shape (`hir::Function` + `hir::Module`) | Done; recovery fills `cfg` (blocks in LLVM order, edges from each terminator) and `structurize` writes `body` over it |
 | Type recovery, aggregates / GEP / globals (strings, structs, arrays) | Not started (fixtures fail cleanly) |
 | Rayon parallelism (2.1.4), Rust backend, idiom lifting | Not started |
 

@@ -1,172 +1,41 @@
-use std::collections::{HashMap, HashSet};
-use std::error::Error;
-use std::fmt;
-
+use super::stmt::{LetStmt, RetStmt};
+use crate::errors::LowerError;
+use crate::hir::expr::{CallExpr, CastExpr, VarExpr};
+use crate::hir::func::{FnSig, Function};
+use crate::hir::stmt::BranchStmt;
+use crate::hir::{Block, Cfg, Expr, Param, Stmt, Ty};
 use inkwell::basic_block::BasicBlock;
-use inkwell::module::Module;
 use inkwell::types::BasicTypeEnum;
 use inkwell::values::{
     BasicValueEnum, FunctionValue, InstructionOpcode as Op, InstructionValue, Operand, PhiValue,
 };
+use std::collections::{HashMap, HashSet};
 
-use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp};
-use super::ty::Ty;
+use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
 
-/// An operand: already resolved to a C-friendly name or a constant.
-#[derive(Debug, Clone)]
-pub enum Val {
-    /// A named local
-    Var(String, Ty),
-    Addr(String),
-    Int {
-        value: i64,
-        bits: usize,
-    },
-    Float {
-        value: f64,
-        bits: usize,
-    },
-    Null,
+/// Recover one function: name every value, translate each instruction, then run
+/// the variable-recovery passes over the result.
+pub fn recover_function(
+    f: &FunctionValue<'_>,
+    reserved: &HashSet<String>,
+) -> Result<Function, LowerError> {
+    let mut func = build(f, reserved).map_err(|detail| LowerError::RecoverError {
+        func: f.get_name().to_string_lossy().into_owned(),
+        detail,
+    })?;
+    super::promote::promote_slots(&mut func);
+    super::coalesce::coalesce(&mut func);
+    Ok(func)
 }
 
-impl Val {
-    pub fn ty(&self) -> Ty {
-        match self {
-            Val::Var(_, t) => t.clone(),
-            Val::Addr(_) | Val::Null => {
-                Ty::Ptr(Box::new(Ty::Opaque("unresolved pointee".to_string())))
-            }
-            Val::Int { bits: 1, .. } => Ty::Bool,
-            Val::Int { bits, .. } => Ty::Int(*bits, true),
-            Val::Float { bits, .. } => Ty::Float(*bits),
-        }
-    }
-}
+impl<'c> TryFrom<&FunctionValue<'c>> for Function {
+    type Error = LowerError;
 
-#[derive(Debug, Clone)]
-pub enum Inst {
-    /// `dest = *ptr` where `ptr` is an alloca slot.
-    Load { dest: String, ptr: String },
-    /// `*ptr = value` where `ptr` is an alloca slot.
-    Store { ptr: String, value: Val },
-    Bin {
-        dest: String,
-        ty: Ty,
-        op: BinOp,
-        lhs: Val,
-        rhs: Val,
-    },
-    Cmp {
-        dest: String,
-        pred: Cmp,
-        lhs: Val,
-        rhs: Val,
-    },
-    Cast {
-        dest: String,
-        ty: Ty,
-        kind: CastKind,
-        src: Val,
-    },
-    Call {
-        dest: Option<String>,
-        callee: String,
-        args: Vec<Val>,
-    },
-    /// `dest = src`: a lowered phi edge copy.
-    Copy { dest: String, src: Val },
-}
+    fn try_from(val: &FunctionValue<'c>) -> Result<Self, Self::Error> {
+        let reserved: HashSet<String> =
+            HashSet::from([val.get_name().to_string_lossy().into_owned()]);
 
-#[derive(Debug, Clone)]
-pub enum Term {
-    Br(String),
-    CondBr {
-        cond: Val,
-        then_bb: String,
-        else_bb: String,
-    },
-    Ret(Option<Val>),
-    Unreachable,
-}
-
-#[derive(Debug, Clone)]
-pub struct FlatBlock {
-    pub label: String,
-    pub insts: Vec<Inst>,
-    pub term: Term,
-}
-
-#[derive(Debug, Clone)]
-pub struct FnSig {
-    pub name: String,
-    pub params: Vec<Ty>,
-    pub ret: Ty,
-    pub variadic: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct FlatFunction {
-    pub sig: FnSig,
-    pub param_names: Vec<String>,
-    /// Every alloca slot and every instruction result, declared at function
-    /// top by the emitter (so `goto` never jumps over an initialization).
-    pub locals: Vec<(String, Ty)>,
-    pub blocks: Vec<FlatBlock>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FlatModule {
-    /// External declarations
-    pub decls: Vec<FnSig>,
-    pub funcs: Vec<FlatFunction>,
-}
-
-#[derive(Debug)]
-pub struct RecoverError {
-    pub func: String,
-    pub detail: String,
-}
-
-impl fmt::Display for RecoverError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "cannot recover `{}`: {}", self.func, self.detail)
-    }
-}
-
-impl Error for RecoverError {}
-
-impl FlatModule {
-    pub fn from_module(module: &Module<'_>) -> Result<Self, RecoverError> {
-        // Function names are reserved so no local gets the same C identifier.
-        let reserved: HashSet<String> = module
-            .get_functions()
-            .map(|f| f.get_name().to_string_lossy().into_owned())
-            .collect();
-        let mut decls = Vec::new();
-        let mut funcs = Vec::new();
-        for f in module.get_functions() {
-            if f.count_basic_blocks() == 0 {
-                decls.push(sig_of(&f));
-            } else {
-                funcs.push(FlatFunction::from_llvm(&f, &reserved)?);
-            }
-        }
-        Ok(FlatModule { decls, funcs })
-    }
-}
-
-impl FlatFunction {
-    pub fn from_llvm(
-        f: &FunctionValue<'_>,
-        reserved: &HashSet<String>,
-    ) -> Result<Self, RecoverError> {
-        let mut flat = build(f, reserved).map_err(|detail| RecoverError {
-            func: f.get_name().to_string_lossy().into_owned(),
-            detail,
-        })?;
-        super::promote::promote_slots(&mut flat);
-        super::coalesce::coalesce(&mut flat);
-        Ok(flat)
+        recover_function(val, &reserved)
     }
 }
 
@@ -181,7 +50,7 @@ const C_KEYWORDS: &[&str] = &[
     "union", "unsigned", "void", "volatile", "while", "_Bool",
 ];
 
-fn sanitize(raw: &str) -> String {
+pub(crate) fn sanitize(raw: &str) -> String {
     let mut s: String = raw
         .chars()
         .map(|c| {
@@ -201,21 +70,21 @@ fn sanitize(raw: &str) -> String {
     s
 }
 
-struct Namer {
+pub(crate) struct Namer {
     used: HashSet<String>,
     next_tmp: usize,
 }
 
 impl Namer {
-    fn new(reserved: &HashSet<String>) -> Self {
+    pub(crate) fn new(reserved: &HashSet<String>) -> Self {
         Namer {
             used: reserved.clone(),
             next_tmp: 0,
         }
     }
 
-    /// Unique C identifier derived from `hint.
-    fn value(&mut self, hint: &str) -> String {
+    /// Unique C identifier derived from `hint`.
+    pub(crate) fn value(&mut self, hint: &str) -> String {
         let base = if hint.is_empty() {
             let t = format!("t{}", self.next_tmp);
             self.next_tmp += 1;
@@ -237,7 +106,19 @@ impl Namer {
     }
 }
 
-fn value_name(v: &BasicValueEnum<'_>) -> String {
+/// The label a block gets in the recovered graph: sanitized, deduped, with a
+/// positional fallback for anonymous blocks. Both graph builders must name a
+/// block the same way or the same function yields two different graphs.
+pub(crate) fn block_label(namer: &mut Namer, raw: &str, index: usize) -> String {
+    let hint = if raw.is_empty() {
+        format!("bb{index}")
+    } else {
+        raw.to_string()
+    };
+    namer.value(&hint)
+}
+
+pub(crate) fn value_name(v: &BasicValueEnum<'_>) -> String {
     match v {
         BasicValueEnum::IntValue(x) => x.get_name().to_string_lossy().into_owned(),
         BasicValueEnum::FloatValue(x) => x.get_name().to_string_lossy().into_owned(),
@@ -246,15 +127,36 @@ fn value_name(v: &BasicValueEnum<'_>) -> String {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn anonymous_and_colliding_block_labels_are_disambiguated() {
+        let mut namer = Namer::new(&HashSet::new());
+        assert_eq!(block_label(&mut namer, "", 0), "bb0".to_string());
+        // A real label that collides with the positional fallback gets a suffix.
+        assert_eq!(block_label(&mut namer, "bb0", 1), "bb0_1".to_string());
+        assert_eq!(block_label(&mut namer, "if.then", 2), "if_then".to_string());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // recovery
 // ---------------------------------------------------------------------------
 
-fn sig_of(f: &FunctionValue<'_>) -> FnSig {
+pub fn sig_of(f: &FunctionValue<'_>) -> FnSig {
     let ft = f.get_type();
     FnSig {
         name: f.get_name().to_string_lossy().into_owned(),
-        params: f.get_params().iter().map(|p| Ty::from(*p)).collect(),
+        params: f
+            .get_params()
+            .iter()
+            .map(|p| Param {
+                name: value_name(p),
+                ty: Ty::from(*p),
+            })
+            .collect(),
         ret: ft.get_return_type().map(Ty::from).unwrap_or(Ty::Void),
         variadic: ft.is_var_arg(),
     }
@@ -287,14 +189,14 @@ fn phi_ty(inst: InstructionValue<'_>) -> Result<Ty, String> {
 }
 
 /// Incoming `(dest, type, [(predecessor, value)])` for each phi of a block.
-type PhiIn<'ctx> = Vec<(String, Ty, Vec<(BasicBlock<'ctx>, Val)>)>;
+type PhiIn<'ctx> = Vec<(String, Ty, Vec<(BasicBlock<'ctx>, Expr)>)>;
 
 /// The `(phi local, type, incoming value)` copies for the edge `from -> to`.
 fn edge_copies<'ctx>(
     phis: &HashMap<BasicBlock<'ctx>, PhiIn<'ctx>>,
     from: BasicBlock<'ctx>,
     to: BasicBlock<'ctx>,
-) -> Result<Vec<(String, Ty, Val)>, String> {
+) -> Result<Vec<(String, Ty, Expr)>, String> {
     let mut out = Vec::new();
     for (dest, ty, incoming) in phis.get(&to).into_iter().flatten() {
         let (_, v) = incoming.iter().find(|(b, _)| *b == from).ok_or_else(|| {
@@ -310,38 +212,59 @@ fn edge_copies<'ctx>(
 
 /// Sequentialize one edge's parallel phi copies.
 fn parallel_copy(
-    copies: Vec<(String, Ty, Val)>,
+    copies: Vec<(String, Ty, Expr)>,
     vnames: &mut Namer,
     locals: &mut Vec<(String, Ty)>,
-) -> Vec<Inst> {
+) -> Vec<Stmt> {
     let dests: HashSet<String> = copies.iter().map(|(d, _, _)| d.clone()).collect();
     let mut saves = Vec::new();
-    let mut copy_insts = Vec::new();
-    for (dest, _, src) in &copies {
-        if let Val::Var(n, _) = src
+    let mut copy_stmts = Vec::new();
+    for (dest, ty, src) in &copies {
+        if let Expr::Var(VarExpr { name: n, .. }) = src
             && n == dest
         {
             continue;
         }
         let src = match src {
-            Val::Var(n, vty) if dests.contains(n) => {
+            Expr::Var(VarExpr {
+                name: n,
+                dtype: vty,
+            }) if dests.contains(n) => {
                 let tmp = vnames.value("phi_tmp");
                 locals.push((tmp.clone(), vty.clone()));
-                saves.push(Inst::Copy {
-                    dest: tmp.clone(),
-                    src: src.clone(),
-                });
-                Val::Var(tmp, vty.clone())
+                saves.push(assign(
+                    Expr::Var(VarExpr {
+                        name: tmp.clone(),
+                        dtype: vty.clone(),
+                    }),
+                    src.clone(),
+                ));
+                Expr::Var(VarExpr {
+                    name: tmp,
+                    dtype: vty.clone(),
+                })
             }
             other => other.clone(),
         };
-        copy_insts.push(Inst::Copy {
-            dest: dest.clone(),
+        copy_stmts.push(assign(
+            Expr::Var(VarExpr {
+                name: dest.clone(),
+                dtype: ty.clone(),
+            }),
             src,
-        });
+        ));
     }
-    saves.extend(copy_insts);
+    saves.extend(copy_stmts);
     saves
+}
+
+/// `dest = src` as a statement. `dest` is a place: a plain name, or
+/// `AddrOf(name)` when it is a memory cell.
+fn assign(dest: Expr, src: Expr) -> Stmt {
+    Stmt::Let(LetStmt {
+        dest: Box::new(dest),
+        src: Box::new(src),
+    })
 }
 
 #[derive(PartialEq)]
@@ -402,6 +325,9 @@ struct Cx<'ctx> {
     names: HashMap<InstructionValue<'ctx>, String>,
     params: HashMap<String, String>,
     labels: HashMap<BasicBlock<'ctx>, String>,
+    /// Recorded type of every named local, so a `VarExpr` carries the type the
+    /// pass 1 named it with rather than re-deriving it from the operand.
+    types: HashMap<String, Ty>,
 }
 
 impl<'ctx> Cx<'ctx> {
@@ -410,6 +336,14 @@ impl<'ctx> Cx<'ctx> {
             .get(&inst)
             .cloned()
             .ok_or_else(|| format!("no name recorded for `{:?}`", inst.get_opcode()))
+    }
+
+    /// A reference to a recorded local.
+    fn var(&self, name: &str) -> Expr {
+        Expr::Var(VarExpr {
+            name: name.to_string(),
+            dtype: self.types.get(name).cloned().unwrap_or(Ty::Void),
+        })
     }
 
     fn param(&self, raw: &str) -> Result<String, String> {
@@ -443,50 +377,73 @@ impl<'ctx> Cx<'ctx> {
         )
     }
 
-    fn val(&self, op: Option<Operand<'ctx>>) -> Result<Val, String> {
+    fn val(&self, op: Option<Operand<'ctx>>) -> Result<Expr, String> {
         let bve = op
             .and_then(|o| o.value())
             .ok_or("missing or non-value operand")?;
         match bve {
             BasicValueEnum::IntValue(i) => {
                 if let Some(inst) = i.as_instruction() {
-                    Ok(Val::Var(self.name(inst)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.name(inst)?,
+                        dtype: Ty::from(bve),
+                    }))
                 } else if i.is_const() {
                     let bits = i.get_type().get_bit_width() as usize;
                     let value = i
                         .get_sign_extended_constant()
                         .ok_or("integer constant wider than 64 bits")?;
-                    Ok(Val::Int { value, bits })
+                    Ok(Expr::Literal(super::Lit::Int {
+                        value: value as u64,
+                        bits,
+                        signed: true,
+                    }))
                 } else {
                     let raw = i.get_name().to_string_lossy().into_owned();
-                    Ok(Val::Var(self.param(&raw)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.param(&raw)?,
+                        dtype: Ty::from(bve),
+                    }))
                 }
             }
             BasicValueEnum::FloatValue(f) => {
                 if let Some(inst) = f.as_instruction() {
-                    Ok(Val::Var(self.name(inst)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.name(inst)?,
+                        dtype: Ty::from(bve),
+                    }))
                 } else if f.is_const() {
                     let bits = f.get_type().get_bit_width() as usize;
                     let (value, _lossy) = f.get_constant().ok_or("unreadable float constant")?;
-                    Ok(Val::Float { value, bits })
+                    Ok(Expr::Literal(super::Lit::Float { bits, value }))
                 } else {
                     let raw = f.get_name().to_string_lossy().into_owned();
-                    Ok(Val::Var(self.param(&raw)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.param(&raw)?,
+                        dtype: Ty::from(bve),
+                    }))
                 }
             }
             BasicValueEnum::PointerValue(p) => {
                 if let Some(inst) = p.as_instruction() {
                     let n = self.name(inst)?;
                     if inst.get_opcode() == Op::Alloca {
-                        Ok(Val::Addr(n))
+                        // An alloca used as a value is the cell itself.
+                        Ok(Expr::unary(UnOp::AddrOf, self.var(&n)))
                     } else {
-                        Ok(Val::Var(n, Ty::from(bve)))
+                        Ok(Expr::Var(VarExpr {
+                            name: n,
+                            dtype: Ty::from(bve),
+                        }))
                     }
                 } else if p.is_null() {
-                    Ok(Val::Null)
+                    Ok(Expr::Literal(super::Lit::NullPtr))
                 } else {
                     let raw = p.get_name().to_string_lossy().into_owned();
-                    Ok(Val::Var(self.param(&raw)?, Ty::from(bve)))
+                    Ok(Expr::Var(VarExpr {
+                        name: self.param(&raw)?,
+                        dtype: Ty::from(bve),
+                    }))
                 }
             }
             _ => Err("unsupported operand kind (struct/vector/array value)".to_string()),
@@ -494,14 +451,14 @@ impl<'ctx> Cx<'ctx> {
     }
 }
 
-fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFunction, String> {
+fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<Function, String> {
     let sig = sig_of(f);
     let mut vnames = Namer::new(reserved);
     let mut lnames = Namer::new(&HashSet::new());
 
     // parameters
-    let mut param_names = Vec::new();
     let mut params = HashMap::new();
+    let mut named_params = Vec::new();
     for (i, p) in f.get_params().iter().enumerate() {
         let raw = value_name(p);
         if raw.is_empty() {
@@ -512,7 +469,10 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
         }
         let c = vnames.value(&raw);
         params.insert(raw, c.clone());
-        param_names.push(c);
+        named_params.push(Param {
+            name: c,
+            ty: Ty::from(*p),
+        });
     }
 
     // block labels
@@ -520,13 +480,10 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
     let mut labels = HashMap::new();
     for (i, bb) in blocks.iter().enumerate() {
         let raw = bb.get_name().to_string_lossy().into_owned();
-        let hint = if raw.is_empty() {
-            format!("bb{i}")
-        } else {
-            raw
-        };
-        labels.insert(*bb, lnames.value(&hint));
+        labels.insert(*bb, block_label(&mut lnames, &raw, i));
     }
+    // The function's entry is the first basic block LLVM emitted.
+    let entry_label = labels[&blocks[0]].clone();
 
     // pass 1: name every value-producing instruction
     let mut names = HashMap::new();
@@ -553,10 +510,13 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
         }
     }
 
+    let types: HashMap<String, Ty> = locals.iter().cloned().collect();
+
     let cx = Cx {
         names,
         params,
         labels,
+        types,
     };
 
     // phi incoming values per block (needs `cx` to resolve operands)
@@ -584,38 +544,44 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
     let mut out_blocks = Vec::new();
     let mut edge_blocks = Vec::new();
     for bb in &blocks {
-        let mut insts = Vec::new();
+        let mut stmts = Vec::new();
         let mut term = None;
         for inst in bb.get_instructions() {
             let opc = inst.get_opcode();
             let opnd = |i: u32| inst.get_operand(i);
             match opc {
                 Op::Alloca => {}
-                Op::Load => insts.push(Inst::Load {
-                    dest: cx.name(inst)?,
-                    ptr: cx.slot(opnd(0))?,
-                }),
-                Op::Store => insts.push(Inst::Store {
-                    value: cx.val(opnd(0))?,
-                    ptr: cx.slot(opnd(1))?,
-                }),
+                Op::Load => {
+                    let dest = cx.var(&cx.name(inst)?);
+                    let slot = cx.slot(opnd(0))?;
+                    stmts.push(assign(dest, Expr::unary(UnOp::ValuAt, cx.var(&slot))));
+                }
+                Op::Store => {
+                    let value = cx.val(opnd(0))?;
+                    let slot = cx.slot(opnd(1))?;
+                    stmts.push(assign(Expr::unary(UnOp::AddrOf, cx.var(&slot)), value));
+                }
                 Op::ICmp => {
                     let p = inst.get_icmp_predicate().ok_or("icmp without predicate")?;
-                    insts.push(Inst::Cmp {
-                        dest: cx.name(inst)?,
-                        pred: Cmp::Int(IntCmp::from(p)),
-                        lhs: cx.val(opnd(0))?,
-                        rhs: cx.val(opnd(1))?,
-                    });
+                    stmts.push(assign(
+                        cx.var(&cx.name(inst)?),
+                        Expr::cmp(
+                            Cmp::Int(IntCmp::from(p)),
+                            cx.val(opnd(0))?,
+                            cx.val(opnd(1))?,
+                        ),
+                    ));
                 }
                 Op::FCmp => {
                     let p = inst.get_fcmp_predicate().ok_or("fcmp without predicate")?;
-                    insts.push(Inst::Cmp {
-                        dest: cx.name(inst)?,
-                        pred: Cmp::Float(FloatCmp::from(p)),
-                        lhs: cx.val(opnd(0))?,
-                        rhs: cx.val(opnd(1))?,
-                    });
+                    stmts.push(assign(
+                        cx.var(&cx.name(inst)?),
+                        Expr::cmp(
+                            Cmp::Float(FloatCmp::from(p)),
+                            cx.val(opnd(0))?,
+                            cx.val(opnd(1))?,
+                        ),
+                    ));
                 }
                 Op::Call => match call_kind(inst)? {
                     CallKind::Skip => {}
@@ -624,15 +590,14 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                         let args = (0..n - 1)
                             .map(|i| cx.val(opnd(i)))
                             .collect::<Result<Vec<_>, _>>()?;
-                        insts.push(Inst::Call {
-                            dest: if kind == CallKind::Value {
-                                Some(cx.name(inst)?)
-                            } else {
-                                None
-                            },
-                            callee: callee_name(inst)?,
+                        let call = Expr::Call(CallExpr {
+                            name: callee_name(inst)?,
                             args,
                         });
+                        match kind {
+                            CallKind::Value => stmts.push(assign(cx.var(&cx.name(inst)?), call)),
+                            _ => stmts.push(Stmt::Eval(call)),
+                        }
                     }
                 },
                 Op::Phi => {}
@@ -642,8 +607,12 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                             .and_then(|o| o.block())
                             .ok_or("expected a block operand")?;
                         let copies = edge_copies(&phis, *bb, target)?;
-                        insts.extend(parallel_copy(copies, &mut vnames, &mut locals));
-                        term = Some(Term::Br(cx.label(opnd(0))?));
+                        stmts.extend(parallel_copy(copies, &mut vnames, &mut locals));
+                        term = Some(Stmt::Branch(BranchStmt {
+                            cond: None,
+                            then_block: cx.label(opnd(0))?,
+                            else_block: None,
+                        }));
                     }
                     // LLVM operand order for a conditional br: cond, false, true
                     3 => {
@@ -655,53 +624,60 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
                                 .ok_or("expected a block operand")?;
                             let label = cx.label(opnd(idx))?;
                             let copies = edge_copies(&phis, *bb, target)?;
-                            let copy_insts = parallel_copy(copies, &mut vnames, &mut locals);
-                            if copy_insts.is_empty() {
+                            let copy_stmts = parallel_copy(copies, &mut vnames, &mut locals);
+                            if copy_stmts.is_empty() {
                                 resolved.push(label);
                             } else {
                                 let split = lnames.value(&format!("{}_to_{label}", cx.labels[bb]));
-                                edge_blocks.push(FlatBlock {
-                                    label: split.clone(),
-                                    insts: copy_insts,
-                                    term: Term::Br(label),
-                                });
+                                // The copies happen on the edge, so the split block
+                                // falls through to its target.
+                                edge_blocks.push(Block::build(
+                                    split.clone(),
+                                    copy_stmts,
+                                    Some(Stmt::Branch(BranchStmt {
+                                        cond: None,
+                                        then_block: label,
+                                        else_block: None,
+                                    })),
+                                ));
                                 resolved.push(split);
                             }
                         }
                         let else_bb = resolved.pop().ok_or("conditional br lost its targets")?;
                         let then_bb = resolved.pop().ok_or("conditional br lost its targets")?;
-                        term = Some(Term::CondBr {
-                            cond,
-                            then_bb,
-                            else_bb,
-                        });
+                        term = Some(Stmt::Branch(BranchStmt {
+                            cond: Some(cond),
+                            then_block: then_bb,
+                            else_block: Some(else_bb),
+                        }));
                     }
                     n => return Err(format!("br with {n} operands")),
                 },
                 Op::Return => {
                     term = Some(if inst.get_num_operands() == 0 {
-                        Term::Ret(None)
+                        Stmt::Ret(RetStmt { value: None })
                     } else {
-                        Term::Ret(Some(cx.val(opnd(0))?))
+                        Stmt::Ret(RetStmt {
+                            value: cx.val(opnd(0)).ok(),
+                        })
                     });
                 }
-                Op::Unreachable => term = Some(Term::Unreachable),
+                Op::Unreachable => term = Some(Stmt::Unreachable),
                 other => {
                     if let Some(kind) = CastKind::from_opcode(other) {
-                        insts.push(Inst::Cast {
-                            dest: cx.name(inst)?,
-                            ty: result_ty(inst)?,
-                            kind,
-                            src: cx.val(opnd(0))?,
-                        });
+                        stmts.push(assign(
+                            cx.var(&cx.name(inst)?),
+                            Expr::Cast(CastExpr {
+                                data: Box::new(cx.val(opnd(0))?),
+                                dtype: result_ty(inst)?,
+                                kind,
+                            }),
+                        ));
                     } else if let Some(op) = BinOp::from_opcode(other) {
-                        insts.push(Inst::Bin {
-                            dest: cx.name(inst)?,
-                            ty: result_ty(inst)?,
-                            op,
-                            lhs: cx.val(opnd(0))?,
-                            rhs: cx.val(opnd(1))?,
-                        });
+                        stmts.push(assign(
+                            cx.var(&cx.name(inst)?),
+                            Expr::binary(op, cx.val(opnd(0))?, cx.val(opnd(1))?),
+                        ));
                     } else {
                         return Err(format!("unsupported instruction `{other:?}`"));
                     }
@@ -709,19 +685,26 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<FlatFuncti
             }
         }
         let label = cx.labels[bb].clone();
-        out_blocks.push(FlatBlock {
-            label,
-            insts,
-            term: term.ok_or("basic block without a supported terminator")?,
-        });
+        out_blocks.push(Block::build(label, stmts, term));
     }
 
     out_blocks.extend(edge_blocks);
 
-    Ok(FlatFunction {
-        sig,
-        param_names,
+    let mut cfg = Cfg::empty(entry_label);
+    for b in out_blocks {
+        cfg.push_block(b);
+    }
+    cfg.link_edges();
+
+    Ok(Function {
+        sig: FnSig {
+            name: sig.name,
+            params: named_params,
+            ret: sig.ret,
+            variadic: sig.variadic,
+        },
         locals,
-        blocks: out_blocks,
+        cfg,
+        body: Vec::new(),
     })
 }

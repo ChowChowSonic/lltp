@@ -11,7 +11,7 @@ use inkwell::context::Context;
 use lltp::backend::c_goto;
 use lltp::build_module;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
-use lltp::hir::flat::FlatModule;
+use lltp::hir::Module;
 
 fn main() -> ExitCode {
     let mut file: Option<PathBuf> = None;
@@ -40,7 +40,7 @@ fn main() -> ExitCode {
     let ctxt = Context::create();
     let module = build_module(&ctxt, &compiled.ir).expect("Unable to build module");
 
-    let flat = match FlatModule::from_module(&module) {
+    let flat = match Module::from_module(&module) {
         Ok(m) => m,
         Err(e) => {
             eprintln!("recovery failed: {e}");

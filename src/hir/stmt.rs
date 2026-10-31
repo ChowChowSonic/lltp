@@ -1,14 +1,6 @@
 use crate::hir::{Expr, Lit, Ty, expr::VarExpr};
 
-/// Information extracted from a basic block's terminating branch.
-#[derive(Debug, Clone, PartialEq)]
-pub struct BranchInfo {
-    pub cond: Option<Expr>,
-    pub then_block: String,
-    pub else_block: Option<String>,
-}
-
-impl BranchInfo {
+impl BranchStmt {
     pub fn is_conditional(&self) -> bool {
         self.cond.is_some()
     }
@@ -62,6 +54,16 @@ pub struct GotoStmt {
 pub struct LabelStmt {
     pub name: String,
 }
+/// An `invoke`. Its arms are defined here rather than inherited from IR
+/// operand order: `normal` is the control arm, `catches` are the exception arms
+/// in the order recovery recorded them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InvokeStmt {
+    pub callee: String,
+    pub args: Vec<Expr>,
+    pub normal: String,
+    pub catches: Vec<String>,
+}
 #[derive(Debug, Clone, PartialEq)]
 pub struct CatchClause {
     pub param: Option<VarExpr>,
@@ -84,8 +86,13 @@ pub enum Stmt {
     /// Structured switch, produced by recovery; lowered to `If` chains when
     /// the target cannot express it (`Language::allows_switch`).
     Switch(SwitchStmt),
-    /// Represents a new SSA binding.
+    /// Represents a new SSA binding. `dest` is a place: either a plain name or
+    /// `AddrOf(name)` when the target is a memory cell.
     Let(LetStmt),
+    /// Evaluate an expression for its effect only — a void call has no def.
+    Eval(Expr),
+    /// `unreachable`: a block that cannot be entered.
+    Unreachable,
     /// Structured loop with an optional pre-condition (`while (cond)` or infinite `loop`).
     Loop(LoopStmt),
     Break,
@@ -93,6 +100,9 @@ pub enum Stmt {
     Goto(GotoStmt),
     Label(LabelStmt),
     TryCatch(TryCatchStmt),
+    /// `invoke`: control flows to `normal`; `catches` are exception arms, kept
+    /// out of the graph's control edges.
+    Invoke(InvokeStmt),
 }
 
 impl Stmt {

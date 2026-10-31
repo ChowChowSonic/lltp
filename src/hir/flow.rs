@@ -1,6 +1,7 @@
 use crate::hir::{
     Block, Cfg, Expr, Lit, Stmt, Ty,
-    expr::{BinaryExpr, VarExpr},
+    expr::VarExpr,
+    op::{Cmp, IntCmp},
     stmt::{BranchStmt, LetStmt, SwitchStmt},
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
@@ -13,25 +14,13 @@ const VIRTUAL_SINK_STR: &str = "xXVIRTUAL_SINKXx";
 impl From<&Cfg> for PostDomInfo {
     fn from(cfg: &Cfg) -> Self {
         let mut rev_succ: HashMap<String, Vec<String>> = HashMap::new();
-        let mut rev_pred: HashMap<String, Vec<String>> = HashMap::new();
         for (name, block) in &cfg.blocks {
             rev_succ.insert(name.clone(), block.pred.clone());
-            rev_pred.insert(name.clone(), block.succ.clone());
         }
+        // The virtual sink is the reverse-graph entry; the exits hang off it so
+        // that `idom(exit) == sink` in the reverse graph.
         rev_succ.insert(VIRTUAL_SINK_STR.to_string(), cfg.exits.clone());
-        rev_pred.insert(VIRTUAL_SINK_STR.to_string(), vec![]);
-
-        for exit in &cfg.exits {
-            if let Some(preds) = rev_pred.get_mut(exit) {
-                preds.push(VIRTUAL_SINK_STR.to_string());
-            }
-        }
-        let rev_cfg = Cfg::new(
-            VIRTUAL_SINK_STR.to_string(),
-            rev_succ,
-            rev_pred,
-            vec![cfg.entry.clone()],
-        );
+        let rev_cfg = Cfg::from_edges(VIRTUAL_SINK_STR.to_string(), rev_succ);
         let rev_dom = dominators(&rev_cfg);
         // The virtual sink stays visible: the last block before the exit
         // reports ipdom == sink and its pdom set contains the sink. Only
@@ -73,40 +62,13 @@ pub struct DomInfo {
 }
 pub fn keep_reachable(cfg: &Cfg) -> Cfg {
     let reach = reachable(cfg);
-    let succ: HashMap<String, Vec<String>> = reach
-        .iter()
-        .map(|n| {
-            (
-                n.clone(),
-                cfg.blocks[n]
-                    .succ
-                    .iter()
-                    .filter(|x| reach.contains(*x))
-                    .cloned()
-                    .collect(),
-            )
-        })
+    let blocks: Vec<Block> = cfg
+        .ordered()
+        .into_iter()
+        .filter(|b| reach.contains(&b.name))
+        .cloned()
         .collect();
-    let pred: HashMap<String, Vec<String>> = reach
-        .iter()
-        .map(|n| {
-            (
-                n.clone(),
-                cfg.blocks[n]
-                    .pred
-                    .iter()
-                    .filter(|x| reach.contains(*x))
-                    .cloned()
-                    .collect(),
-            )
-        })
-        .collect();
-    let exits: Vec<String> = succ
-        .iter()
-        .filter(|(_, v)| v.is_empty())
-        .map(|(k, _)| k.clone())
-        .collect();
-    Cfg::new(cfg.entry.clone(), succ, pred, exits)
+    Cfg::assemble(cfg.entry.clone(), blocks)
 }
 impl From<PostDomInfo> for DomInfo {
     fn from(f: PostDomInfo) -> Self {
@@ -214,18 +176,18 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
             unified_block.pred = preds.into_iter().collect();
 
             if targets.len() == 2 {
-                let cond = Expr::BinaryOp(BinaryExpr {
-                    op: inkwell::values::InstructionOpcode::ICmp,
-                    arg1: Box::new(Expr::Var(VarExpr {
+                let cond = Expr::cmp(
+                    Cmp::Int(IntCmp::Eq),
+                    Expr::Var(VarExpr {
                         name: tag_name.clone(),
                         dtype: Ty::Int(32, true),
-                    })),
-                    arg2: Box::new(Expr::Literal(Lit::Int {
+                    }),
+                    Expr::Literal(Lit::Int {
                         value: 0,
                         bits: 32,
                         signed: true,
-                    })),
-                });
+                    }),
+                );
                 unified_block.stmts.push(Stmt::Branch(BranchStmt {
                     cond: Some(cond),
                     then_block: targets[0].clone(),

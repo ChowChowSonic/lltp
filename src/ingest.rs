@@ -1,14 +1,13 @@
 //! Textual `.ll` is the primary format; bitcode `.bc` is also accepted.
 
-use std::error::Error;
-use std::fmt;
-use std::fs::File;
-use std::io::Read;
-use std::path::{Path, PathBuf};
-
+use crate::errors::IngestError;
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
 use inkwell::module::Module;
+use std::fmt;
+use std::fs::File;
+use std::io::Read;
+use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IrFormat {
@@ -26,33 +25,6 @@ impl fmt::Display for IrFormat {
         }
     }
 }
-
-#[derive(Debug)]
-pub enum IngestError {
-    /// The file could not be opened or read, or was empty.
-    Read { path: PathBuf, detail: String },
-    /// LLVM rejected the contents (syntax error, truncated bitcode, ...).
-    Parse {
-        origin: String,
-        format: IrFormat,
-        detail: String,
-    },
-}
-
-impl fmt::Display for IngestError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Read { path, detail } => write!(f, "cannot read `{}`: {detail}", path.display()),
-            Self::Parse {
-                origin,
-                format,
-                detail,
-            } => write!(f, "cannot parse {origin} as {format}: {detail}"),
-        }
-    }
-}
-
-impl Error for IngestError {}
 
 /// Guess the format from a file's first bytes: raw bitcode starts with `BC C0 DE`,
 /// the wrapper container with `DE C0 17 0B`. Anything else is treated as text.
