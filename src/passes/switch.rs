@@ -1,6 +1,6 @@
 use tracing::info;
 
-use crate::backend::Language;
+use crate::backend::LowerTarget;
 use crate::errors::LowerError;
 use crate::hir::op::{Cmp, IntCmp};
 use crate::hir::stmt::{CatchClause, IfStmt, SwitchStmt, TryCatchStmt};
@@ -9,7 +9,7 @@ use crate::passes::Lowering;
 
 /// Library-owned structural pass: lowers `Stmt::Switch` into a nested
 /// `Stmt::If` chain when the target cannot express `switch`
-/// (`Language::allows_switch() == false`). No-op otherwise.
+/// (`LowerTarget::allows_switch() == false`). No-op otherwise.
 pub struct SwitchToIfElse;
 
 impl Lowering for SwitchToIfElse {
@@ -17,7 +17,7 @@ impl Lowering for SwitchToIfElse {
         "switch_to_if_else"
     }
 
-    fn apply(&self, func: &mut Function, target: &dyn Language) -> Result<(), LowerError> {
+    fn apply(&self, func: &mut Function, target: &dyn LowerTarget) -> Result<(), LowerError> {
         if target.allows_switch() {
             return Ok(());
         }
@@ -84,7 +84,7 @@ fn eq(value: Expr, case: Lit) -> Expr {
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::{ExprEmitter, Language, StmtEmitter};
+    use crate::backend::{ExprEmitter, Language, LowerTarget, StmtEmitter};
     use crate::hir::expr::VarExpr;
     use crate::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
     use crate::hir::{Cfg, Expr, FnSig, Function, Lit, Param, Stmt, Ty};
@@ -97,56 +97,16 @@ mod tests {
     impl ExprEmitter for TestLang {}
     impl StmtEmitter for TestLang {}
 
-    impl Language for TestLang {
+    impl LowerTarget for TestLang {
         fn name(&self) -> &str {
             "test"
-        }
-        fn allows_match(&self) -> bool {
-            false
-        }
-        fn allows_closures(&self) -> bool {
-            false
-        }
-        fn allows_generics(&self) -> bool {
-            false
-        }
-        fn allows_async(&self) -> bool {
-            false
-        }
-        fn allows_threads(&self) -> bool {
-            false
-        }
-        fn allows_locks(&self) -> bool {
-            false
-        }
-        fn allows_raw_pointers(&self) -> bool {
-            false
-        }
-        fn allows_exceptions(&self) -> bool {
-            false
-        }
-        fn allows_multiple_return(&self) -> bool {
-            false
-        }
-        fn allows_inheritance(&self) -> bool {
-            false
-        }
-        fn allows_default_args(&self) -> bool {
-            false
-        }
-        fn allows_union(&self) -> bool {
-            false
-        }
-        fn allows_macros(&self) -> bool {
-            false
-        }
-        fn allows_goto(&self) -> bool {
-            false
         }
         fn allows_switch(&self) -> bool {
             self.switch
         }
     }
+
+    impl Language for TestLang {}
 
     fn i64(v: u64) -> Lit {
         Lit::Int {

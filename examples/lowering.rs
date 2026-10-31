@@ -5,9 +5,9 @@
 //!
 //! Run with: `cargo run --example lowering`
 
-use std::fmt::{self, Formatter};
+use std::fmt::{self, Write};
 
-use lltp::backend::{ExprEmitter, Language, StmtEmitter};
+use lltp::backend::{ExprEmitter, Language, LowerTarget, StmtEmitter};
 use lltp::hir::expr::{CmpExpr, VarExpr};
 use lltp::hir::op::{Cmp, IntCmp};
 use lltp::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
@@ -20,7 +20,7 @@ use lltp::passes::SwitchToIfElse;
 struct ToyBackend;
 
 impl ExprEmitter for ToyBackend {
-    fn emit_expr(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
+    fn emit_expr(&self, expr: &Expr, out: &mut impl Write) -> fmt::Result {
         match expr {
             Expr::Var(VarExpr { name, .. }) => write!(out, "{name}"),
             Expr::Literal(i) => self.emit_literal(i, out),
@@ -30,7 +30,7 @@ impl ExprEmitter for ToyBackend {
         }
     }
 
-    fn emit_literal(&self, expr: &Lit, out: &mut Formatter) -> fmt::Result {
+    fn emit_literal(&self, expr: &Lit, out: &mut impl Write) -> fmt::Result {
         match expr {
             Lit::Int { value, .. } => write!(out, "{value}"),
             Lit::Bool(b) => write!(out, "{b}"),
@@ -38,7 +38,7 @@ impl ExprEmitter for ToyBackend {
         }
     }
 
-    fn emit_cmp(&self, expr: &CmpExpr, out: &mut Formatter) -> fmt::Result {
+    fn emit_cmp(&self, expr: &CmpExpr, out: &mut impl Write) -> fmt::Result {
         self.emit_expr(&expr.arg1, out)?;
         match expr.pred {
             Cmp::Int(IntCmp::Eq) => write!(out, " == ")?,
@@ -49,7 +49,7 @@ impl ExprEmitter for ToyBackend {
 }
 
 impl StmtEmitter for ToyBackend {
-    fn emit_stmt(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_stmt(&self, stmt: &Stmt, out: &mut impl Write) -> fmt::Result {
         match stmt {
             Stmt::Ret(i) => self.emit_return(i, out),
             Stmt::If(i) => self.emit_if(i, out),
@@ -67,13 +67,13 @@ impl StmtEmitter for ToyBackend {
         }
     }
 
-    fn emit_block(&self, stmts: &[Stmt], out: &mut Formatter) -> fmt::Result {
+    fn emit_block(&self, stmts: &[Stmt], out: &mut impl Write) -> fmt::Result {
         writeln!(out, "{{")?;
         emit_stmt_lines(self, stmts, out)?;
         write!(out, "}}")
     }
 
-    fn emit_return(&self, stmt: &RetStmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_return(&self, stmt: &RetStmt, out: &mut impl Write) -> fmt::Result {
         write!(out, "return")?;
         if let Some(value) = &stmt.value {
             write!(out, " ")?;
@@ -82,7 +82,7 @@ impl StmtEmitter for ToyBackend {
         write!(out, ";")
     }
 
-    fn emit_if(&self, stmt: &IfStmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_if(&self, stmt: &IfStmt, out: &mut impl Write) -> fmt::Result {
         write!(out, "if (")?;
         self.emit_expr(&stmt.cond, out)?;
         writeln!(out, ") {{")?;
@@ -103,7 +103,7 @@ impl StmtEmitter for ToyBackend {
         Ok(())
     }
 
-    fn emit_switch(&self, stmt: &SwitchStmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_switch(&self, stmt: &SwitchStmt, out: &mut impl Write) -> fmt::Result {
         write!(out, "switch (")?;
         self.emit_expr(&stmt.value, out)?;
         writeln!(out, ") {{")?;
@@ -122,7 +122,7 @@ impl StmtEmitter for ToyBackend {
 }
 
 /// One statement per line; newline handling lives here and only here.
-fn emit_stmt_lines(backend: &ToyBackend, stmts: &[Stmt], out: &mut Formatter) -> fmt::Result {
+fn emit_stmt_lines(backend: &ToyBackend, stmts: &[Stmt], out: &mut impl Write) -> fmt::Result {
     for stmt in stmts {
         backend.emit_stmt(stmt, out)?;
         writeln!(out)?;
@@ -130,13 +130,15 @@ fn emit_stmt_lines(backend: &ToyBackend, stmts: &[Stmt], out: &mut Formatter) ->
     Ok(())
 }
 
-impl Language for ToyBackend {
+impl LowerTarget for ToyBackend {
     fn name(&self) -> &str {
         "toy-c"
     }
+}
 
+impl Language for ToyBackend {
     /// Entry point of the emit chain: function header, then its body block.
-    fn emit_function(&self, func: &Function, out: &mut Formatter) -> fmt::Result {
+    fn emit_function(&self, func: &Function, out: &mut impl Write) -> fmt::Result {
         write!(out, "int {}(", func.sig.name)?;
         for i in 0..func.sig.params.len() {
             if i > 0 {
@@ -152,53 +154,6 @@ impl Language for ToyBackend {
     // `switch`, so SwitchToIfElse rewrites it before emission.
     fn pipeline(&self) -> Vec<Box<dyn lltp::passes::Lowering>> {
         vec![Box::new(SwitchToIfElse)]
-    }
-
-    fn allows_match(&self) -> bool {
-        false
-    }
-    fn allows_closures(&self) -> bool {
-        false
-    }
-    fn allows_generics(&self) -> bool {
-        false
-    }
-    fn allows_async(&self) -> bool {
-        false
-    }
-    fn allows_threads(&self) -> bool {
-        false
-    }
-    fn allows_locks(&self) -> bool {
-        false
-    }
-    fn allows_raw_pointers(&self) -> bool {
-        false
-    }
-    fn allows_exceptions(&self) -> bool {
-        false
-    }
-    fn allows_multiple_return(&self) -> bool {
-        false
-    }
-    fn allows_inheritance(&self) -> bool {
-        false
-    }
-    fn allows_default_args(&self) -> bool {
-        false
-    }
-    fn allows_union(&self) -> bool {
-        false
-    }
-    fn allows_macros(&self) -> bool {
-        false
-    }
-    fn allows_goto(&self) -> bool {
-        false
-    }
-    // No `switch` in the target: the structural lowering pass rewrites it.
-    fn allows_switch(&self) -> bool {
-        false
     }
 }
 

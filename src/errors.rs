@@ -111,3 +111,17 @@ pub enum FrontendError {
     #[error("clang produced non-UTF-8 output")]
     NotUtf8,
 }
+
+#[derive(Error, Debug)]
+pub enum PipelineError {
+    #[error("Unable to ingest IR due to reason:\n{0}")]
+    ModuleParsingError(LowerError),
+    #[error("Failed to properly apply passes to IR due to reason:\n{0}")]
+    PassApplicationError(String),
+    #[error(
+        "Refusing to convert IR into the {0} language - IR contains disallowed instructions. Please write a pass to remove all {1} statements"
+    )]
+    DissallowedStmtError(String, String),
+    #[error("Failed to emit function {0} due to reason:\n{1}")]
+    FunctionEmissionError(String, std::fmt::Error),
+}

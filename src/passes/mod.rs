@@ -1,38 +1,17 @@
 mod switch;
 
-use crate::hir::LowerError;
-use std::fmt::Formatter;
-
-use crate::backend::Language;
+use crate::backend::LowerTarget;
 use crate::hir::Function;
+use crate::hir::LowerError;
 
-use inkwell::values::FunctionValue;
 pub use switch::SwitchToIfElse;
-use tracing::debug;
 
 /// A lowering pass: a target-agnostic or target-authored transformation of a
 /// recovered `Function`'s HIR, run before backend emission. Passes consult
-/// the target's capability flags to decide whether a rewrite is needed.
+/// the target's capability flags to decide whether a rewrite is needed; the
+/// trait stays object-safe so `Language::pipeline` can box passes, and the
+/// flags are read through `&dyn LowerTarget`.
 pub trait Lowering {
     fn name(&self) -> &'static str;
-    fn apply(&self, func: &mut Function, target: &dyn Language) -> Result<(), LowerError>;
-}
-
-/// Runs the backend's registered lowering pipeline (the B-core). Structural
-/// passes are library-owned and flags-driven; semantic passes are authored per
-/// target. The `Language::lower` default wraps this driver (the A-veneer).
-pub fn run_pipeline(func: &mut Function, target: &dyn Language) -> Result<(), LowerError> {
-    for pass in target.pipeline() {
-        debug!(pass = pass.name(), func = %func.sig.name, "running lowering pass");
-        pass.apply(func, target)?;
-    }
-    Ok(())
-}
-
-pub fn dispatch(
-    _func: &FunctionValue,
-    _target: &dyn Language,
-    _out: &mut Formatter,
-) -> Result<(), LowerError> {
-    Ok(())
+    fn apply(&self, func: &mut Function, target: &dyn LowerTarget) -> Result<(), LowerError>;
 }
