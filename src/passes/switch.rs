@@ -1,15 +1,15 @@
-use inkwell::values::InstructionOpcode::ICmp;
 use tracing::info;
 
-use crate::backend::Language;
-use crate::hir::expr::BinaryExpr;
+use crate::backend::LowerTarget;
+use crate::errors::LowerError;
+use crate::hir::op::{Cmp, IntCmp};
 use crate::hir::stmt::{CatchClause, IfStmt, SwitchStmt, TryCatchStmt};
 use crate::hir::{Expr, Function, Lit, Stmt};
-use crate::passes::{LowerError, Lowering};
+use crate::passes::Lowering;
 
 /// Library-owned structural pass: lowers `Stmt::Switch` into a nested
 /// `Stmt::If` chain when the target cannot express `switch`
-/// (`Language::allows_switch() == false`). No-op otherwise.
+/// (`LowerTarget::allows_switch() == false`). No-op otherwise.
 pub struct SwitchToIfElse;
 
 impl Lowering for SwitchToIfElse {
@@ -17,11 +17,11 @@ impl Lowering for SwitchToIfElse {
         "switch_to_if_else"
     }
 
-    fn apply(&self, func: &mut Function, target: &dyn Language) -> Result<(), LowerError> {
+    fn apply(&self, func: &mut Function, target: &dyn LowerTarget) -> Result<(), LowerError> {
         if target.allows_switch() {
             return Ok(());
         }
-        info!(func = %func.name, "switch -> if/else lowering");
+        info!(func = %func.sig.name, "switch -> if/else lowering");
         func.body = lower_stmts(std::mem::take(&mut func.body));
         Ok(())
     }
@@ -79,19 +79,15 @@ fn lower_stmt(stmt: Stmt) -> Vec<Stmt> {
 }
 
 fn eq(value: Expr, case: Lit) -> Expr {
-    Expr::BinaryOp(BinaryExpr {
-        op: ICmp,
-        arg1: Box::new(value),
-        arg2: Box::new(Expr::Literal(case)),
-    })
+    Expr::cmp(Cmp::Int(IntCmp::Eq), value, Expr::Literal(case))
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::backend::{ExprEmitter, Language, StmtEmitter};
+    use crate::backend::{ExprEmitter, Language, LowerTarget, StmtEmitter};
     use crate::hir::expr::VarExpr;
     use crate::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
-    use crate::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
+    use crate::hir::{Cfg, Expr, FnSig, Function, Lit, Param, Stmt, Ty};
     use crate::passes::{Lowering, SwitchToIfElse};
 
     struct TestLang {
@@ -101,56 +97,16 @@ mod tests {
     impl ExprEmitter for TestLang {}
     impl StmtEmitter for TestLang {}
 
-    impl Language for TestLang {
+    impl LowerTarget for TestLang {
         fn name(&self) -> &str {
             "test"
-        }
-        fn allows_match(&self) -> bool {
-            false
-        }
-        fn allows_closures(&self) -> bool {
-            false
-        }
-        fn allows_generics(&self) -> bool {
-            false
-        }
-        fn allows_async(&self) -> bool {
-            false
-        }
-        fn allows_threads(&self) -> bool {
-            false
-        }
-        fn allows_locks(&self) -> bool {
-            false
-        }
-        fn allows_raw_pointers(&self) -> bool {
-            false
-        }
-        fn allows_exceptions(&self) -> bool {
-            false
-        }
-        fn allows_multiple_return(&self) -> bool {
-            false
-        }
-        fn allows_inheritance(&self) -> bool {
-            false
-        }
-        fn allows_default_args(&self) -> bool {
-            false
-        }
-        fn allows_union(&self) -> bool {
-            false
-        }
-        fn allows_macros(&self) -> bool {
-            false
-        }
-        fn allows_goto(&self) -> bool {
-            false
         }
         fn allows_switch(&self) -> bool {
             self.switch
         }
     }
+
+    impl Language for TestLang {}
 
     fn i64(v: u64) -> Lit {
         Lit::Int {
@@ -162,9 +118,16 @@ mod tests {
 
     fn switch_func() -> Function {
         Function {
-            name: "f".to_string(),
-            params: vec![Ty::Int(64, true)],
-            return_ty: Ty::Int(64, true),
+            sig: FnSig {
+                name: "f".to_string(),
+                params: vec![Param {
+                    name: "x".to_string(),
+                    ty: Ty::Int(64, true),
+                }],
+                ret: Ty::Int(64, true),
+                variadic: false,
+            },
+            locals: Vec::new(),
             cfg: Cfg::default(),
             body: vec![Stmt::Switch(SwitchStmt {
                 value: Expr::Var(VarExpr {

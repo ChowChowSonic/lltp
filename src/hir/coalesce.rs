@@ -6,45 +6,46 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use super::flat::{FlatBlock, FlatFunction, Inst, Term, Val};
+use crate::hir::expr::{BinaryExpr, CallExpr, CastExpr, CmpExpr, IndexExpr, UnaryExpr, VarExpr};
+use crate::hir::stmt::LetStmt;
+use crate::hir::{Block, Expr, Stmt};
+
+use super::func::Function;
+use super::op::UnOp;
 use super::ty::Ty;
 
 type Names = BTreeSet<String>;
 
 /// Coalesce copy-related variables in `func`. Returns how many variables were merged.
-pub fn coalesce(func: &mut FlatFunction) -> usize {
+pub fn coalesce(func: &mut Function) -> usize {
     let fixed = fixed_names(func);
-    let params: Names = func.param_names.iter().cloned().collect();
+    let params: Names = func.sig.params.iter().map(|p| p.name.clone()).collect();
     // Parameters sort before every local, so a merge always keeps the parameter.
     let order: BTreeMap<String, usize> = func
-        .param_names
+        .sig
+        .params
         .iter()
+        .map(|p| &p.name)
         .chain(func.locals.iter().map(|(n, _)| n))
         .enumerate()
         .map(|(i, n)| (n.clone(), i))
         .collect();
-    let mut ty_of: BTreeMap<String, Ty> = func.locals.iter().cloned().collect();
-    ty_of.extend(
-        func.param_names
-            .iter()
-            .cloned()
-            .zip(func.sig.params.iter().cloned()),
-    );
+    let ty_of: BTreeMap<String, Ty> = func
+        .sig
+        .params
+        .iter()
+        .map(|p| (p.name.clone(), p.ty.clone()))
+        .chain(func.locals.iter().cloned())
+        .collect();
 
     let live_out = liveness(func);
     let mut adj = interference(func, &live_out);
 
     let copies: Vec<(String, String)> = func
-        .blocks
+        .blocks()
         .iter()
-        .flat_map(|b| b.insts.iter())
-        .filter_map(|inst| match inst {
-            Inst::Copy {
-                dest,
-                src: Val::Var(s, _),
-            } => Some((dest.clone(), s.clone())),
-            _ => None,
-        })
+        .flat_map(|b| b.stmts.iter().chain(std::iter::once(b.term())))
+        .filter_map(copy_pair)
         .collect();
 
     let mut rep: BTreeMap<String, String> = BTreeMap::new();
@@ -83,14 +84,15 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
         return 0;
     }
     let rename = |n: &str| find(&rep, n);
-    for block in &mut func.blocks {
-        for inst in &mut block.insts {
-            rename_inst(inst, &rename);
+    for block in func.blocks_mut() {
+        for stmt in &mut block.stmts {
+            rename_stmt(stmt, &rename);
         }
-        rename_term(&mut block.term, &rename);
-        block
-            .insts
-            .retain(|inst| !matches!(inst, Inst::Copy { dest, src: Val::Var(s, _) } if dest == s));
+        rename_stmt(block.term_mut(), &rename);
+        block.stmts.retain(|stmt| {
+            !matches!(stmt, Stmt::Let(LetStmt { dest, src }) if
+                    is_plain_var(dest) && same_name(dest, src))
+        });
     }
     func.locals.retain(|(n, _)| !rep.contains_key(n));
     rep.len()
@@ -98,26 +100,41 @@ pub fn coalesce(func: &mut FlatFunction) -> usize {
 
 /// Names that must keep their identity: slots that are still reached through
 /// `load`/`store` or have their address taken.
-fn fixed_names(func: &FlatFunction) -> Names {
+fn fixed_names(func: &Function) -> Names {
     let mut fixed = Names::new();
-    for block in &func.blocks {
-        for inst in &block.insts {
-            if let Inst::Load { ptr, .. } | Inst::Store { ptr, .. } = inst {
-                fixed.insert(ptr.clone());
-            }
-            for v in inst_vals(inst) {
-                if let Val::Addr(n) = v {
-                    fixed.insert(n.clone());
-                }
+    for block in func.blocks() {
+        for stmt in &block.stmts {
+            for e in exprs(stmt) {
+                collect_slots(e, &mut fixed);
             }
         }
-        for v in term_vals(&block.term) {
-            if let Val::Addr(n) = v {
-                fixed.insert(n.clone());
-            }
+        for e in exprs(block.term()) {
+            collect_slots(e, &mut fixed);
         }
     }
     fixed
+}
+
+/// The expressions a statement evaluates, including the place it writes to.
+pub(super) fn exprs(stmt: &Stmt) -> Vec<&Expr> {
+    match stmt {
+        Stmt::Let(LetStmt { dest, src }) => vec![dest, src],
+        Stmt::Eval(e) => vec![e],
+        Stmt::Branch(b) => b.cond.iter().collect(),
+        Stmt::Ret(r) => r.value.iter().collect(),
+        Stmt::Invoke(i) => i.args.iter().collect(),
+        _ => vec![],
+    }
+}
+
+/// Every slot named by an `AddrOf`/`ValuAt` inside `e`.
+fn collect_slots(e: &Expr, fixed: &mut Names) {
+    if let Some(slot) = slot_name(e) {
+        fixed.insert(slot.to_string());
+    }
+    for child in children(e) {
+        collect_slots(child, fixed);
+    }
 }
 
 fn find(rep: &BTreeMap<String, String>, name: &str) -> String {
@@ -129,86 +146,156 @@ fn find(rep: &BTreeMap<String, String>, name: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// liveness and interference
+// def and use
 // ---------------------------------------------------------------------------
 
-pub(super) fn inst_vals(inst: &Inst) -> Vec<&Val> {
-    match inst {
-        Inst::Load { .. } => vec![],
-        Inst::Store { value, .. } => vec![value],
-        Inst::Bin { lhs, rhs, .. } | Inst::Cmp { lhs, rhs, .. } => vec![lhs, rhs],
-        Inst::Cast { src, .. } | Inst::Copy { src, .. } => vec![src],
-        Inst::Call { args, .. } => args.iter().collect(),
+/// The single name a statement defines, if it defines one.
+pub(super) fn def_name(stmt: &Stmt) -> Option<&str> {
+    def_place(stmt).and_then(place_name)
+}
+
+/// The place a statement writes to. A store writes to a place, so its def is
+/// the cell it points at.
+fn def_place(stmt: &Stmt) -> Option<&Expr> {
+    match stmt {
+        Stmt::Let(LetStmt { dest, .. }) => Some(dest),
+        _ => None,
     }
 }
 
-pub(super) fn term_vals(term: &Term) -> Vec<&Val> {
-    match term {
-        Term::Br(_) | Term::Unreachable => vec![],
-        Term::CondBr { cond, .. } => vec![cond],
-        Term::Ret(v) => v.iter().collect(),
+/// The name a place refers to: a plain variable, or the cell an `AddrOf` points at.
+fn place_name(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::Var(VarExpr { name, .. }) => Some(name),
+        Expr::UnaryOp(UnaryExpr {
+            op: UnOp::AddrOf,
+            arg,
+        }) => place_name(arg),
+        _ => None,
     }
 }
 
-fn inst_def(inst: &Inst) -> Option<&str> {
-    match inst {
-        Inst::Load { dest, .. }
-        | Inst::Bin { dest, .. }
-        | Inst::Cmp { dest, .. }
-        | Inst::Cast { dest, .. }
-        | Inst::Copy { dest, .. } => Some(dest.as_str()),
-        Inst::Call { dest, .. } => dest.as_deref(),
-        Inst::Store { .. } => None,
+/// A plain variable, not a place pointing at one.
+fn is_plain_var(e: &Expr) -> bool {
+    matches!(e, Expr::Var(..))
+}
+
+/// The slot a memory expression refers to (`AddrOf(x)` or `ValuAt(x)`).
+pub(super) fn slot_name(e: &Expr) -> Option<&str> {
+    match e {
+        Expr::UnaryOp(UnaryExpr { arg, .. }) => place_name(arg),
+        _ => None,
     }
 }
 
-fn succs(term: &Term) -> Vec<&str> {
-    match term {
-        Term::Br(l) => vec![l.as_str()],
-        Term::CondBr {
-            then_bb, else_bb, ..
-        } => vec![then_bb.as_str(), else_bb.as_str()],
-        Term::Ret(_) | Term::Unreachable => vec![],
+/// The names a statement reads.
+pub(super) fn uses(stmt: &Stmt) -> Vec<&Expr> {
+    let mut out = Vec::new();
+    match stmt {
+        Stmt::Let(LetStmt { src, .. }) => collect_names(src, &mut out),
+        Stmt::Eval(e) => collect_names(e, &mut out),
+        Stmt::Branch(b) => {
+            if let Some(c) = &b.cond {
+                out.push(c);
+            }
+        }
+        Stmt::Ret(r) => {
+            if let Some(v) = &r.value {
+                out.push(v);
+            }
+        }
+        Stmt::Invoke(i) => {
+            for a in &i.args {
+                collect_names(a, &mut out);
+            }
+        }
+        _ => {}
+    }
+    out
+}
+
+/// The expressions an expression node contains.
+pub(super) fn children(e: &Expr) -> Vec<&Expr> {
+    match e {
+        Expr::UnaryOp(UnaryExpr { arg, .. }) => vec![arg],
+        Expr::BinaryOp(BinaryExpr { arg1, arg2, .. }) => vec![arg1, arg2],
+        Expr::Cmp(CmpExpr { arg1, arg2, .. }) => vec![arg1, arg2],
+        Expr::Cast(CastExpr { data, .. }) => vec![data],
+        Expr::Index(IndexExpr { base, index }) => vec![base, index],
+        Expr::Call(CallExpr { args, .. }) => args.iter().collect(),
+        _ => vec![],
     }
 }
 
-fn add_uses(vals: Vec<&Val>, live: &mut Names) {
+/// Every variable reference inside an expression tree.
+fn collect_names<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    if let Expr::Var(..) = e {
+        out.push(e);
+        return;
+    }
+    for child in children(e) {
+        collect_names(child, out);
+    }
+}
+
+/// A statement of the form `x = y`: the pair the coalescer can merge.
+fn copy_pair(stmt: &Stmt) -> Option<(String, String)> {
+    let Stmt::Let(LetStmt { dest, src }) = stmt else {
+        return None;
+    };
+    if !is_plain_var(dest) {
+        return None;
+    }
+    let (Some(d), Some(s)) = (place_name(dest), place_name(src)) else {
+        return None;
+    };
+    Some((d.to_string(), s.to_string()))
+}
+
+fn same_name(dest: &Expr, src: &Expr) -> bool {
+    match (place_name(dest), place_name(src)) {
+        (Some(d), Some(s)) => d == s,
+        _ => false,
+    }
+}
+
+fn add_uses(vals: Vec<&Expr>, live: &mut Names) {
     for v in vals {
-        if let Val::Var(n, _) = v {
-            live.insert(n.clone());
+        if let Expr::Var(VarExpr { name, .. }) = v {
+            live.insert(name.clone());
         }
     }
 }
 
-fn live_in_of(block: &FlatBlock, live_out: &Names) -> Names {
+fn live_in_of(block: &Block, live_out: &Names) -> Names {
     let mut live = live_out.clone();
-    add_uses(term_vals(&block.term), &mut live);
-    for inst in block.insts.iter().rev() {
-        if let Some(d) = inst_def(inst) {
+    add_uses(uses(block.term()), &mut live);
+    for stmt in block.stmts.iter().rev() {
+        if let Some(d) = def_name(stmt) {
             live.remove(d);
         }
-        add_uses(inst_vals(inst), &mut live);
+        add_uses(uses(stmt), &mut live);
     }
     live
 }
 
-fn liveness(func: &FlatFunction) -> Vec<Names> {
-    let index: BTreeMap<&str, usize> = func
-        .blocks
+fn liveness(func: &Function) -> Vec<Names> {
+    let blocks = func.blocks();
+    let index: BTreeMap<&str, usize> = blocks
         .iter()
         .enumerate()
-        .map(|(i, b)| (b.label.as_str(), i))
+        .map(|(i, b)| (b.name.as_str(), i))
         .collect();
-    let n = func.blocks.len();
+    let n = blocks.len();
     let mut live_in = vec![Names::new(); n];
     let mut live_out = vec![Names::new(); n];
     loop {
         let mut changed = false;
         for i in (0..n).rev() {
-            let block = &func.blocks[i];
+            let block = blocks[i];
             let mut out = Names::new();
-            for s in succs(&block.term) {
-                if let Some(&j) = index.get(s) {
+            for s in block.successors() {
+                if let Some(&j) = index.get(s.as_str()) {
                     out.extend(live_in[j].iter().cloned());
                 }
             }
@@ -233,28 +320,31 @@ fn add_edge(adj: &mut BTreeMap<String, Names>, a: &str, b: &str) {
     adj.entry(b.to_string()).or_default().insert(a.to_string());
 }
 
-fn interference(func: &FlatFunction, live_out: &[Names]) -> BTreeMap<String, Names> {
+fn interference(func: &Function, live_out: &[Names]) -> BTreeMap<String, Names> {
     let mut adj: BTreeMap<String, Names> = BTreeMap::new();
-    for (block, out) in func.blocks.iter().zip(live_out) {
+    for (block, out) in func.blocks().into_iter().zip(live_out) {
         let mut live = out.clone();
-        add_uses(term_vals(&block.term), &mut live);
-        for inst in block.insts.iter().rev() {
-            if let Some(d) = inst_def(inst) {
-                let copy_src = match inst {
-                    Inst::Copy {
-                        src: Val::Var(s, _),
-                        ..
-                    } => Some(s.as_str()),
+        add_uses(uses(block.term()), &mut live);
+        for stmt in block.stmts.iter().rev() {
+            if let Some(d) = def_name(stmt) {
+                // The two ends of a copy are the pair this pass wants to merge,
+                // so they must not be adjacent. A def only conflicts with names
+                // it does not itself read.
+                let read = match stmt {
+                    Stmt::Let(LetStmt { src, .. }) => match src.as_ref() {
+                        Expr::Var(VarExpr { name, .. }) => Some(name),
+                        _ => None,
+                    },
                     _ => None,
                 };
                 for l in &live {
-                    if l.as_str() != d && Some(l.as_str()) != copy_src {
+                    if l != d && Some(l) != read {
                         add_edge(&mut adj, d, l);
                     }
                 }
                 live.remove(d);
             }
-            add_uses(inst_vals(inst), &mut live);
+            add_uses(uses(stmt), &mut live);
         }
     }
     adj
@@ -264,200 +354,220 @@ fn interference(func: &FlatFunction, live_out: &[Names]) -> BTreeMap<String, Nam
 // renaming
 // ---------------------------------------------------------------------------
 
-fn rename_val(v: &mut Val, f: &dyn Fn(&str) -> String) {
-    if let Val::Var(n, _) = v {
-        *n = f(n);
-    }
-}
-
-fn rename_inst(inst: &mut Inst, f: &dyn Fn(&str) -> String) {
-    match inst {
-        Inst::Load { dest, .. } => *dest = f(dest),
-        Inst::Store { value, .. } => rename_val(value, f),
-        Inst::Bin { dest, lhs, rhs, .. } | Inst::Cmp { dest, lhs, rhs, .. } => {
-            *dest = f(dest);
-            rename_val(lhs, f);
-            rename_val(rhs, f);
+fn rename_expr(e: &mut Expr, f: &dyn Fn(&str) -> String) {
+    match e {
+        Expr::Var(VarExpr { name, .. }) => *name = f(name),
+        Expr::UnaryOp(UnaryExpr { arg, .. }) => rename_expr(arg.as_mut(), f),
+        Expr::BinaryOp(BinaryExpr { arg1, arg2, .. }) => {
+            rename_expr(arg1.as_mut(), f);
+            rename_expr(arg2.as_mut(), f);
         }
-        Inst::Cast { dest, src, .. } | Inst::Copy { dest, src } => {
-            *dest = f(dest);
-            rename_val(src, f);
+        Expr::Cmp(CmpExpr { arg1, arg2, .. }) => {
+            rename_expr(arg1.as_mut(), f);
+            rename_expr(arg2.as_mut(), f);
         }
-        Inst::Call { dest, args, .. } => {
-            if let Some(d) = dest {
-                *d = f(d);
-            }
+        Expr::Cast(CastExpr { data, .. }) => rename_expr(data.as_mut(), f),
+        Expr::Index(IndexExpr { base, index }) => {
+            rename_expr(base.as_mut(), f);
+            rename_expr(index.as_mut(), f);
+        }
+        Expr::Call(CallExpr { args, .. }) => {
             for a in args {
-                rename_val(a, f);
+                rename_expr(a, f);
             }
         }
+        _ => {}
     }
 }
 
-fn rename_term(term: &mut Term, f: &dyn Fn(&str) -> String) {
-    match term {
-        Term::CondBr { cond, .. } => rename_val(cond, f),
-        Term::Ret(Some(v)) => rename_val(v, f),
-        Term::Br(_) | Term::Ret(None) | Term::Unreachable => {}
+fn rename_stmt(stmt: &mut Stmt, f: &dyn Fn(&str) -> String) {
+    match stmt {
+        Stmt::Let(LetStmt { dest, src }) => {
+            rename_expr(dest.as_mut(), f);
+            rename_expr(src.as_mut(), f);
+        }
+        Stmt::Eval(e) => rename_expr(e, f),
+        Stmt::Branch(b) => {
+            if let Some(c) = &mut b.cond {
+                rename_expr(c, f);
+            }
+        }
+        Stmt::Ret(r) => {
+            if let Some(v) = &mut r.value {
+                rename_expr(v, f);
+            }
+        }
+        Stmt::Invoke(i) => {
+            for a in &mut i.args {
+                rename_expr(a, f);
+            }
+            // `normal` and `catches` name blocks, not variables, so a variable
+            // rename must not touch them.
+        }
+        _ => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hir::flat::FnSig;
     use crate::hir::op::{BinOp, Cmp, IntCmp};
+    use crate::hir::stmt::{BranchStmt, LetStmt, RetStmt};
+    use crate::hir::{Block, Cfg, Lit, Param};
+    use crate::hir::{Expr, Stmt};
 
     fn i32t() -> Ty {
         Ty::Int(32, true)
     }
 
-    fn var(n: &str) -> Val {
-        Val::Var(n.to_string(), i32t())
+    fn var(n: &str) -> Expr {
+        Expr::Var(VarExpr {
+            name: n.to_string(),
+            dtype: Ty::Int(32, true),
+        })
     }
 
-    fn int(value: i64) -> Val {
-        Val::Int { value, bits: 32 }
+    fn int(value: i64) -> Expr {
+        Expr::Literal(Lit::Int {
+            value: value as u64,
+            bits: 32,
+            signed: true,
+        })
     }
 
-    fn copy(dest: &str, src: Val) -> Inst {
-        Inst::Copy {
-            dest: dest.to_string(),
-            src,
+    fn copy(dest: &str, src: Expr) -> Stmt {
+        Stmt::Let(LetStmt {
+            dest: Box::new(var(dest)),
+            src: Box::new(src),
+        })
+    }
+
+    /// An assignment through a cell: `*dest = src`.
+    fn cell(dest: &str, src: Expr) -> Stmt {
+        Stmt::Let(LetStmt {
+            dest: Box::new(Expr::unary(UnOp::AddrOf, var(dest))),
+            src: Box::new(src),
+        })
+    }
+
+    fn bin(dest: &str, op: BinOp, lhs: Expr, rhs: Expr) -> Stmt {
+        Stmt::Let(LetStmt {
+            dest: Box::new(var(dest)),
+            src: Box::new(Expr::binary(op, lhs, rhs)),
+        })
+    }
+
+    fn cmp(dest: &str, lhs: Expr, rhs: Expr) -> Stmt {
+        Stmt::Let(LetStmt {
+            dest: Box::new(var(dest)),
+            src: Box::new(Expr::cmp(Cmp::Int(IntCmp::Eq), lhs, rhs)),
+        })
+    }
+
+    fn br(target: &str) -> Stmt {
+        Stmt::Branch(BranchStmt {
+            cond: None,
+            then_block: target.to_string(),
+            else_block: None,
+        })
+    }
+
+    fn cbr(cond: Expr, then: &str, else_: &str) -> Stmt {
+        Stmt::Branch(BranchStmt {
+            cond: Some(cond),
+            then_block: then.to_string(),
+            else_block: Some(else_.to_string()),
+        })
+    }
+
+    fn ret(v: Option<Expr>) -> Stmt {
+        Stmt::Ret(RetStmt { value: v })
+    }
+
+    fn block(label: &str, stmts: Vec<Stmt>, term: Stmt) -> Block {
+        Block::build(label, stmts, Some(term))
+    }
+
+    fn function(locals: &[&str], blocks: Vec<Block>) -> Function {
+        let mut f = Function::new("f", vec![], i32t(), Cfg::empty(blocks[0].name.clone()));
+        f.locals = locals.iter().map(|n| (n.to_string(), i32t())).collect();
+        for b in blocks {
+            f.cfg.push_block(b);
         }
+        f.cfg.link_edges();
+        f
     }
 
-    fn bin(dest: &str, op: BinOp, lhs: Val, rhs: Val) -> Inst {
-        Inst::Bin {
-            dest: dest.to_string(),
-            ty: i32t(),
-            op,
-            lhs,
-            rhs,
-        }
-    }
-
-    fn block(label: &str, insts: Vec<Inst>, term: Term) -> FlatBlock {
-        FlatBlock {
-            label: label.to_string(),
-            insts,
-            term,
-        }
-    }
-
-    fn function(locals: &[&str], blocks: Vec<FlatBlock>) -> FlatFunction {
-        FlatFunction {
-            sig: FnSig {
-                name: "f".to_string(),
-                params: vec![],
-                ret: i32t(),
-                variadic: false,
-            },
-            param_names: vec![],
-            locals: locals.iter().map(|n| (n.to_string(), i32t())).collect(),
-            blocks,
-        }
-    }
-
-    fn copies_in(func: &FlatFunction) -> usize {
-        func.blocks
-            .iter()
-            .flat_map(|b| b.insts.iter())
-            .filter(|i| matches!(i, Inst::Copy { .. }))
+    fn copies_in(func: &Function) -> usize {
+        func.blocks()
+            .into_iter()
+            .flat_map(|b| b.stmts.iter())
+            .filter(|s| copy_pair(s).is_some())
             .count()
     }
 
-    fn get(env: &BTreeMap<String, i64>, v: &Val) -> i64 {
+    fn get(env: &BTreeMap<String, u64>, v: &Expr) -> u64 {
         match v {
-            Val::Var(n, _) => env[n],
-            Val::Int { value, .. } => *value,
+            Expr::Var(VarExpr { name, .. }) => env[name],
+            Expr::Literal(Lit::Int { value, .. }) => *value,
+            Expr::Cmp(CmpExpr { arg1, arg2, .. }) => u64::from(get(env, arg1) == get(env, arg2)),
+            Expr::BinaryOp(BinaryExpr { op, arg1, arg2, .. }) => match op {
+                BinOp::Add => get(env, arg1) + get(env, arg2),
+                BinOp::Mul => get(env, arg1) * get(env, arg2),
+                other => panic!("unsupported operator {other:?}"),
+            },
             other => panic!("unsupported operand {other:?}"),
         }
     }
 
     /// Tiny interpreter: enough to run the by-hand loops.
-    fn eval(func: &FlatFunction) -> i64 {
-        let mut env: BTreeMap<String, i64> = BTreeMap::new();
-        let mut label = func.blocks[0].label.clone();
+    fn eval(func: &Function) -> u64 {
+        let mut env: BTreeMap<String, u64> = BTreeMap::new();
+        let blocks = func.blocks();
+        let mut label = blocks[0].name.clone();
         for _ in 0..1000 {
-            let block = func
-                .blocks
+            let block = blocks
                 .iter()
-                .find(|b| b.label == label)
+                .find(|b| b.name == label)
                 .expect("branch to a missing block");
-            for inst in &block.insts {
-                let (dest, value) = match inst {
-                    Inst::Copy { dest, src } => (dest, get(&env, src)),
-                    Inst::Bin {
-                        dest,
-                        op: BinOp::Add,
-                        lhs,
-                        rhs,
-                        ..
-                    } => (dest, get(&env, lhs) + get(&env, rhs)),
-                    Inst::Bin {
-                        dest,
-                        op: BinOp::Mul,
-                        lhs,
-                        rhs,
-                        ..
-                    } => (dest, get(&env, lhs) * get(&env, rhs)),
-                    Inst::Cmp {
-                        dest,
-                        pred: Cmp::Int(IntCmp::Eq),
-                        lhs,
-                        rhs,
-                    } => (dest, i64::from(get(&env, lhs) == get(&env, rhs))),
-                    other => panic!("unsupported instruction {other:?}"),
+            for stmt in &block.stmts {
+                let Stmt::Let(LetStmt { dest, src }) = stmt else {
+                    continue;
                 };
-                env.insert(dest.clone(), value);
+                let name = place_name(dest)
+                    .expect("test place is a variable")
+                    .to_string();
+                env.insert(name, get(&env, src));
             }
-            match &block.term {
-                Term::Br(l) => label = l.clone(),
-                Term::CondBr {
-                    cond,
-                    then_bb,
-                    else_bb,
-                } => {
-                    label = if get(&env, cond) != 0 {
-                        then_bb.clone()
-                    } else {
-                        else_bb.clone()
-                    }
-                }
-                Term::Ret(Some(v)) => return get(&env, v),
+            match &block.term() {
+                Stmt::Branch(b) => label = b.then_block.clone(),
+                Stmt::Ret(RetStmt { value: Some(v) }) => return get(&env, v),
                 other => panic!("unsupported terminator {other:?}"),
             }
         }
         panic!("did not terminate");
     }
 
-    fn swap_loop() -> FlatFunction {
-        let done = Val::Var("done".to_string(), Ty::Bool);
+    fn swap_loop() -> Function {
+        let done = Expr::Var(VarExpr {
+            name: "done".to_string(),
+            dtype: Ty::Bool,
+        });
         function(
             &["a", "b", "i", "i_next", "done", "phi_tmp", "phi_tmp_1"],
             vec![
                 block(
                     "entry",
                     vec![copy("a", int(1)), copy("b", int(2)), copy("i", int(0))],
-                    Term::Br("loop".to_string()),
+                    br("loop"),
                 ),
                 block(
                     "loop",
                     vec![
                         bin("i_next", BinOp::Add, var("i"), int(1)),
-                        Inst::Cmp {
-                            dest: "done".to_string(),
-                            pred: Cmp::Int(IntCmp::Eq),
-                            lhs: var("i_next"),
-                            rhs: int(3),
-                        },
+                        cmp("done", var("i_next"), int(3)),
                     ],
-                    Term::CondBr {
-                        cond: done,
-                        then_bb: "exit".to_string(),
-                        else_bb: "loop_to_loop".to_string(),
-                    },
+                    cbr(done, "exit", "loop_to_loop"),
                 ),
                 block(
                     "loop_to_loop",
@@ -468,9 +578,9 @@ mod tests {
                         copy("b", var("phi_tmp_1")),
                         copy("i", var("i_next")),
                     ],
-                    Term::Br("loop".to_string()),
+                    br("loop"),
                 ),
-                block("exit", vec![], Term::Ret(Some(var("a")))),
+                block("exit", vec![], ret(Some(var("a")))),
             ],
         )
     }
@@ -489,16 +599,18 @@ mod tests {
         let names: Vec<&str> = f.locals.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["a", "b", "i", "done", "phi_tmp_1"]);
         // the counter now updates in place: i = i + 1
-        assert!(matches!(
-            &f.blocks[1].insts[0],
-            Inst::Bin { dest, .. } if dest == "i"
-        ));
+        assert!(
+            matches!(&f.blocks()[1].stmts[0], Stmt::Let(LetStmt { dest, .. }) if place_name(dest) == Some("i"))
+        );
     }
 
     #[test]
     fn rotation_of_three_phis_keeps_its_result() {
         // (a, b, c) = (b, c, a) for 4 iterations, then 16a + 4b + c.
-        let done = Val::Var("done".to_string(), Ty::Bool);
+        let done = Expr::Var(VarExpr {
+            name: "done".to_string(),
+            dtype: Ty::Bool,
+        });
         let mut f = function(
             &[
                 "a",
@@ -524,24 +636,15 @@ mod tests {
                         copy("c", int(3)),
                         copy("i", int(0)),
                     ],
-                    Term::Br("loop".to_string()),
+                    br("loop"),
                 ),
                 block(
                     "loop",
                     vec![
                         bin("i_next", BinOp::Add, var("i"), int(1)),
-                        Inst::Cmp {
-                            dest: "done".to_string(),
-                            pred: Cmp::Int(IntCmp::Eq),
-                            lhs: var("i_next"),
-                            rhs: int(4),
-                        },
+                        cmp("done", var("i_next"), int(4)),
                     ],
-                    Term::CondBr {
-                        cond: done,
-                        then_bb: "exit".to_string(),
-                        else_bb: "loop_to_loop".to_string(),
-                    },
+                    cbr(done, "exit", "loop_to_loop"),
                 ),
                 block(
                     "loop_to_loop",
@@ -554,7 +657,7 @@ mod tests {
                         copy("c", var("phi_tmp_2")),
                         copy("i", var("i_next")),
                     ],
-                    Term::Br("loop".to_string()),
+                    br("loop"),
                 ),
                 block(
                     "exit",
@@ -564,7 +667,7 @@ mod tests {
                         bin("s1", BinOp::Add, var("m1"), var("m2")),
                         bin("s2", BinOp::Add, var("s1"), var("c")),
                     ],
-                    Term::Ret(Some(var("s2"))),
+                    ret(Some(var("s2"))),
                 ),
             ],
         );
@@ -588,7 +691,7 @@ mod tests {
                     bin("x", BinOp::Add, var("x"), int(1)),
                     bin("z", BinOp::Add, var("x"), var("y")),
                 ],
-                Term::Ret(Some(var("z"))),
+                ret(Some(var("z"))),
             )],
         );
         assert_eq!(eval(&f), 11);
@@ -597,18 +700,38 @@ mod tests {
     }
 
     #[test]
-    fn parameters_are_never_merged() {
+    fn assignment_to_a_place_is_not_a_copy() {
+        // `*y = x` writes through a cell. The coalescer merges copies between
+        // names, not writes to a place, so the cell keeps its identity.
+        let mut f = function(
+            &["x", "y"],
+            vec![block(
+                "entry",
+                vec![copy("x", int(5)), cell("y", var("x"))],
+                ret(Some(var("y"))),
+            )],
+        );
+        assert_eq!(eval(&f), 5);
+        assert_eq!(coalesce(&mut f), 0);
+        assert_eq!(copies_in(&f), 0);
+    }
+
+    #[test]
+    fn a_copy_of_a_parameter_keeps_the_parameter_name() {
         let mut f = function(
             &["x"],
             vec![block(
                 "entry",
                 vec![copy("x", var("p"))],
-                Term::Ret(Some(var("x"))),
+                ret(Some(var("x"))),
             )],
         );
-        f.param_names = vec!["p".to_string()];
-        assert_eq!(coalesce(&mut f), 0);
-        assert_eq!(copies_in(&f), 1);
+        f.sig.params = params(&["p"]);
+        // The parameter sorts before the local, so the merge keeps `p`.
+        assert_eq!(coalesce(&mut f), 1);
+        assert_eq!(f.param_names(), ["p".to_string()]);
+        assert!(f.locals.is_empty());
+        assert_eq!(copies_in(&f), 0);
     }
 
     #[test]
@@ -620,10 +743,19 @@ mod tests {
         assert_eq!(format!("{first:?}"), format!("{second:?}"));
     }
 
-    fn function_with_param(locals: &[&str], blocks: Vec<FlatBlock>) -> FlatFunction {
+    fn params(names: &[&str]) -> Vec<Param> {
+        names
+            .iter()
+            .map(|n| Param {
+                name: n.to_string(),
+                ty: i32t(),
+            })
+            .collect()
+    }
+
+    fn function_with_param(locals: &[&str], blocks: Vec<Block>) -> Function {
         let mut f = function(locals, blocks);
-        f.sig.params = vec![i32t()];
-        f.param_names = vec!["x".to_string()];
+        f.sig.params = params(&["x"]);
         f
     }
 
@@ -638,18 +770,20 @@ mod tests {
                     copy("x_addr", var("x")),
                     bin("add", BinOp::Add, var("x_addr"), int(1)),
                 ],
-                Term::Ret(Some(var("add"))),
+                ret(Some(var("add"))),
             )],
         );
         assert_eq!(coalesce(&mut f), 1);
-        assert_eq!(f.param_names, ["x"]);
+        assert_eq!(f.param_names(), ["x".to_string()]);
         let names: Vec<&str> = f.locals.iter().map(|(n, _)| n.as_str()).collect();
         assert_eq!(names, ["add"]);
-        assert_eq!(f.blocks[0].insts.len(), 1);
-        assert!(matches!(
-            &f.blocks[0].insts[0],
-            Inst::Bin { dest, lhs: Val::Var(l, _), .. } if dest == "add" && l == "x"
-        ));
+        assert_eq!(f.blocks()[0].stmts.len() - 1, 1);
+        assert!(
+            matches!(&f.blocks()[0].stmts[0], Stmt::Let(LetStmt { dest, src }) if
+            place_name(dest) == Some("add")
+                && matches!(src.as_ref(), Expr::BinaryOp(BinaryExpr { arg1, .. }) if
+                    place_name(arg1) == Some("x")))
+        );
     }
 
     #[test]
@@ -664,7 +798,7 @@ mod tests {
                     copy("x_addr", int(5)),
                     bin("add", BinOp::Add, var("x_addr"), var("x")),
                 ],
-                Term::Ret(Some(var("add"))),
+                ret(Some(var("add"))),
             )],
         );
         coalesce(&mut f);
@@ -678,11 +812,10 @@ mod tests {
             vec![block(
                 "entry",
                 vec![copy("b", var("a"))],
-                Term::Ret(Some(var("b"))),
+                ret(Some(var("b"))),
             )],
         );
-        f.sig.params = vec![i32t(), i32t()];
-        f.param_names = vec!["a".to_string(), "b".to_string()];
+        f.sig.params = params(&["a", "b"]);
         assert_eq!(coalesce(&mut f), 0);
         assert_eq!(copies_in(&f), 1);
     }

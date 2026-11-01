@@ -1,20 +1,30 @@
-use lltp::backend::{ExprEmitter, Language, StmtEmitter};
-use lltp::hir::expr::{BinaryExpr, CallExpr, CastExpr, IndexExpr, UnaryExpr};
+use lltp::backend::{ExprEmitter, Language, LowerTarget, StmtEmitter};
+use lltp::hir::expr::{BinaryExpr, CallExpr, CastExpr, CmpExpr, IndexExpr, UnaryExpr};
+use lltp::hir::op::{BinOp, Cmp, IntCmp};
 use lltp::hir::stmt::{GotoStmt, IfStmt, LabelStmt, LetStmt, LoopStmt, RetStmt, TryCatchStmt};
-use lltp::hir::{Lit, Stmt};
-use std::fmt::{Formatter, Result};
+use lltp::hir::{Lit, Stmt, Ty};
+use std::fmt::{Result, Write};
 pub struct CLanguage;
 
-impl Language for CLanguage {
+impl LowerTarget for CLanguage {
     fn name(&self) -> &str {
         "C"
     }
 }
+
+impl Language for CLanguage {
+    fn emit_ty(&self, ty: &Ty, out: &mut impl Write) -> std::fmt::Result {
+        match ty {
+            Ty::Void => write!(out, "void"),
+            other => unreachable!("toy emitter does not support type `{other:?}`"),
+        }
+    }
+}
 impl StmtEmitter for CLanguage {
-    fn emit_label(&self, stmt: &LabelStmt, out: &mut Formatter) -> Result {
+    fn emit_label(&self, stmt: &LabelStmt, out: &mut impl Write) -> Result {
         writeln!(out, "{}:", stmt.name)
     }
-    fn emit_block(&self, stmts: &[Stmt], out: &mut Formatter) -> std::fmt::Result {
+    fn emit_block(&self, stmts: &[Stmt], out: &mut impl Write) -> std::fmt::Result {
         writeln!(out, "{{")?;
 
         for stmt in stmts {
@@ -25,7 +35,7 @@ impl StmtEmitter for CLanguage {
 
         writeln!(out, "}}")
     }
-    fn emit_if(&self, stmt: &IfStmt, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_if(&self, stmt: &IfStmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "if (")?;
         self.emit_expr(&stmt.cond, out)?;
         write!(out, ")")?;
@@ -34,7 +44,7 @@ impl StmtEmitter for CLanguage {
         self.emit_block(&stmt.else_stmts, out)?;
         Ok(())
     }
-    fn emit_loop(&self, stmt: &LoopStmt, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_loop(&self, stmt: &LoopStmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "while(")?;
         if let Some(cond) = &stmt.cond {
             self.emit_expr(cond, out)?;
@@ -44,23 +54,23 @@ impl StmtEmitter for CLanguage {
         write!(out, ")")?;
         self.emit_block(&stmt.body, out)
     }
-    fn emit_return(&self, stmt: &RetStmt, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_return(&self, stmt: &RetStmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "return ")?;
         if let Some(v) = &stmt.value {
             self.emit_expr(v, out)?;
         }
         writeln!(out)
     }
-    fn emit_break(&self, _stmt: &Stmt, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_break(&self, _stmt: &Stmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "break")
     }
-    fn emit_continue(&self, _stmt: &Stmt, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_continue(&self, _stmt: &Stmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "continue")
     }
-    fn emit_goto(&self, stmt: &GotoStmt, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_goto(&self, stmt: &GotoStmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "goto {}", stmt.target)
     }
-    fn emit_try_catch(&self, stmt: &TryCatchStmt, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_try_catch(&self, stmt: &TryCatchStmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "try {{")?;
         for x in &stmt.try_body {
             self.emit_stmt(x, out)?;
@@ -89,7 +99,7 @@ impl StmtEmitter for CLanguage {
         }
         Ok(())
     }
-    fn emit_assignment(&self, expr: &LetStmt, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_assignment(&self, expr: &LetStmt, out: &mut impl Write) -> std::fmt::Result {
         self.emit_expr(&expr.dest, out)?;
         write!(out, " = ")?;
         self.emit_expr(&expr.src, out)
@@ -97,7 +107,7 @@ impl StmtEmitter for CLanguage {
 }
 
 impl ExprEmitter for CLanguage {
-    fn emit_call(&self, expr: &CallExpr, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_call(&self, expr: &CallExpr, out: &mut impl Write) -> std::fmt::Result {
         let name = &expr.name;
         write!(out, "{name}(")?;
         for arg in expr.args[0..expr.args.len() - 1].iter() {
@@ -107,7 +117,7 @@ impl ExprEmitter for CLanguage {
         self.emit_expr(expr.args.last().unwrap(), out)?;
         write!(out, ");")
     }
-    fn emit_index(&self, expr: &IndexExpr, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_index(&self, expr: &IndexExpr, out: &mut impl Write) -> std::fmt::Result {
         self.emit_expr(&expr.base, out)?;
         write!(out, "[")?;
         self.emit_expr(&expr.index, out)?;
@@ -116,12 +126,12 @@ impl ExprEmitter for CLanguage {
     fn emit_variable(
         &self,
         expr: &lltp::hir::expr::VarExpr,
-        out: &mut Formatter,
+        out: &mut impl Write,
     ) -> std::fmt::Result {
         let name = &expr.name;
         write!(out, "{name}")
     }
-    fn emit_literal(&self, expr: &Lit, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_literal(&self, expr: &Lit, out: &mut impl Write) -> std::fmt::Result {
         match expr {
             Lit::Int { value, bits, .. } => write!(out, "{value}{bits}"),
             Lit::Bool(b) => write!(out, "{b}"),
@@ -130,34 +140,34 @@ impl ExprEmitter for CLanguage {
             Lit::Void => write!(out, "void"),
         }
     }
-    fn emit_cast(&self, expr: &CastExpr, out: &mut Formatter) -> std::fmt::Result {
-        self.emit_expr(&expr.dtype, out)?;
+    fn emit_cast(&self, expr: &CastExpr, out: &mut impl Write) -> std::fmt::Result {
+        self.emit_ty(&expr.dtype, out)?;
         write!(out, " ")?;
         self.emit_expr(&expr.data, out)
     }
-    fn emit_binary_op(&self, expr: &BinaryExpr, out: &mut Formatter) -> std::fmt::Result {
+    fn emit_cmp(&self, expr: &CmpExpr, out: &mut impl Write) -> std::fmt::Result {
         self.emit_expr(&expr.arg1, out)?;
-        match expr.op {
-            inkwell::values::InstructionOpcode::FAdd | inkwell::values::InstructionOpcode::Add => {
-                write!(out, " + ")?;
-            }
-            inkwell::values::InstructionOpcode::Sub | inkwell::values::InstructionOpcode::FSub => {
-                write!(out, " - ")?
-            }
-            inkwell::values::InstructionOpcode::FDiv
-            | inkwell::values::InstructionOpcode::SDiv
-            | inkwell::values::InstructionOpcode::UDiv => write!(out, " / ")?,
-            inkwell::values::InstructionOpcode::And => write!(out, " & ")?,
-            inkwell::values::InstructionOpcode::AShr => write!(out, " > ")?,
-            inkwell::values::InstructionOpcode::Shl => write!(out, " < ")?,
-            inkwell::values::InstructionOpcode::Mul | inkwell::values::InstructionOpcode::FMul => {
-                write!(out, " * ")?
-            }
-            _ => unreachable!("Illegal binary operation"),
+        match expr.pred {
+            Cmp::Int(IntCmp::Eq) => write!(out, " == ")?,
+            other => unreachable!("toy emitter does not support predicate `{other:?}`"),
         }
         self.emit_expr(&expr.arg2, out)
     }
-    fn emit_unary_op(&self, expr: &UnaryExpr, _out: &mut Formatter) -> std::fmt::Result {
+    fn emit_binary_op(&self, expr: &BinaryExpr, out: &mut impl Write) -> std::fmt::Result {
+        self.emit_expr(&expr.arg1, out)?;
+        match expr.op {
+            BinOp::Add | BinOp::FAdd => write!(out, " + ")?,
+            BinOp::Sub | BinOp::FSub => write!(out, " - ")?,
+            BinOp::SDiv | BinOp::UDiv | BinOp::FDiv => write!(out, " / ")?,
+            BinOp::And => write!(out, " & ")?,
+            BinOp::AShr => write!(out, " > ")?,
+            BinOp::Shl => write!(out, " < ")?,
+            BinOp::Mul | BinOp::FMul => write!(out, " * ")?,
+            other => unreachable!("Illegal binary operation `{other:?}`"),
+        }
+        self.emit_expr(&expr.arg2, out)
+    }
+    fn emit_unary_op(&self, expr: &UnaryExpr, _out: &mut impl Write) -> std::fmt::Result {
         let _ = expr;
         todo!("Unary ops")
     }
@@ -167,10 +177,9 @@ impl ExprEmitter for CLanguage {
 mod test {
     use std::fmt::Formatter;
 
-    use inkwell::values::InstructionOpcode;
-
-    use lltp::backend::{ExprEmitter, Language, StmtEmitter};
+    use lltp::backend::{ExprEmitter, LowerTarget, StmtEmitter};
     use lltp::hir::expr::{CallExpr, CastExpr, IndexExpr};
+    use lltp::hir::op::{BinOp, CastKind};
     use lltp::hir::stmt::{BranchStmt, CatchClause, GotoStmt, LabelStmt, LoopStmt, TryCatchStmt};
     use lltp::hir::{Expr, Lit, Stmt, Ty};
 
@@ -178,26 +187,27 @@ mod test {
 
     const I32: Ty = Ty::Int(32, true);
 
-    /// `std::fmt::Formatter` has no public constructor, so a `String` sink only
-    /// ever receives one inside a `Display` impl. This shim is how the helpers
-    /// below get a formatter to hand to the backend, and it keeps the "emit
-    /// failed" behaviour the tests expect from a formatter error.
+    /// `Formatter` has no public constructor, so a `String` sink only ever
+    /// receives one inside a `Display` impl. This shim is how the helpers
+    /// below get a formatter to hand to the backend (emitter params accept
+    /// any `fmt::Write`, which `Formatter` implements), and it keeps the
+    /// "emit failed" behaviour the tests expect from a formatter error.
     struct Render<'a, F> {
         run: &'a F,
     }
 
     impl<'a, F> std::fmt::Display for Render<'a, F>
     where
-        F: Fn(&mut Formatter) -> std::fmt::Result,
+        F: Fn(&mut Formatter<'_>) -> std::fmt::Result,
     {
-        fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
             (self.run)(f).expect("emit failed");
             Ok(())
         }
     }
 
     /// Run the emitter through the shim and return what it wrote.
-    fn render(run: impl Fn(&mut Formatter) -> std::fmt::Result) -> String {
+    fn render(run: impl Fn(&mut Formatter<'_>) -> std::fmt::Result) -> String {
         format!("{}", Render { run: &run })
     }
 
@@ -263,18 +273,18 @@ mod test {
     fn binary_operators() {
         // Shifts currently render as `<`/`>` rather than `<<`/`>>`.
         let cases = [
-            (InstructionOpcode::Add, " + "),
-            (InstructionOpcode::FAdd, " + "),
-            (InstructionOpcode::Sub, " - "),
-            (InstructionOpcode::FSub, " - "),
-            (InstructionOpcode::Mul, " * "),
-            (InstructionOpcode::FMul, " * "),
-            (InstructionOpcode::SDiv, " / "),
-            (InstructionOpcode::UDiv, " / "),
-            (InstructionOpcode::FDiv, " / "),
-            (InstructionOpcode::And, " & "),
-            (InstructionOpcode::Shl, " < "),
-            (InstructionOpcode::AShr, " > "),
+            (BinOp::Add, " + "),
+            (BinOp::FAdd, " + "),
+            (BinOp::Sub, " - "),
+            (BinOp::FSub, " - "),
+            (BinOp::Mul, " * "),
+            (BinOp::FMul, " * "),
+            (BinOp::SDiv, " / "),
+            (BinOp::UDiv, " / "),
+            (BinOp::FDiv, " / "),
+            (BinOp::And, " & "),
+            (BinOp::Shl, " < "),
+            (BinOp::AShr, " > "),
         ];
         for (op, sym) in cases {
             assert_eq!(
@@ -313,9 +323,10 @@ mod test {
     fn cast_writes_the_dtype_then_the_value() {
         let expr = Expr::Cast(CastExpr {
             data: Box::new(int(1)),
-            dtype: Box::new(Expr::var("int", Ty::Void)),
+            dtype: Ty::Void,
+            kind: CastKind::Trunc,
         });
-        assert_eq!(emit_expr(&expr), "int 132");
+        assert_eq!(emit_expr(&expr), "void 132");
     }
 
     #[test]
@@ -417,11 +428,7 @@ mod test {
         let stmts = [
             binding("flag", Expr::bool(true)),
             Stmt::Loop(LoopStmt {
-                cond: Some(Expr::binary(
-                    InstructionOpcode::And,
-                    var("flag"),
-                    Expr::bool(false),
-                )),
+                cond: Some(Expr::binary(BinOp::And, var("flag"), Expr::bool(false))),
                 body: vec![Stmt::if_then_else(
                     var("flag"),
                     vec![Stmt::Break],

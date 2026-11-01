@@ -2,63 +2,20 @@ pub mod c_goto;
 mod expr;
 mod stmt;
 
-use std::fmt::{self, Formatter};
+use std::fmt::{self, Write};
 
 use crate::hir::{Function, Ty};
-use crate::{
-    hir::LowerError,
-    passes::{Lowering, run_pipeline},
-};
+use crate::{hir::LowerError, passes::Lowering};
+use tracing::debug;
 
 pub use expr::ExprEmitter;
 pub use stmt::StmtEmitter;
 
-pub trait Language: ExprEmitter + StmtEmitter {
+/// The capability surface lowering passes consult. Kept object-safe so
+/// `Box<dyn Lowering>` passes can read flags through `&dyn LowerTarget`;
+/// `Language` itself carries generic emitter methods and is not object-safe.
+pub trait LowerTarget {
     fn name(&self) -> &str;
-
-    /// Default: unsupported for this backend. Panics on reach (see
-    /// `ExprEmitter`/`StmtEmitter` defaults).
-    fn emit_function(&self, func: &Function, out: &mut Formatter) -> fmt::Result {
-        let _ = (func, out);
-        unreachable!(
-            "`emit_function` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
-        )
-    }
-
-    /// Default: unsupported for this backend. Panics on reach (see
-    /// `ExprEmitter`/`StmtEmitter` defaults).
-    fn emit_ty(&self, ty: &Ty, out: &mut Formatter) -> fmt::Result {
-        let _ = (ty, out);
-        unreachable!(
-            "`emit_ty` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
-        )
-    }
-
-    /// Default: unsupported for this backend. Panics on reach (see
-    /// `ExprEmitter`/`StmtEmitter` defaults).
-    fn emit_module(&self, id: i32, out: &mut Formatter) -> fmt::Result {
-        let _ = (id, out);
-        unreachable!(
-            "`emit_module` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
-        )
-    }
-
-    /// Lowering passes contributed by a backend, run by `lower` (the B-core).
-    /// Structural passes are library-owned and flags-driven; semantic passes
-    /// (memory mapping, error propagation) are authored per target.
-    fn pipeline(&self) -> Vec<Box<dyn Lowering>> {
-        Vec::new()
-    }
-
-    /// A-veneer entry point: runs `pipeline()` via `run_pipeline`. Backends
-    /// that need bespoke lowering override this method (instead of or in
-    /// addition to supplying `pipeline()`).
-    fn lower(&self, func: &mut Function) -> Result<(), LowerError>
-    where
-        Self: Sized,
-    {
-        run_pipeline(func, self)
-    }
 
     /// If false, the middle-end MUST rewrite all `Match` HIR nodes into
     /// if/else chains before reaching the backend.
@@ -105,6 +62,11 @@ pub trait Language: ExprEmitter + StmtEmitter {
     fn allows_multiple_return(&self) -> bool {
         false
     }
+    /// If false, the backend may not manually handle errors, & must use
+    /// try/catch statements for error handling
+    fn allows_unwind_fork(&self) -> bool {
+        false
+    }
     /// If false, the middle-end MUST flatten inheritance hierarchies into
     /// composition before reaching the backend.
     fn allows_inheritance(&self) -> bool {
@@ -136,5 +98,56 @@ pub trait Language: ExprEmitter + StmtEmitter {
     /// `emit_switch` is called and this returns false.
     fn allows_switch(&self) -> bool {
         false
+    }
+}
+
+pub trait Language: LowerTarget + ExprEmitter + StmtEmitter {
+    /// Default: unsupported for this backend. Panics on reach (see
+    /// `ExprEmitter`/`StmtEmitter` defaults).
+    fn emit_function(&self, func: &Function, out: &mut impl Write) -> fmt::Result {
+        let _ = (func, out);
+        unreachable!(
+            "`emit_function` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+        )
+    }
+
+    /// Default: unsupported for this backend. Panics on reach (see
+    /// `ExprEmitter`/`StmtEmitter` defaults).
+    fn emit_ty(&self, ty: &Ty, out: &mut impl Write) -> fmt::Result {
+        let _ = (ty, out);
+        unreachable!(
+            "`emit_ty` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+        )
+    }
+
+    /// Default: unsupported for this backend. Panics on reach (see
+    /// `ExprEmitter`/`StmtEmitter` defaults).
+    fn emit_module(&self, id: i32, out: &mut impl Write) -> fmt::Result {
+        let _ = (id, out);
+        unreachable!(
+            "`emit_module` has no override for this backend; set the matching `allows_*()` flag to false or implement the emitter"
+        )
+    }
+
+    /// Lowering passes contributed by a backend, run by `lower` (the B-core).
+    /// Structural passes are library-owned and flags-driven; semantic passes
+    /// (memory mapping, error propagation) are authored per target.
+    fn pipeline(&self) -> Vec<Box<dyn Lowering>> {
+        Vec::<Box<dyn Lowering>>::new()
+    }
+
+    /// A-veneer entry point: runs `pipeline()` through the B-core. Backends
+    /// that need bespoke lowering override this method (instead of or in
+    /// addition to supplying `pipeline()`). `self` is a concrete backend, so
+    /// it coerces to `&dyn LowerTarget` for the boxed passes.
+    fn lower(&self, func: &mut Function) -> Result<(), LowerError>
+    where
+        Self: Sized,
+    {
+        for pass in &self.pipeline() {
+            debug!(pass = pass.name(), func = %func.sig.name, "running lowering pass");
+            pass.apply(func, self)?;
+        }
+        Ok(())
     }
 }

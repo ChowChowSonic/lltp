@@ -11,7 +11,8 @@ use inkwell::context::Context;
 use lltp::backend::c_goto;
 use lltp::build_module;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
-use lltp::hir::flat::FlatModule;
+use lltp::hir::Module;
+use lltp::hir::verify::{are_equivalent, structured_to_cfg};
 
 /// Fixtures the baseline is expected to round-trip.
 const SUPPORTED: &[&str] = &[
@@ -50,7 +51,7 @@ fn rebuild(c_file: &Path) -> Result<String, String> {
     let compiled = compile_c_to_ir(&cfg, c_file).map_err(|e| e.to_string())?;
     let ctxt = Context::create();
     let module = build_module(&ctxt, &compiled.ir).unwrap();
-    let flat = FlatModule::from_module(&module).map_err(|e| e.to_string())?;
+    let flat = Module::from_module(&module).map_err(|e| e.to_string())?;
     c_goto::emit_module(&flat)
 }
 
@@ -123,10 +124,79 @@ fn pending_fixtures_fail_cleanly() {
 }
 
 /// Textual IR -> rebuilt C source text.
+/// The merged representation: recovery fills `cfg` (one block per basic block,
+/// in LLVM order, with edges taken from each terminator) and `structurize`
+/// writes the structured `body` over it. Every SUPPORTED fixture must structure
+/// without panicking, and the tree must stay equivalent to the graph as
+/// recovered; where an arm had to be duplicated the case is recorded
+/// instead, so a change in that set shows up as a failure.
+#[test]
+fn recovered_fixtures_structure_back_to_their_cfgs() {
+    let conf = FrontendConfig::default();
+    let mut failures: Vec<String> = Vec::new();
+    let mut duplicated: Vec<String> = Vec::new();
+    let mut checked = 0;
+
+    for name in SUPPORTED {
+        let compiled = match compile_c_to_ir(&conf, &fixture(name)) {
+            Ok(c) => c,
+            Err(e) => {
+                failures.push(format!("[{name}] {e}"));
+                continue;
+            }
+        };
+        let ctxt = Context::create();
+        let module = build_module(&ctxt, &compiled.ir).expect("IR should parse");
+        let recovered = match Module::from_module(&module) {
+            Ok(m) => m,
+            Err(e) => {
+                failures.push(format!("[{name}] recovery: {e}"));
+                continue;
+            }
+        };
+
+        for mut func in recovered.funcs {
+            assert!(!func.cfg.order.is_empty(), "[{name}] no recovery order");
+            assert_eq!(
+                func.cfg.entry, func.cfg.order[0],
+                "[{name}] entry is not the first recovered block"
+            );
+
+            let graph = func.cfg.clone();
+            let body = match func.structurize() {
+                Ok(body) => body.to_vec(),
+                Err(e) => {
+                    failures.push(format!("[{name}] {}: {e}", func.sig.name));
+                    continue;
+                }
+            };
+            // Duplicating an arm or inserting a join changes the shape, so the
+            // shape comparison only holds where structurize worked on the graph
+            // as recovered; a tree that had to duplicate an arm is recorded.
+            let structured = structured_to_cfg(&body);
+            if structured.len() != graph.len() {
+                duplicated.push(format!("[{name}] {}", func.sig.name));
+            } else if !are_equivalent(&graph, &structured) {
+                failures.push(format!(
+                    "[{name}] {}: structured body is not equivalent to its CFG",
+                    func.sig.name
+                ));
+            }
+            checked += 1;
+        }
+    }
+
+    assert!(checked > 0, "no fixture reached structurization");
+    // The only fixture whose arms reconverge at different joins, so its fork
+    // must be duplicated: `mixed`'s `&&` and `||`.
+    assert_eq!(duplicated, ["[logic_short_circuit] mixed".to_string()]);
+    assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
+}
+
 fn rebuild_ir(ir: &str) -> Result<String, String> {
     let ctxt = Context::create();
     let module = build_module(&ctxt, ir).map_err(|e| e.to_string())?;
-    let flat = FlatModule::from_module(&module).map_err(|e| e.to_string())?;
+    let flat = Module::from_module(&module).map_err(|e| e.to_string())?;
     c_goto::emit_module(&flat)
 }
 

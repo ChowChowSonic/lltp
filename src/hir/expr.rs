@@ -1,6 +1,7 @@
-use inkwell::values::InstructionOpcode;
-
-use crate::hir::{Lit, Ty};
+use crate::hir::{
+    Lit, Ty,
+    op::{BinOp, CastKind, Cmp, UnOp},
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct VarExpr {
@@ -9,12 +10,21 @@ pub struct VarExpr {
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct UnaryExpr {
-    pub op: InstructionOpcode,
+    pub op: UnOp,
     pub arg: Box<Expr>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct BinaryExpr {
-    pub op: InstructionOpcode,
+    pub op: BinOp,
+    pub arg1: Box<Expr>,
+    pub arg2: Box<Expr>,
+}
+/// A comparison. Kept separate from `BinaryExpr` because `BinOp` collapses
+/// `slt` and `ugt` into one opcode, and int and float predicates are two
+/// different families.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CmpExpr {
+    pub pred: Cmp,
     pub arg1: Box<Expr>,
     pub arg2: Box<Expr>,
 }
@@ -36,8 +46,11 @@ pub struct FieldExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CastExpr {
     pub data: Box<Expr>,
-    pub dtype: Box<Expr>,
+    pub dtype: Ty,
+    /// The kind of cast matters: `zext` and `sext` do not print the same way.
+    pub kind: CastKind,
 }
+
 /// Pure HIR expression AST node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -45,6 +58,7 @@ pub enum Expr {
     Var(VarExpr),
     UnaryOp(UnaryExpr),
     BinaryOp(BinaryExpr),
+    Cmp(CmpExpr),
     Call(CallExpr),
     Index(IndexExpr),
     Field(FieldExpr),
@@ -76,7 +90,7 @@ impl Expr {
     }
 
     /// Construct a binary operation.
-    pub fn binary(op: InstructionOpcode, arg1: Expr, arg2: Expr) -> Self {
+    pub fn binary(op: BinOp, arg1: Expr, arg2: Expr) -> Self {
         Expr::BinaryOp(BinaryExpr {
             op,
             arg1: Box::new(arg1),
@@ -84,12 +98,52 @@ impl Expr {
         })
     }
 
+    /// Construct a comparison.
+    pub fn cmp(pred: Cmp, arg1: Expr, arg2: Expr) -> Self {
+        Expr::Cmp(CmpExpr {
+            pred,
+            arg1: Box::new(arg1),
+            arg2: Box::new(arg2),
+        })
+    }
+
     /// Construct a unary operation.
-    pub fn unary(op: InstructionOpcode, arg: Expr) -> Self {
+    pub fn unary(op: UnOp, arg: Expr) -> Self {
         Expr::UnaryOp(UnaryExpr {
             op,
             arg: Box::new(arg),
         })
+    }
+
+    /// The type this expression evaluates to.
+    pub fn ty(&self) -> Ty {
+        match self {
+            Expr::Literal(l) => match l {
+                Lit::Int { bits, signed, .. } => Ty::Int(*bits, *signed),
+                Lit::Bool(_) => Ty::Bool,
+                Lit::Float { bits, .. } => Ty::Float(*bits),
+                Lit::NullPtr => Ty::Ptr(Box::new(Ty::Opaque("unresolved pointee".to_string()))),
+                Lit::Void => Ty::Void,
+            },
+            Expr::Var(v) => v.dtype.clone(),
+            Expr::UnaryOp(u) => match u.op {
+                UnOp::AddrOf => Ty::Ptr(Box::new(u.arg.ty())),
+                // Reading a cell yields what the cell holds.
+                UnOp::ValuAt => match u.arg.ty() {
+                    Ty::Ptr(pointee) => *pointee,
+                    other => other,
+                },
+            },
+            Expr::BinaryOp(b) => b.arg1.ty(),
+            Expr::Cmp(_) => Ty::Bool,
+            Expr::Cast(c) => c.dtype.clone(),
+            Expr::Index(i) => match i.base.ty() {
+                Ty::Ptr(pointee) => *pointee,
+                Ty::Array(element, _) => *element,
+                other => other,
+            },
+            Expr::Field(_) | Expr::Call(_) | Expr::Nop => Ty::Opaque("unresolved".to_string()),
+        }
     }
 
     /// Check if this is a Nop expression.

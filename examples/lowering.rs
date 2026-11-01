@@ -5,14 +5,13 @@
 //!
 //! Run with: `cargo run --example lowering`
 
-use std::fmt::{self, Formatter};
+use std::fmt::{self, Write};
 
-use inkwell::values::InstructionOpcode;
-
-use lltp::backend::{ExprEmitter, Language, StmtEmitter};
-use lltp::hir::expr::{BinaryExpr, VarExpr};
+use lltp::backend::{ExprEmitter, Language, LowerTarget, StmtEmitter};
+use lltp::hir::expr::{CmpExpr, VarExpr};
+use lltp::hir::op::{Cmp, IntCmp};
 use lltp::hir::stmt::{IfStmt, RetStmt, SwitchStmt};
-use lltp::hir::{Cfg, Expr, Function, Lit, Stmt, Ty};
+use lltp::hir::{Cfg, Expr, FnSig, Function, Lit, Param, Stmt, Ty};
 use lltp::passes::SwitchToIfElse;
 
 /// A toy C-like backend that can print the small HIR subset this example
@@ -21,16 +20,17 @@ use lltp::passes::SwitchToIfElse;
 struct ToyBackend;
 
 impl ExprEmitter for ToyBackend {
-    fn emit_expr(&self, expr: &Expr, out: &mut Formatter) -> fmt::Result {
+    fn emit_expr(&self, expr: &Expr, out: &mut impl Write) -> fmt::Result {
         match expr {
             Expr::Var(VarExpr { name, .. }) => write!(out, "{name}"),
             Expr::Literal(i) => self.emit_literal(i, out),
             Expr::BinaryOp(b) => self.emit_binary_op(b, out),
+            Expr::Cmp(c) => self.emit_cmp(c, out),
             other => unreachable!("toy emitter does not support {other:?}"),
         }
     }
 
-    fn emit_literal(&self, expr: &Lit, out: &mut Formatter) -> fmt::Result {
+    fn emit_literal(&self, expr: &Lit, out: &mut impl Write) -> fmt::Result {
         match expr {
             Lit::Int { value, .. } => write!(out, "{value}"),
             Lit::Bool(b) => write!(out, "{b}"),
@@ -38,18 +38,18 @@ impl ExprEmitter for ToyBackend {
         }
     }
 
-    fn emit_binary_op(&self, expr: &BinaryExpr, out: &mut Formatter) -> fmt::Result {
+    fn emit_cmp(&self, expr: &CmpExpr, out: &mut impl Write) -> fmt::Result {
         self.emit_expr(&expr.arg1, out)?;
-        match expr.op {
-            InstructionOpcode::ICmp => write!(out, " == ")?,
-            other => unreachable!("toy emitter does not support `{other:?}`"),
+        match expr.pred {
+            Cmp::Int(IntCmp::Eq) => write!(out, " == ")?,
+            other => unreachable!("toy emitter does not support predicate `{other:?}`"),
         }
         self.emit_expr(&expr.arg2, out)
     }
 }
 
 impl StmtEmitter for ToyBackend {
-    fn emit_stmt(&self, stmt: &Stmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_stmt(&self, stmt: &Stmt, out: &mut impl Write) -> fmt::Result {
         match stmt {
             Stmt::Ret(i) => self.emit_return(i, out),
             Stmt::If(i) => self.emit_if(i, out),
@@ -58,20 +58,22 @@ impl StmtEmitter for ToyBackend {
             Stmt::Branch(_i) => unreachable!("raw IR branches are not emitted"),
             Stmt::Loop(_i) => unreachable!("Loops are not emitted"),
             Stmt::TryCatch(_i) => unreachable!("Try/Catch are not emitted"),
+            Stmt::Invoke(i) => self.emit_invoke(i, out),
             Stmt::Break => unreachable!("Breaks are not emitted"),
             Stmt::Continue => unreachable!("Continues are not emitted"),
             Stmt::Label(_i) => unreachable!("Labels are not emitted"),
             Stmt::Goto(_i) => unreachable!("Gotos are not emitted"),
+            Stmt::Eval(_) | Stmt::Unreachable => unreachable!("Eval/Unreachable are not emitted"),
         }
     }
 
-    fn emit_block(&self, stmts: &[Stmt], out: &mut Formatter) -> fmt::Result {
+    fn emit_block(&self, stmts: &[Stmt], out: &mut impl Write) -> fmt::Result {
         writeln!(out, "{{")?;
         emit_stmt_lines(self, stmts, out)?;
         write!(out, "}}")
     }
 
-    fn emit_return(&self, stmt: &RetStmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_return(&self, stmt: &RetStmt, out: &mut impl Write) -> fmt::Result {
         write!(out, "return")?;
         if let Some(value) = &stmt.value {
             write!(out, " ")?;
@@ -80,7 +82,7 @@ impl StmtEmitter for ToyBackend {
         write!(out, ";")
     }
 
-    fn emit_if(&self, stmt: &IfStmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_if(&self, stmt: &IfStmt, out: &mut impl Write) -> fmt::Result {
         write!(out, "if (")?;
         self.emit_expr(&stmt.cond, out)?;
         writeln!(out, ") {{")?;
@@ -101,7 +103,7 @@ impl StmtEmitter for ToyBackend {
         Ok(())
     }
 
-    fn emit_switch(&self, stmt: &SwitchStmt, out: &mut Formatter) -> fmt::Result {
+    fn emit_switch(&self, stmt: &SwitchStmt, out: &mut impl Write) -> fmt::Result {
         write!(out, "switch (")?;
         self.emit_expr(&stmt.value, out)?;
         writeln!(out, ") {{")?;
@@ -120,7 +122,7 @@ impl StmtEmitter for ToyBackend {
 }
 
 /// One statement per line; newline handling lives here and only here.
-fn emit_stmt_lines(backend: &ToyBackend, stmts: &[Stmt], out: &mut Formatter) -> fmt::Result {
+fn emit_stmt_lines(backend: &ToyBackend, stmts: &[Stmt], out: &mut impl Write) -> fmt::Result {
     for stmt in stmts {
         backend.emit_stmt(stmt, out)?;
         writeln!(out)?;
@@ -128,15 +130,17 @@ fn emit_stmt_lines(backend: &ToyBackend, stmts: &[Stmt], out: &mut Formatter) ->
     Ok(())
 }
 
-impl Language for ToyBackend {
+impl LowerTarget for ToyBackend {
     fn name(&self) -> &str {
         "toy-c"
     }
+}
 
+impl Language for ToyBackend {
     /// Entry point of the emit chain: function header, then its body block.
-    fn emit_function(&self, func: &Function, out: &mut Formatter) -> fmt::Result {
-        write!(out, "int {}(", func.name)?;
-        for (i, _) in func.params.iter().enumerate() {
+    fn emit_function(&self, func: &Function, out: &mut impl Write) -> fmt::Result {
+        write!(out, "int {}(", func.sig.name)?;
+        for i in 0..func.sig.params.len() {
             if i > 0 {
                 write!(out, ", ")?;
             }
@@ -151,53 +155,6 @@ impl Language for ToyBackend {
     fn pipeline(&self) -> Vec<Box<dyn lltp::passes::Lowering>> {
         vec![Box::new(SwitchToIfElse)]
     }
-
-    fn allows_match(&self) -> bool {
-        false
-    }
-    fn allows_closures(&self) -> bool {
-        false
-    }
-    fn allows_generics(&self) -> bool {
-        false
-    }
-    fn allows_async(&self) -> bool {
-        false
-    }
-    fn allows_threads(&self) -> bool {
-        false
-    }
-    fn allows_locks(&self) -> bool {
-        false
-    }
-    fn allows_raw_pointers(&self) -> bool {
-        false
-    }
-    fn allows_exceptions(&self) -> bool {
-        false
-    }
-    fn allows_multiple_return(&self) -> bool {
-        false
-    }
-    fn allows_inheritance(&self) -> bool {
-        false
-    }
-    fn allows_default_args(&self) -> bool {
-        false
-    }
-    fn allows_union(&self) -> bool {
-        false
-    }
-    fn allows_macros(&self) -> bool {
-        false
-    }
-    fn allows_goto(&self) -> bool {
-        false
-    }
-    // No `switch` in the target: the structural lowering pass rewrites it.
-    fn allows_switch(&self) -> bool {
-        false
-    }
 }
 
 fn i64(v: u64) -> Lit {
@@ -208,13 +165,20 @@ fn i64(v: u64) -> Lit {
     }
 }
 
-/// A `Function` built by hand — until the recovery passes (de-SSA,
-/// structuring) land in M1, this is the direct route to lowering/emission.
+/// A `Function` built by hand, so the demo runs without an LLVM module in the
+/// picture.
 fn recovered_switch() -> Function {
     Function {
-        name: "classify".to_string(),
-        params: vec![Ty::Int(64, true)],
-        return_ty: Ty::Int(64, true),
+        sig: FnSig {
+            name: "classify".to_string(),
+            params: vec![Param {
+                name: "x".to_string(),
+                ty: Ty::Int(64, true),
+            }],
+            ret: Ty::Int(64, true),
+            variadic: false,
+        },
+        locals: Vec::new(),
         cfg: Cfg::default(),
         body: vec![Stmt::Switch(SwitchStmt {
             value: Expr::Var(VarExpr {
