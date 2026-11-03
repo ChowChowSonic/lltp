@@ -10,6 +10,7 @@ pub mod module;
 pub mod op;
 pub mod promote;
 pub mod reaching;
+pub mod refine;
 pub mod stmt;
 pub mod structurize;
 pub mod ty;
