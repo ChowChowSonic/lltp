@@ -57,7 +57,7 @@ pub fn cond_var(block: &str) -> String {
 }
 
 /// `!e` in the HIR's own idiom (`e ^ true`), undoing a double negation.
-fn negate(e: Expr) -> Expr {
+pub(crate) fn negate(e: Expr) -> Expr {
     match e {
         Expr::Literal(Lit::Bool(b)) => Expr::bool(!b),
         Expr::BinaryOp(b) if b.op == BinOp::Xor && *b.arg2 == Expr::bool(true) => *b.arg1,
