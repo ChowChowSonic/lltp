@@ -63,9 +63,13 @@ impl Function {
     }
 
     /// Run structurization on this function's CFG, populating and returning `self.body`.
+    ///
+    /// The loop-exit normalization can introduce its own variable (the exit tag
+    /// read after the loop), which is registered on `locals` so the backend
+    /// declares it.
     pub fn structurize(&mut self) -> Result<&[Stmt], StructurizeError> {
         let reachable = self.cfg.keep_reachable();
-        let stmts = reachable.structurize()?;
+        let stmts = crate::hir::structurize::structurize_with(&reachable, &mut self.locals)?;
         self.body = stmts;
         Ok(&self.body)
     }

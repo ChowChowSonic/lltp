@@ -4,8 +4,8 @@ use crate::errors::StructurizeError;
 use crate::hir::expr::{BinaryExpr, VarExpr};
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
-    DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, reachable, reachable_from,
-    t1t2_reduce, unify_loop_exits,
+    DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, normalize_loop_exits, reachable,
+    reachable_from, t1t2_reduce,
 };
 use crate::hir::op::BinOp;
 use crate::hir::stmt::{BranchStmt, IfStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt};
@@ -32,6 +32,15 @@ struct LoopContext {
 /// owns its downstream); a growth budget turns pathological shapes back into
 /// errors instead of unbounded duplication.
 pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
+    structurize_with(cfg, &mut Vec::new())
+}
+
+/// The same run, with the variables the normalization introduces recorded so the
+/// backend can declare them (`exit_tag_*` is read after the loop).
+pub fn structurize_with(
+    cfg: &Cfg,
+    locals: &mut Vec<(String, Ty)>,
+) -> Result<Vec<Stmt>, StructurizeError> {
     let mut current = cfg.clone();
     let max_blocks = cfg.len().saturating_mul(8).max(64);
     loop {
@@ -42,7 +51,7 @@ pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
             current = split_nodes(&current)?;
             continue;
         }
-        let normalized = unify_loop_exits(&current);
+        let normalized = normalize_loop_exits(&current, locals);
         match structure_cfg(&normalized) {
             Err(StructurizeError::ParallelJoinsNeedNodeSplitting { fork })
                 if current.len() <= max_blocks =>
@@ -808,7 +817,7 @@ fn fresh_split_name(cfg: &Cfg, base: &str) -> String {
 
 /// Redirect every edge `old` leaving `blk` (successor list and trailing
 /// branch statement) to `new`.
-fn retarget_edge(blk: &mut Block, old: &str, new: &str) {
+pub(crate) fn retarget_edge(blk: &mut Block, old: &str, new: &str) {
     for s in &mut blk.succ {
         if s == old {
             *s = new.to_string();
@@ -878,7 +887,7 @@ fn split_node(cfg: &mut Cfg, name: &str) -> Result<(), StructurizeError> {
             .get_mut(p)
             .ok_or_else(|| StructurizeError::UnknownBlock(p.clone()))?;
         retarget_edge(p_blk, name, &cname);
-        cfg.blocks.insert(cname.clone(), clone);
+        cfg.push_block(clone);
         // The clone's successors (its own self-loop included) gain it as a
         // predecessor.
         for s in cfg.blocks[&cname].succ.clone() {
@@ -963,7 +972,7 @@ fn split_fork(cfg: &Cfg, fork: &str) -> Result<Cfg, StructurizeError> {
             let mut clone = out.blocks[n].clone();
             clone.name = cname.clone();
             clone.pred.clear();
-            out.blocks.insert(cname.clone(), clone);
+            out.push_block(clone);
             map.insert(n.clone(), cname);
         }
 
