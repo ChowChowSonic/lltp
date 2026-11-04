@@ -1,3 +1,4 @@
+use crate::hir::structurize::retarget_edge;
 use crate::hir::{
     Block, Cfg, Expr, Lit, Stmt, Ty,
     expr::VarExpr,
@@ -94,6 +95,301 @@ pub fn reachable_from(cfg: &Cfg, src: &str, within: &BTreeSet<String>) -> BTreeS
         }
     }
     seen
+}
+pub fn loop_exit_edges(
+    cfg: &Cfg,
+    l: &NaturalLoop,
+    reach: &BTreeSet<String>,
+) -> Vec<(String, String)> {
+    let mut edges = Vec::new();
+    for n in &l.body {
+        for s in &cfg.blocks[n].succ {
+            if !l.body.contains(s) && reach.contains(s) {
+                edges.push((n.clone(), s.clone()));
+            }
+        }
+    }
+    edges
+}
+
+/// `n` collapses away under `Cfg::collapse_chains`: no statements and one
+/// successor, so an exit edge that reaches the join only through such a node is
+/// the one case where retargeting is behaviour-preserving.
+fn is_merge_only(cfg: &Cfg, n: &str) -> bool {
+    cfg.blocks[n].stmts.is_empty() && cfg.blocks[n].succ.len() == 1
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitEdge {
+    Canonical { src: String, target: String },
+    Continue { src: String, target: String },
+    OuterBreak { src: String, target: String },
+    Terminates { src: String, target: String },
+    Divergent { src: String, target: String },
+}
+
+impl ExitEdge {
+    pub fn src(&self) -> &str {
+        match self {
+            ExitEdge::Canonical { src, .. }
+            | ExitEdge::Continue { src, .. }
+            | ExitEdge::OuterBreak { src, .. }
+            | ExitEdge::Terminates { src, .. }
+            | ExitEdge::Divergent { src, .. } => src,
+        }
+    }
+
+    pub fn target(&self) -> &str {
+        match self {
+            ExitEdge::Canonical { target, .. }
+            | ExitEdge::Continue { target, .. }
+            | ExitEdge::OuterBreak { target, .. }
+            | ExitEdge::Terminates { target, .. }
+            | ExitEdge::Divergent { target, .. } => target,
+        }
+    }
+
+    pub fn is_divergent(&self) -> bool {
+        matches!(self, ExitEdge::Divergent { .. })
+    }
+}
+
+fn relink(cfg: &mut Cfg) {
+    complete_order(cfg);
+    cfg.link_edges();
+}
+
+/// `pred` and `exits` are rebuilt by walking `order`, so a graph whose `order`
+/// does not cover every block — which is what happens when a pass adds blocks
+/// straight into `blocks` — must be completed before `link_edges` runs, or the
+/// missing blocks' edges are dropped.
+fn complete_order(cfg: &mut Cfg) {
+    let names: Vec<String> = cfg.blocks.keys().cloned().collect();
+    for n in names {
+        if !cfg.order.contains(&n) {
+            cfg.order.push(n);
+        }
+    }
+}
+
+/// The loop's single-exit target: `ipdom(header)`, or `None` when its paths
+/// leave through the virtual sink, which is what a loop containing a `return`
+/// looks like (`PostDomInfo` keeps the sink as an `ipdom` value).
+pub fn loop_join(l: &NaturalLoop, pdom: &PostDomInfo) -> Option<String> {
+    pdom.ipdom
+        .get(&l.header)
+        .filter(|j| *j != VIRTUAL_SINK_STR)
+        .cloned()
+}
+
+/// `ancestors` are the loops whose bodies strictly contain `l`'s, and `join` is
+/// `l`'s single-exit target when it has one. A `Continue` or `OuterBreak` target
+/// is real control flow (`continue`, `break` out of an enclosing loop), so it is
+/// never a merge candidate.
+pub fn classify_exit_edges(
+    cfg: &Cfg,
+    l: &NaturalLoop,
+    ancestrors: &[&NaturalLoop],
+    reach: &BTreeSet<String>,
+    join: Option<&str>,
+) -> Vec<ExitEdge> {
+    loop_exit_edges(cfg, l, reach)
+        .into_iter()
+        .map(|(src, target)| {
+            if Some(target.as_str()) == join {
+                ExitEdge::Canonical { src, target }
+            } else if ancestrors.iter().any(|a| a.header == target) {
+                ExitEdge::Continue { src, target }
+            } else if ancestrors.iter().any(|a| a.body.contains(&target)) {
+                ExitEdge::OuterBreak { src, target }
+            } else if cfg.blocks[&target].succ.is_empty() {
+                ExitEdge::Terminates { src, target }
+            } else {
+                ExitEdge::Divergent { src, target }
+            }
+        })
+        .collect()
+}
+
+/// Turn every natural loop in `cfg` into a single-exit (single-successor) loop.
+///
+/// Two rewrites, in order of preference:
+/// 1. `converge_exits` retargets a divergent edge to the join, which is only legal
+///    when the target is a statement-free merge node pointing straight at the join.
+///    It drops nodes, so `are_equivalent` cannot confirm it: `collapse_chains` only
+///    fuses a node into its pred when the pred has a single successor, and the fork
+///    that makes an exit arm always has two.
+/// 2. `dispatch_exit` keeps every target and adds one entry block plus a chain of
+///    guards on a tag variable, so the loop gains exactly one exit edge. Each arm
+///    still goes to its own target, so a `continue` or `break` arm is carried
+///    through the dispatch rather than dropped.
+///
+/// The dispatch entry sits inside the loop bodies (its predecessors are the exit
+/// sources), which is what lets `LoopTree::build` accept a loop that used to
+/// report `MultiExitLoop`.
+pub fn normalize_loop_exits(in_cfg: &Cfg, locals: &mut Vec<(String, Ty)>) -> Cfg {
+    let mut out = in_cfg.clone();
+    relink(&mut out);
+    // Duplication and dispatch blocks grow the graph, so the budget is the graph
+    // size, not the iteration count.
+    let budget = in_cfg.len().saturating_mul(8).max(64);
+    for _ in 0..budget {
+        let dom = dominators(&out);
+        let pdom = PostDomInfo::from(&out);
+        let reach = reachable(&out);
+        let mut loops = natural_loops(&out, &dom);
+        loops.sort_by_key(|l| (l.body.len(), l.header.clone()));
+        let mut changed = false;
+        for i in 0..loops.len() {
+            let ancestrors: Vec<&NaturalLoop> = loops
+                .iter()
+                .filter(|a| {
+                    a.body.len() > loops[i].body.len() && a.body.is_superset(&loops[i].body)
+                })
+                .collect();
+            let join = loop_join(&loops[i], &pdom);
+            let edges = classify_exit_edges(&out, &loops[i], &ancestrors, &reach, join.as_deref());
+            let targets: BTreeSet<String> = edges.iter().map(|e| e.target().to_string()).collect();
+            if targets.len() <= 1 {
+                continue;
+            }
+            if converge_exits(&mut out, &edges, join.as_ref())
+                || dispatch_exit(&mut out, locals, &loops[i], &edges)
+            {
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    relink(&mut out);
+    out
+}
+
+/// Rewrite 1. Legal only when each divergent target is a statement-free merge
+/// node pointing straight at the join: retargeting then skips nothing, and
+/// `collapse_chains` already removes such nodes, so the fingerprint is unchanged.
+fn converge_exits(cfg: &mut Cfg, edges: &[ExitEdge], join: Option<&String>) -> bool {
+    let Some(j) = join else { return false };
+    let divergent: Vec<&ExitEdge> = edges.iter().filter(|e| e.is_divergent()).collect();
+    if divergent.is_empty() {
+        return false;
+    }
+    if !divergent.iter().all(|e| {
+        let blk = &cfg.blocks[e.target()];
+        is_merge_only(cfg, e.target()) && blk.succ[0] == *j
+    }) {
+        return false;
+    }
+    for e in &divergent {
+        let blk = cfg.get_block_mut(e.src()).unwrap();
+        retarget_edge(blk, e.target(), j);
+    }
+    relink(cfg);
+    true
+}
+
+/// Rewrite 2. Every exit edge is retargeted to one entry block, and each arm
+/// writes its own index before control leaves the loop. A `br` block has at most
+/// one exit arm — every body node keeps an in-body successor — so the write placed
+/// before its terminator is dead on the other arm and stays correct.
+// shortcut: a `switch` block with two arms leaving the loop cannot carry two
+// different values in one `Let`, and its arms are statement lists rather than
+// blocks, so such loops are left alone until the arms are materialized as blocks.
+fn dispatch_exit(
+    cfg: &mut Cfg,
+    locals: &mut Vec<(String, Ty)>,
+    l: &NaturalLoop,
+    edges: &[ExitEdge],
+) -> bool {
+    let tag_ty = Ty::Int(32, true);
+    let tag = format!("_exit_tag_{}", l.header);
+    let entry = format!("_unified_exit{}", l.header);
+    let targets: Vec<String> = edges
+        .iter()
+        .map(|e| e.target().to_string())
+        .collect::<BTreeSet<String>>()
+        .into_iter()
+        .collect();
+    if targets.len() <= 1 {
+        return false;
+    }
+
+    // One write per block: two exit arms from one block cannot be told apart.
+    let mut arms: BTreeMap<String, usize> = BTreeMap::new();
+    for e in edges {
+        *arms.entry(e.src().to_string()).or_insert(0) += 1;
+    }
+    if arms.values().any(|c| *c > 1) {
+        return false;
+    }
+    if !locals.iter().any(|(n, _)| *n == tag) {
+        locals.push((tag.clone(), tag_ty.clone()));
+    }
+
+    for e in edges {
+        let idx = targets.iter().position(|t| t == e.target()).unwrap();
+        let blk = cfg.get_block_mut(e.src()).unwrap();
+        insert_before_term(
+            blk,
+            Stmt::let_binding(Expr::var(&tag, tag_ty.clone()), int_lit(idx)),
+        );
+        retarget_edge(blk, e.target(), &entry);
+    }
+
+    // One guard block per arm, each a `Branch`: `successors_of` gives nothing for
+    // a `Switch`, so the edges would have to be maintained by hand. The last target
+    // needs no guard of its own, so the chain has `targets.len() - 1` blocks.
+    let names: Vec<String> = (0..targets.len() - 1)
+        .map(|i| {
+            if i == 0 {
+                entry.clone()
+            } else {
+                format!("{entry}_{i}")
+            }
+        })
+        .collect();
+    for (i, name) in names.iter().enumerate() {
+        let otherwise = if i + 1 == targets.len() - 1 {
+            targets[i + 1].clone()
+        } else {
+            names[i + 1].clone()
+        };
+        let term = BranchStmt {
+            cond: Some(Expr::cmp(
+                Cmp::Int(IntCmp::Eq),
+                Expr::var(&tag, tag_ty.clone()),
+                int_lit(i),
+            )),
+            then_block: targets[i].clone(),
+            else_block: Some(otherwise),
+        };
+        cfg.push_block(Block::build(name, Vec::new(), Some(Stmt::Branch(term))));
+    }
+    relink(cfg);
+    true
+}
+
+/// Keep the terminator last, as `Block::term()` requires. On a block with no
+/// terminator statement the write becomes the whole block, which is the graph-node
+/// case (`Block::build` records `succ` from its terminator, so such a node only
+/// exists in hand-built graphs).
+fn insert_before_term(blk: &mut Block, stmt: Stmt) {
+    let pos = if blk.stmts.is_empty() {
+        0
+    } else {
+        blk.stmts.len() - 1
+    };
+    blk.stmts.insert(pos, stmt);
+}
+
+fn int_lit(value: usize) -> Expr {
+    Expr::Literal(Lit::Int {
+        value: value as u64,
+        bits: 32,
+        signed: true,
+    })
 }
 
 pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
@@ -226,7 +522,7 @@ pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
                     dest_blk.pred.push(unified_name.clone());
                 }
             }
-            cfg.blocks.insert(unified_name, unified_block);
+            cfg.push_block(unified_block);
             break;
         }
         if !changed {
@@ -668,5 +964,234 @@ mod tests {
         );
         let dom = dominators(&cfg);
         assert!(natural_loops(&cfg, &dom).is_empty());
+    }
+
+    use crate::hir::structurize::structurize;
+
+    fn flag(name: &str) -> Expr {
+        Expr::var(name, Ty::Bool)
+    }
+
+    fn mark(name: &str) -> Stmt {
+        Stmt::Eval(flag(name))
+    }
+
+    fn br(cond: Option<Expr>, then: &str, otherwise: Option<&str>) -> Stmt {
+        Stmt::Branch(BranchStmt {
+            cond,
+            then_block: then.to_string(),
+            else_block: otherwise.map(str::to_string),
+        })
+    }
+
+    fn exit_targets(cfg: &Cfg, l: &NaturalLoop) -> BTreeSet<String> {
+        loop_exit_edges(cfg, l, &reachable(cfg))
+            .iter()
+            .map(|(_, t)| t.clone())
+            .collect()
+    }
+
+    /// `e1` and `e2` are statement-free merge nodes that both meet at `join`, so
+    /// retargeting the two exit edges to `join` skips nothing.
+    #[test]
+    fn merge_only_exits_converge_to_the_join() {
+        let cfg = Cfg::cfg_from(
+            "entry",
+            &[
+                ("entry", "h"),
+                ("h", "b"),
+                ("h", "e1"),
+                ("b", "h"),
+                ("b", "e2"),
+                ("e1", "join"),
+                ("e2", "join"),
+                ("join", "done"),
+            ],
+        );
+        let mut locals = Vec::new();
+        let out = normalize_loop_exits(&cfg, &mut locals);
+        let dom = dominators(&out);
+        let loops = natural_loops(&out, &dom);
+        assert_eq!(
+            exit_targets(&out, &loops[0]),
+            BTreeSet::from(["join".to_string()])
+        );
+        let dropped: BTreeSet<String> = reachable(&cfg)
+            .difference(&reachable(&out))
+            .cloned()
+            .collect();
+        assert_eq!(
+            dropped,
+            BTreeSet::from(["e1".to_string(), "e2".to_string()])
+        );
+        assert!(
+            dropped
+                .iter()
+                .all(|n| is_merge_only(&cfg, n) && cfg.blocks[n].succ[0] == "join")
+        );
+        // `are_equivalent` cannot confirm this one: `collapse_chains` only fuses a
+        // node into its pred when the pred has a single successor, and the fork
+        // that creates an exit arm always has two. So the soundness claim is the
+        // guard's premise itself — the dropped nodes executed nothing — and the
+        // check that remains is that the tree still structures the result.
+        assert!(structurize(&out).is_ok());
+    }
+
+    /// Both targets carry statements, so nothing can be converged: the exit
+    /// becomes one entry block plus a guard chain on the tag, and the loop has a
+    /// single exit edge.
+    #[test]
+    fn statementful_exits_get_a_dispatch_block() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build("entry", vec![], Some(br(None, "h", None))),
+                Block::build("h", vec![], Some(br(Some(flag("c")), "b", Some("e1")))),
+                Block::build("b", vec![], Some(br(Some(flag("d")), "e2", Some("h")))),
+                Block::build("e1", vec![mark("e1")], Some(Stmt::ret_void())),
+                Block::build("e2", vec![mark("e2")], Some(Stmt::ret_void())),
+            ],
+        );
+        let mut locals = Vec::new();
+        let out = normalize_loop_exits(&cfg, &mut locals);
+        let entry = "_unified_exith".to_string();
+        let dom = dominators(&out);
+        let loops = natural_loops(&out, &dom);
+        assert_eq!(
+            exit_targets(&out, &loops[0]),
+            BTreeSet::from([entry.clone()])
+        );
+        // Two targets, so the entry is the only guard block.
+        assert_eq!(
+            out.blocks[&entry].succ,
+            vec!["e1".to_string(), "e2".to_string()]
+        );
+        assert!(out.blocks.keys().all(|n| !n.contains("_1")));
+        // The write is per arm, so both paths still reach their own target.
+        assert!(out.blocks["h"].succ.contains(&entry));
+        assert!(out.blocks["b"].succ.contains(&entry));
+        assert!(matches!(out.blocks["h"].stmts[0], Stmt::Let(_)));
+        assert_eq!(out.blocks["e1"].pred, vec![entry.clone()]);
+        assert_eq!(out.blocks["e2"].pred, vec![entry.clone()]);
+        assert!(locals.contains(&("_exit_tag_h".to_string(), Ty::Int(32, true))));
+    }
+
+    /// `join` carries statements, so nothing can be converged; the `return` arm is
+    /// a `Terminates` target and is dispatched alongside it.
+    #[test]
+    fn loop_with_a_return_gains_one_exit_edge() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build("entry", vec![], Some(br(None, "h", None))),
+                Block::build("h", vec![], Some(br(Some(flag("c")), "b", Some("join")))),
+                Block::build("b", vec![], Some(br(Some(flag("d")), "ret", Some("h")))),
+                Block::build("join", vec![mark("join")], Some(br(None, "ret", None))),
+                Block::build("ret", vec![], Some(Stmt::ret_void())),
+            ],
+        );
+        let mut locals = Vec::new();
+        let out = normalize_loop_exits(&cfg, &mut locals);
+        let dom = dominators(&out);
+        let loops = natural_loops(&out, &dom);
+        let entry = "_unified_exith".to_string();
+        assert_eq!(
+            exit_targets(&out, &loops[0]),
+            BTreeSet::from([entry.clone()])
+        );
+        assert_eq!(
+            out.blocks[&entry].succ,
+            vec!["join".to_string(), "ret".to_string()]
+        );
+        assert!(locals.contains(&("_exit_tag_h".to_string(), Ty::Int(32, true))));
+        assert!(structurize(&out).is_ok());
+    }
+
+    /// A `switch` inside the loop with two arms leaving it cannot be dispatched:
+    /// one `Let` cannot stamp two arms with different values, and the switch arms
+    /// are statement lists rather than blocks.
+    #[test]
+    fn two_exit_arms_from_one_switch_block_are_left_alone() {
+        let cfg = Cfg::cfg_from(
+            "entry",
+            &[
+                ("entry", "h"),
+                ("h", "b"),
+                ("h", "e1"),
+                ("h", "e2"),
+                ("b", "h"),
+                ("e1", "j1"),
+                ("e2", "j2"),
+                ("j1", "done"),
+                ("j2", "done"),
+            ],
+        );
+        let mut locals = Vec::new();
+        let out = normalize_loop_exits(&cfg, &mut locals);
+        let dom = dominators(&out);
+        let loops = natural_loops(&out, &dom);
+        assert_eq!(
+            exit_targets(&out, &loops[0]),
+            BTreeSet::from(["e1".to_string(), "e2".to_string()])
+        );
+        assert!(out.blocks.keys().all(|n| !n.starts_with("_unified_exit")));
+        assert!(locals.is_empty());
+    }
+
+    /// A `continue` edge is a frame boundary, so the pass cannot converge it, but
+    /// the dispatch still carries it: the arm keeps its own target.
+    #[test]
+    fn classification_keeps_the_continue_edge() {
+        let cfg = Cfg::cfg_from(
+            "entry",
+            &[
+                ("entry", "oh"),
+                ("oh", "B"),
+                ("oh", "oj"),
+                ("B", "ih"),
+                ("B", "oh"),
+                ("ih", "C"),
+                ("ih", "ij"),
+                ("C", "ih"),
+                ("C", "oh"),
+                ("ij", "done"),
+                ("oj", "done"),
+            ],
+        );
+        let dom = dominators(&cfg);
+        let pdom = PostDomInfo::from(&cfg);
+        let loops = natural_loops(&cfg, &dom);
+        let inner = loops.iter().find(|l| l.header == "ih").expect("inner loop");
+        let ancestrors: Vec<&NaturalLoop> = loops
+            .iter()
+            .filter(|a| a.body.len() > inner.body.len() && a.body.is_superset(&inner.body))
+            .collect();
+        let join = loop_join(inner, &pdom);
+        let edges =
+            classify_exit_edges(&cfg, inner, &ancestrors, &reachable(&cfg), join.as_deref());
+        assert!(
+            edges
+                .iter()
+                .any(|e| matches!(e, ExitEdge::Continue { .. }) && e.src() == "C"),
+            "{edges:?}"
+        );
+        assert!(
+            edges
+                .iter()
+                .any(|e| matches!(e, ExitEdge::Divergent { .. }) && e.target() == "ij")
+        );
+
+        let mut locals = Vec::new();
+        let out = normalize_loop_exits(&cfg, &mut locals);
+        let dom = dominators(&out);
+        let loops = natural_loops(&out, &dom);
+        let inner = loops.iter().find(|l| l.header == "ih").expect("inner loop");
+        let all: BTreeSet<String> = out.blocks.keys().cloned().collect();
+        let entry = "_unified_exitih".to_string();
+        assert_eq!(exit_targets(&out, inner), BTreeSet::from([entry.clone()]));
+        // The `continue` arm is carried through the dispatch rather than turned
+        // into a break: the entry still reaches the enclosing header.
+        assert!(reachable_from(&out, &entry, &all).contains("oh"));
+        assert!(structurize(&out).is_ok());
     }
 }
