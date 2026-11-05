@@ -1158,7 +1158,7 @@ mod test {
         errors::StructurizeError,
         hir::{
             cfg::Cfg,
-            flow::{dominators, reachable, reducible, unify_loop_exits},
+            flow::{dominators, normalize_loop_exits, reachable, reducible},
             structurize::{LoopTree, split_fork, split_nodes, structurize},
             verify::{are_equivalent, structured_to_cfg},
         },
@@ -1510,7 +1510,7 @@ mod test {
         );
         // Two parallel diamonds: the fork's arms re-converge at different
         // joins, so each arm must own a private copy of its downstream.
-        let normalized = unify_loop_exits(&cfg);
+        let normalized = normalize_loop_exits(&cfg, &mut Vec::new());
         let split = split_fork(&normalized, "e").unwrap();
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&split, &structured_to_cfg(&stmts)));
@@ -1524,7 +1524,7 @@ mod test {
             "f",
             &[("f", "a"), ("f", "b"), ("a", "b"), ("b", "j"), ("j", "x")],
         );
-        let normalized = unify_loop_exits(&cfg);
+        let normalized = normalize_loop_exits(&cfg, &mut Vec::new());
         let split = split_fork(&normalized, "f").unwrap();
         // Every original path still exists, on private copies where shared.
         assert!(split.contains_block("a"));

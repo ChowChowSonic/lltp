@@ -1,9 +1,8 @@
 use crate::hir::structurize::retarget_edge;
 use crate::hir::{
     Block, Cfg, Expr, Lit, Stmt, Ty,
-    expr::VarExpr,
     op::{Cmp, IntCmp},
-    stmt::{BranchStmt, LetStmt, SwitchStmt},
+    stmt::BranchStmt,
 };
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 pub struct PostDomInfo {
@@ -392,146 +391,6 @@ fn int_lit(value: usize) -> Expr {
     })
 }
 
-pub fn unify_loop_exits(in_cfg: &Cfg) -> Cfg {
-    let mut cfg = in_cfg.clone();
-    loop {
-        let mut changed = false;
-        let dom = dominators(&cfg);
-        let reach = reachable(&cfg);
-        let loops = natural_loops(&cfg, &dom);
-        // collect exit targets not in the body but are reachable
-        for nl in loops {
-            let mut exits: Vec<(String, String)> = Vec::new();
-            let mut distinct_targets: BTreeSet<String> = BTreeSet::new();
-            for node in &nl.body {
-                for s in &cfg.blocks[node].succ {
-                    if !nl.body.contains(s) && reach.contains(s) {
-                        exits.push((node.clone(), s.clone()));
-                        distinct_targets.insert(s.clone());
-                    }
-                }
-            }
-            if distinct_targets.len() <= 1 {
-                continue;
-            }
-            changed = true;
-            let tag_name = format!("_exit_tag_{}", nl.header);
-            let unified_name = format!("_unified_exit{}", nl.header);
-            let targets: Vec<String> = distinct_targets.into_iter().collect();
-
-            // Create unified exit block
-            for (src, og_dst) in exits.iter() {
-                let target_idx = targets.iter().position(|t| t == og_dst).unwrap();
-                let src_blk = cfg.blocks.get_mut(src).unwrap();
-
-                let insert_pos = src_blk.stmts.len().saturating_sub(1);
-                src_blk.stmts.insert(
-                    insert_pos,
-                    Stmt::Let(LetStmt {
-                        dest: Box::new(Expr::Var(VarExpr {
-                            name: tag_name.clone(),
-                            dtype: Ty::Int(32, true),
-                        })),
-                        src: Box::new(Expr::Literal(Lit::Int {
-                            value: target_idx as u64,
-                            bits: 32,
-                            signed: true,
-                        })),
-                    }),
-                );
-                for s in &mut src_blk.succ {
-                    if s == og_dst {
-                        *s = unified_name.clone();
-                    }
-                }
-                if let Some(Stmt::Branch(BranchStmt {
-                    then_block,
-                    else_block,
-                    ..
-                })) = src_blk.stmts.last_mut()
-                {
-                    if then_block == og_dst {
-                        *then_block = unified_name.clone();
-                    }
-                    if let Some(e1) = else_block
-                        && e1 == og_dst
-                    {
-                        *else_block = Some(unified_name.clone())
-                    }
-                }
-                if let Some(dest_blk) = cfg.blocks.get_mut(og_dst) {
-                    dest_blk.pred.retain(|p| p != src);
-                }
-            }
-
-            let mut preds = BTreeSet::new();
-            for (src, _) in &exits {
-                preds.insert(src.clone());
-            }
-            let mut unified_block = Block::new(&unified_name);
-            unified_block.pred = preds.into_iter().collect();
-
-            if targets.len() == 2 {
-                let cond = Expr::cmp(
-                    Cmp::Int(IntCmp::Eq),
-                    Expr::Var(VarExpr {
-                        name: tag_name.clone(),
-                        dtype: Ty::Int(32, true),
-                    }),
-                    Expr::Literal(Lit::Int {
-                        value: 0,
-                        bits: 32,
-                        signed: true,
-                    }),
-                );
-                unified_block.stmts.push(Stmt::Branch(BranchStmt {
-                    cond: Some(cond),
-                    then_block: targets[0].clone(),
-                    else_block: Some(targets[1].clone()),
-                }));
-                unified_block.succ = vec![targets[0].clone(), targets[1].clone()];
-            } else {
-                unified_block.succ = targets.clone();
-                unified_block.stmts.push(Stmt::Switch(SwitchStmt {
-                    value: Expr::Var(VarExpr {
-                        name: tag_name.clone(),
-                        dtype: Ty::Int(32, true),
-                    }),
-                    cases: targets
-                        .clone()
-                        .into_iter()
-                        .enumerate()
-                        .map(|(pos, v)| {
-                            (
-                                Lit::Int {
-                                    value: pos as u64,
-                                    bits: 32,
-                                    signed: true,
-                                },
-                                cfg.blocks[&v].stmts.clone(),
-                            )
-                        })
-                        .collect(),
-                    default: Vec::new(),
-                }));
-            }
-            for t in &targets {
-                if let Some(dest_blk) = cfg.blocks.get_mut(t)
-                    && !dest_blk.pred.contains(&unified_name)
-                {
-                    dest_blk.pred.push(unified_name.clone());
-                }
-            }
-            cfg.push_block(unified_block);
-            break;
-        }
-        if !changed {
-            break;
-        }
-    }
-    cfg
-}
-
 ///dom(n) = {n} ∪ ⋂ { dom(p) : p ∈ preds(n) }, iterate until fixpoint
 pub fn dominators(cfg: &Cfg) -> DomInfo {
     let reach = reachable(cfg);
@@ -643,8 +502,6 @@ impl Tarjan<'_> {
         }
     }
 }
-/// Temporarily deprecated while we get the codebase online
-//#[deprecated]
 pub fn sccs(cfg: &Cfg) -> Vec<Vec<String>> {
     let reach = reachable(cfg);
     let mut t = Tarjan {
