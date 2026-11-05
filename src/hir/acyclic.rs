@@ -7,6 +7,7 @@ use std::collections::BTreeSet;
 use crate::errors::StructurizeError;
 use crate::hir::op::BinOp;
 use crate::hir::reaching::{Cond, EdgeSet, reaching_conditions};
+use crate::hir::refine::merge_complementary;
 use crate::hir::stmt::BranchStmt;
 use crate::hir::{Cfg, Expr, Lit, Stmt, Ty};
 
@@ -136,15 +137,16 @@ fn tested_branches(c: &Cond, out: &mut BTreeSet<String>) {
 /// in reverse postorder, its statements guarded by `if (reaching condition)`
 /// unless that condition is always true. A tested branch's condition is stored
 /// in a fresh boolean (`cond_var`) at the end of its block, and that boolean is
-/// added to `locals`. The sink's own statements are included, but whatever
-/// follows the sink is left to the caller.
+/// added to `locals`. Neighbouring nodes with complementary guards are then
+/// folded into one if/else (2.3.4). The sink's own statements are included,
+/// but whatever follows the sink is left to the caller.
 ///
 /// Errors with `NotAcyclicRegion` when the region still has a cycle after
 /// skipping the edges in `skip`, when `sink` is unreachable, or when control
 /// can leave the region anywhere but the sink.
-// shortcut: every tested branch gets its own boolean even when one use would
-// do, upgrade when if/else grouping (2.3.4) leaves the extra locals cluttering
-// the output.
+// shortcut: every tested branch keeps its own boolean even when if/else
+// grouping leaves it used once; inlining is only safe if nothing in between
+// reassigns what the condition reads, so upgrade with a def-use check.
 pub fn structure_acyclic(
     cfg: &Cfg,
     source: &str,
@@ -198,7 +200,7 @@ pub fn structure_acyclic(
             out.push(Stmt::if_then_else(guard, body, Vec::new()));
         }
     }
-    Ok(out)
+    Ok(merge_complementary(out))
 }
 
 #[cfg(test)]
@@ -387,7 +389,7 @@ mod tests {
     }
 
     #[test]
-    fn diamond_becomes_guarded_nodes() {
+    fn diamond_becomes_if_else() {
         let cfg = diamond();
         let mut locals = Vec::new();
         let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
@@ -395,13 +397,37 @@ mod tests {
             out,
             vec![
                 Stmt::let_binding(taken(), flag("c")),
-                Stmt::if_then_else(taken(), vec![mark("a")], vec![]),
-                Stmt::if_then_else(not_taken(), vec![mark("b")], vec![]),
+                Stmt::if_then_else(taken(), vec![mark("a")], vec![mark("b")]),
                 mark("join"),
                 Stmt::ret_void(),
             ]
         );
         assert_eq!(locals, vec![(cond_var("entry"), Ty::Bool)]);
+    }
+
+    #[test]
+    fn a_one_armed_branch_stays_an_if_then() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build(
+                    "entry",
+                    vec![],
+                    Some(branch(Some(flag("c")), "a", Some("join"))),
+                ),
+                Block::build("a", vec![mark("a")], Some(branch(None, "join", None))),
+                Block::build("join", vec![mark("join")], Some(Stmt::ret_void())),
+            ],
+        );
+        assert_eq!(
+            run(&cfg, "entry", "join"),
+            Ok(vec![
+                Stmt::let_binding(taken(), flag("c")),
+                Stmt::if_then_else(taken(), vec![mark("a")], vec![]),
+                mark("join"),
+                Stmt::ret_void(),
+            ])
+        );
     }
 
     #[test]
