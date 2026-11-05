@@ -4,8 +4,8 @@ use crate::errors::StructurizeError;
 use crate::hir::expr::{BinaryExpr, VarExpr};
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
-    DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, normalize_loop_exits, reachable,
-    reachable_from, t1t2_reduce,
+    DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, normalize_loop_entries,
+    normalize_loop_exits, reachable, reachable_from, t1t2_reduce,
 };
 use crate::hir::op::BinOp;
 use crate::hir::stmt::{BranchStmt, IfStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt};
@@ -44,6 +44,14 @@ pub fn structurize_with(
     let mut current = cfg.clone();
     let max_blocks = cfg.len().saturating_mul(8).max(64);
     loop {
+        let normalized = normalize_loop_entries(&current, locals);
+        if normalized != current {
+            if normalized.len() > max_blocks {
+                return Err(StructurizeError::IrreducibleControlFlow);
+            }
+            current = normalized;
+            continue;
+        }
         if !reducible(&current) {
             if current.len() > max_blocks {
                 return Err(StructurizeError::IrreducibleControlFlow);

@@ -266,6 +266,275 @@ pub fn normalize_loop_exits(in_cfg: &Cfg, locals: &mut Vec<(String, Ty)>) -> Cfg
     out
 }
 
+pub fn normalize_loop_entries(in_cfg: &Cfg, locals: &mut Vec<(String, Ty)>) -> Cfg {
+    let mut out = in_cfg.clone();
+    relink(&mut out);
+    let budget = in_cfg.len().saturating_mul(8).max(64);
+
+    loop {
+        let reach = reachable(&out);
+        let Some(region) = find_abnormal(&out, &reach, &reach) else {
+            break;
+        };
+        let est = 1 + region.entries.len().saturating_sub(1);
+        if out.len() + est > budget {
+            break;
+        }
+        if !dispatch_entry(&mut out, locals, &region, &reach) {
+            break;
+        }
+        relink(&mut out);
+        if out.len() > budget {
+            break;
+        }
+    }
+    out
+}
+#[derive(Debug, Clone)]
+struct EntryRegion {
+    body: BTreeSet<String>,
+    entries: BTreeMap<String, BTreeSet<String>>,
+    header: String,
+}
+fn dispatch_entry(
+    cfg: &mut Cfg,
+    locals: &mut Vec<(String, Ty)>,
+    region: &EntryRegion,
+    reach: &BTreeSet<String>,
+) -> bool {
+    let mut targets: Vec<String> = region
+        .entries
+        .keys()
+        .filter(|t| t.as_str() != region.header.as_str())
+        .cloned()
+        .collect();
+    targets.sort_by(|a, b| {
+        order_index(cfg, a)
+            .cmp(&order_index(cfg, b))
+            .then_with(|| a.cmp(b))
+    });
+    targets.insert(0, region.header.clone());
+
+    let mut edges: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for x in &region.body {
+        for p in &cfg.blocks[x].pred {
+            if !reach.contains(p) {
+                continue;
+            }
+            if !region.body.contains(p) || x == &region.header {
+                edges.entry(p.clone()).or_default().insert(x.clone());
+            }
+        }
+    }
+
+    for x in edges.keys() {
+        match cfg.blocks[x].stmts.last() {
+            None | Some(Stmt::Branch(_)) => {}
+            _ => return false,
+        }
+    }
+
+    let tag_ty = Ty::Int(32, true);
+    let tag = format!("_entry_tag_{}", region.header);
+    if !locals.iter().any(|(n, _)| *n == tag) {
+        locals.push((tag.clone(), tag_ty.clone()));
+    }
+
+    let dispatch_head = fresh_block_name(cfg, &format!("_entry_header_{}", region.header));
+    let guard = fresh_block_name(cfg, &format!("_entry_dispatch_{}", region.header));
+
+    let m = targets.len();
+    let guard_names: Vec<String> = (0..m - 1)
+        .map(|i| {
+            if i == 0 {
+                guard.clone()
+            } else {
+                fresh_block_name(cfg, &format!("{guard}_{i}"))
+            }
+        })
+        .collect();
+    cfg.push_block(Block::build(
+        dispatch_head.clone(),
+        Vec::new(),
+        Some(Stmt::Branch(BranchStmt {
+            cond: None,
+            then_block: guard,
+            else_block: None,
+        })),
+    ));
+
+    for i in 0..m - 1 {
+        let otherwise = if i + 1 == m - 1 {
+            targets[m - 1].clone()
+        } else {
+            guard_names[i + 1].clone()
+        };
+        let term = BranchStmt {
+            cond: Some(Expr::cmp(
+                Cmp::Int(IntCmp::Eq),
+                Expr::var(&tag, tag_ty.clone()),
+                int_lit(i),
+            )),
+            then_block: targets[i].clone(),
+            else_block: Some(otherwise),
+        };
+        cfg.push_block(Block::build(
+            guard_names[i].clone(),
+            Vec::new(),
+            Some(Stmt::Branch(term)),
+        ));
+    }
+    for (u, xs) in edges {
+        if xs.len() == 1 {
+            let x = xs.iter().next().unwrap();
+            let idx = targets.iter().position(|t| t == x).unwrap();
+            let blk = cfg.get_block_mut(&u).unwrap();
+            insert_before_term(
+                blk,
+                Stmt::let_binding(Expr::var(&tag, tag_ty.clone()), int_lit(idx)),
+            );
+            retarget_edge(blk, x, &dispatch_head);
+        } else {
+            for x in xs {
+                let idx = targets.iter().position(|t| t == &x).unwrap();
+                let edge_name =
+                    fresh_block_name(cfg, &format!("_entry_edge_{}_{}", region.header, idx));
+                cfg.push_block(Block::build(
+                    edge_name.clone(),
+                    vec![Stmt::let_binding(
+                        Expr::var(&tag, tag_ty.clone()),
+                        int_lit(idx),
+                    )],
+                    Some(Stmt::Branch(BranchStmt {
+                        cond: None,
+                        then_block: dispatch_head.clone(),
+                        else_block: None,
+                    })),
+                ));
+                let blk = cfg.get_block_mut(&x).unwrap();
+                retarget_edge(blk, &x, &edge_name);
+            }
+        }
+    }
+
+    relink(cfg);
+    true
+}
+fn external_entries(
+    cfg: &Cfg,
+    body: &BTreeSet<String>,
+    reach: &BTreeSet<String>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut entries: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
+    for x in body {
+        for p in &cfg.blocks[x].pred {
+            if !reach.contains(p) && !body.contains(p) {
+                entries.entry(x.clone()).or_default().insert(p.clone());
+            }
+        }
+    }
+    entries
+}
+
+fn internal_in_degree(cfg: &Cfg, body: &BTreeSet<String>, node: &str) -> usize {
+    cfg.blocks[node]
+        .pred
+        .iter()
+        .filter_map(|x| {
+            if body.contains(x) {
+                Some(x.as_str())
+            } else {
+                None
+            }
+        })
+        .collect::<BTreeSet<&str>>()
+        .len()
+}
+fn order_index(cfg: &Cfg, name: &str) -> usize {
+    cfg.order
+        .iter()
+        .position(|x| x.as_str() == name)
+        .unwrap_or(usize::MAX)
+}
+fn choose_header(
+    cfg: &Cfg,
+    body: &BTreeSet<String>,
+    entries: &BTreeMap<String, BTreeSet<String>>,
+) -> String {
+    let mut best: Option<String> = None;
+    for candidate in entries.keys() {
+        let better = match &best {
+            None => true,
+            Some(current) => {
+                let dc = internal_in_degree(cfg, body, current);
+                let dn = internal_in_degree(cfg, body, candidate);
+                dn > dc
+                    || (dn == dc
+                        && order_index(cfg, candidate) < order_index(cfg, current)
+                        && candidate < current)
+            }
+        };
+        if better {
+            best = Some(candidate.clone());
+        }
+    }
+    best.expect("entries is non-empty")
+}
+
+fn fresh_block_name(cfg: &Cfg, base: &str) -> String {
+    let mut n = 1usize;
+    loop {
+        let name = format!("{base}_{n}");
+        if !cfg.contains_block(&name) {
+            return name;
+        }
+        n += 1;
+    }
+}
+fn find_abnormal(
+    cfg: &Cfg,
+    within: &BTreeSet<String>,
+    reachable: &BTreeSet<String>,
+) -> Option<EntryRegion> {
+    if within.is_empty() {
+        return None;
+    }
+
+    let mut c = sccs_within(cfg, within);
+    c.sort_by(|a, b| (a.len(), a.first()).cmp(&(b.len(), b.first())));
+    for cmp in c {
+        let body: BTreeSet<String> = cmp.iter().cloned().collect();
+        let cyclic = cmp.len() > 1 || cfg.blocks[&cmp[0]].succ.iter().any(|s| s == &cmp[0]);
+        if !cyclic {
+            continue;
+        }
+        let entries = external_entries(cfg, &body, reachable);
+        if entries.len() > 1 {
+            let header = choose_header(cfg, &body, &entries);
+            return Some(EntryRegion {
+                body,
+                entries,
+                header,
+            });
+        }
+
+        let entry = if let Some(e) = entries.keys().next() {
+            e.clone()
+        } else if body.contains(&cfg.entry) {
+            cfg.entry.clone()
+        } else {
+            continue;
+        };
+
+        let mut inner = body;
+        inner.remove(&entry);
+        if let Some(rg) = find_abnormal(cfg, &inner, reachable) {
+            return Some(rg);
+        }
+    }
+    None
+}
+
 /// Rewrite 1. Legal only when each divergent target is a statement-free merge
 /// node pointing straight at the join: retargeting then skips nothing, and
 /// `collapse_chains` already removes such nodes, so the fingerprint is unchanged.
@@ -501,6 +770,24 @@ impl Tarjan<'_> {
             self.out.push(comp);
         }
     }
+}
+pub fn sccs_within(cfg: &Cfg, within: &BTreeSet<String>) -> Vec<Vec<String>> {
+    let mut t = Tarjan {
+        cfg,
+        reach: within,
+        index: 0,
+        indices: HashMap::new(),
+        lowlink: HashMap::new(),
+        onstack: HashSet::new(),
+        stack: VecDeque::new(),
+        out: Vec::new(),
+    };
+    for n in within {
+        if !t.indices.contains_key(n) {
+            t.strongconnect(n);
+        }
+    }
+    t.out
 }
 pub fn sccs(cfg: &Cfg) -> Vec<Vec<String>> {
     let reach = reachable(cfg);
