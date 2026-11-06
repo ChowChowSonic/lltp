@@ -75,6 +75,12 @@ pub enum StructurizeError {
     MultiExitLoop { header: String, exits: Vec<String> },
     #[error("abnormal loop exit from {block:?} to {target:?}")]
     AbnormalLoopExit { block: String, target: String },
+    #[error("abnormal entry into loop {header:?} at {block:?} from {src:?}")]
+    AbnormalLoopEntry {
+        header: String,
+        block: String,
+        src: String,
+    },
     #[error("Enested loop {header:?} jumps out of its parent to {exit:?}")]
     NestedLoopEscapedParent { header: String, exit: String },
     #[error("unsupported fan-out from block {block:?} to {successors:?}")]

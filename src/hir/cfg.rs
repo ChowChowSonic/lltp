@@ -1,5 +1,8 @@
 use crate::errors::StructurizeError;
-use crate::hir::{Stmt, stmt::BranchStmt};
+use crate::hir::{
+    Stmt,
+    stmt::{BranchStmt, GotoStmt, InvokeStmt},
+};
 use std::collections::{BTreeMap, HashMap};
 
 /// The blocks `term` can transfer control to. A terminator is the only source
@@ -25,6 +28,52 @@ pub fn exception_targets(term: &Stmt) -> Vec<String> {
     match term {
         Stmt::Invoke(i) => i.catches.clone(),
         _ => Vec::new(),
+    }
+}
+
+/// Whether an edge leaving `blk` can be moved by `retarget_edge`, which has to
+/// reach whatever names the target. A `Switch` cannot: its arms are statement
+/// lists, so only `succ` names the block and the graph and the statement would
+/// then disagree. A statement-free node carries its edge only in `succ`.
+pub fn can_retarget(blk: &Block) -> bool {
+    match blk.stmts.last() {
+        None => true,
+        Some(Stmt::Branch(_) | Stmt::Goto(_) | Stmt::Invoke(_)) => true,
+        Some(_) => false,
+    }
+}
+
+/// Redirect every edge `old` leaving `blk` (successor list and the terminator
+/// arm that names it) to `new`. Exception arms are left alone: they are not
+/// control edges.
+pub fn retarget_edge(blk: &mut Block, old: &str, new: &str) {
+    for s in &mut blk.succ {
+        if s == old {
+            *s = new.to_string();
+        }
+    }
+    match blk.stmts.last_mut() {
+        Some(Stmt::Branch(BranchStmt {
+            then_block,
+            else_block,
+            ..
+        })) => {
+            if then_block == old {
+                *then_block = new.to_string();
+            }
+            if let Some(e) = else_block
+                && e == old
+            {
+                *else_block = Some(new.to_string());
+            }
+        }
+        Some(Stmt::Goto(GotoStmt { target })) if target == old => {
+            *target = new.to_string();
+        }
+        Some(Stmt::Invoke(InvokeStmt { normal, .. })) if normal == old => {
+            *normal = new.to_string();
+        }
+        _ => (),
     }
 }
 

@@ -1,15 +1,16 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::errors::StructurizeError;
+use crate::hir::cfg::retarget_edge;
 use crate::hir::expr::{BinaryExpr, VarExpr};
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
-    DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, reachable, reachable_from,
-    t1t2_reduce, unify_loop_exits,
+    DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, normalize_loop_entries,
+    normalize_loop_exits, reachable, reachable_from, t1t2_reduce,
 };
 use crate::hir::op::BinOp;
 use crate::hir::stmt::{BranchStmt, IfStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt};
-use crate::hir::{Block, Cfg, Expr, Lit, Stmt, Ty};
+use crate::hir::{Cfg, Expr, Lit, Stmt, Ty};
 
 pub struct LoopTree {
     pub loops: Vec<NaturalLoop>,
@@ -31,10 +32,39 @@ struct LoopContext {
 /// (duplicating blocks until every cycle is single-entry and every fork arm
 /// owns its downstream); a growth budget turns pathological shapes back into
 /// errors instead of unbounded duplication.
+///
+/// This wrapper has no `locals` to write to, so a tag the dispatches introduce is
+/// not recorded anywhere: the emitted code assigns it without declaring it. Use
+/// `structurize_with` through `Function::structurize` when a backend is going to
+/// print the result.
 pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
+    structurize_with(cfg, &mut Vec::new(), cfg.len().saturating_mul(8).max(64))
+}
+
+/// The same run, with the variables the normalization introduces recorded so the
+/// backend can declare them (`exit_tag_*` is read after the loop, `entry_tag_*`
+/// after the dispatch).
+///
+/// `max_blocks` is the growth cap the passes share. It has to be the caller's, not
+/// a multiple of the graph each pass is handed, otherwise a pass can multiply the
+/// graph past the cap and the documented "pathological shapes back into errors"
+/// bound is not the one that fires.
+pub fn structurize_with(
+    cfg: &Cfg,
+    locals: &mut Vec<(String, Ty)>,
+    max_blocks: usize,
+) -> Result<Vec<Stmt>, StructurizeError> {
     let mut current = cfg.clone();
-    let max_blocks = cfg.len().saturating_mul(8).max(64);
+    // Names the two passes created, so a shape is rewritten once, and the region
+    // bodies whose entry blocks cannot be retargeted. Both outlive the calls, so
+    // the loop below cannot re-run a pass on the same shape.
+    let mut created = HashSet::new();
+    let mut declined = HashSet::new();
     loop {
+        // Node splitting first. A cycle entered at more than one node is
+        // irreducible, and the entry dispatch cannot make it single-entry — it
+        // keeps each entry node as a separate target — so splitting is what turns
+        // it into a natural loop the tree can accept.
         if !reducible(&current) {
             if current.len() > max_blocks {
                 return Err(StructurizeError::IrreducibleControlFlow);
@@ -42,7 +72,19 @@ pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
             current = split_nodes(&current)?;
             continue;
         }
-        let normalized = unify_loop_exits(&current);
+        let normalized =
+            normalize_loop_entries(&current, locals, &mut created, &mut declined, max_blocks)?;
+        if normalized != current {
+            if normalized.len() > max_blocks {
+                return Err(StructurizeError::IrreducibleControlFlow);
+            }
+            current = normalized;
+            continue;
+        }
+        let normalized = normalize_loop_exits(&current, locals, &mut created, max_blocks);
+        if normalized.len() > max_blocks {
+            return Err(StructurizeError::IrreducibleControlFlow);
+        }
         match structure_cfg(&normalized) {
             Err(StructurizeError::ParallelJoinsNeedNodeSplitting { fork })
                 if current.len() <= max_blocks =>
@@ -806,31 +848,6 @@ fn fresh_split_name(cfg: &Cfg, base: &str) -> String {
     name
 }
 
-/// Redirect every edge `old` leaving `blk` (successor list and trailing
-/// branch statement) to `new`.
-fn retarget_edge(blk: &mut Block, old: &str, new: &str) {
-    for s in &mut blk.succ {
-        if s == old {
-            *s = new.to_string();
-        }
-    }
-    if let Some(Stmt::Branch(BranchStmt {
-        then_block,
-        else_block,
-        ..
-    })) = blk.stmts.last_mut()
-    {
-        if then_block == old {
-            *then_block = new.to_string();
-        }
-        if let Some(e) = else_block
-            && e == old
-        {
-            *else_block = Some(new.to_string());
-        }
-    }
-}
-
 /// Pick the node to duplicate: among the nodes that survive the T1/T2
 /// reduction (the irreducible residue) with at least two predecessors
 /// (otherwise there is no incoming edge to displace), prefer the cheapest
@@ -878,7 +895,7 @@ fn split_node(cfg: &mut Cfg, name: &str) -> Result<(), StructurizeError> {
             .get_mut(p)
             .ok_or_else(|| StructurizeError::UnknownBlock(p.clone()))?;
         retarget_edge(p_blk, name, &cname);
-        cfg.blocks.insert(cname.clone(), clone);
+        cfg.push_block(clone);
         // The clone's successors (its own self-loop included) gain it as a
         // predecessor.
         for s in cfg.blocks[&cname].succ.clone() {
@@ -963,7 +980,7 @@ fn split_fork(cfg: &Cfg, fork: &str) -> Result<Cfg, StructurizeError> {
             let mut clone = out.blocks[n].clone();
             clone.name = cname.clone();
             clone.pred.clear();
-            out.blocks.insert(cname.clone(), clone);
+            out.push_block(clone);
             map.insert(n.clone(), cname);
         }
 
@@ -1090,11 +1107,18 @@ impl LoopTree {
                 if x == &l.header {
                     continue;
                 }
-                if cfg.blocks[x].pred.iter().any(|p| !l.body.contains(p)) {
-                    return Err(StructurizeError::MultiExitLoop {
-                        header: l.header.clone(),
-                        exits: vec![],
-                    });
+                // On a graph restricted to the reachable set this cannot fire: a
+                // predecessor of a body node reaches the back-edge source through that
+                // node, so it is in the body too. It is the entry from outside the
+                // reachable set, which is what `normalize_loop_entries` reports.
+                for p in &cfg.blocks[x].pred {
+                    if !l.body.contains(p) {
+                        return Err(StructurizeError::AbnormalLoopEntry {
+                            header: l.header.clone(),
+                            block: x.clone(),
+                            src: p.clone(),
+                        });
+                    }
                 }
             }
             let mut targets: BTreeSet<String> = BTreeSet::new();
@@ -1143,13 +1167,13 @@ impl LoopTree {
 
 #[cfg(test)]
 mod test {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashSet};
 
     use crate::{
         errors::StructurizeError,
         hir::{
             cfg::Cfg,
-            flow::{dominators, reachable, reducible, unify_loop_exits},
+            flow::{dominators, natural_loops, normalize_loop_exits, reachable, reducible},
             structurize::{LoopTree, split_fork, split_nodes, structurize},
             verify::{are_equivalent, structured_to_cfg},
         },
@@ -1207,6 +1231,40 @@ mod test {
         // A single-entry loop is already reducible: no block may be cloned.
         assert!(reducible(&split));
         assert!(split.blocks.keys().all(|n| !n.contains("_split")));
+    }
+
+    /// The abnormal-entry branch in `LoopTree::build` cannot fire on a graph
+    /// restricted to the reachable set: a predecessor of a body node can reach the
+    /// back-edge source through that node, so it is itself in the body. This is the
+    /// check documenting that, and why the report names the source as well as the
+    /// block: it can only be an entry from outside the reachable set.
+    #[test]
+    fn a_body_node_is_entered_from_inside_the_body() {
+        let cfg = Cfg::cfg_from(
+            "entry",
+            &[
+                ("entry", "h"),
+                ("h", "b"),
+                ("h", "join"),
+                ("b", "h"),
+                ("b", "exit"),
+                ("join", "done"),
+                ("outside", "b"),
+            ],
+        );
+        let dom = dominators(&cfg);
+        let l = &natural_loops(&cfg, &dom)[0];
+        let body = &l.body;
+        // `outside` is not reachable from `entry`, so it is not in `dom`, but the walk
+        // over preds from the back-edge source puts it in the body: a predecessor of a
+        // body node reaches the source through that node.
+        assert!(body.contains("outside"), "{body:?}");
+        assert!(
+            body.iter()
+                .filter(|x| x.as_str() != l.header.as_str())
+                .all(|x| cfg.blocks[x].pred.iter().all(|p| body.contains(p))),
+            "no body node but the header has a predecessor outside the body"
+        );
     }
 
     #[test]
@@ -1501,7 +1559,7 @@ mod test {
         );
         // Two parallel diamonds: the fork's arms re-converge at different
         // joins, so each arm must own a private copy of its downstream.
-        let normalized = unify_loop_exits(&cfg);
+        let normalized = normalize_loop_exits(&cfg, &mut Vec::new(), &mut HashSet::new(), 64);
         let split = split_fork(&normalized, "e").unwrap();
         let stmts = structurize(&cfg).unwrap();
         assert!(are_equivalent(&split, &structured_to_cfg(&stmts)));
@@ -1515,7 +1573,7 @@ mod test {
             "f",
             &[("f", "a"), ("f", "b"), ("a", "b"), ("b", "j"), ("j", "x")],
         );
-        let normalized = unify_loop_exits(&cfg);
+        let normalized = normalize_loop_exits(&cfg, &mut Vec::new(), &mut HashSet::new(), 64);
         let split = split_fork(&normalized, "f").unwrap();
         // Every original path still exists, on private copies where shared.
         assert!(split.contains_block("a"));
