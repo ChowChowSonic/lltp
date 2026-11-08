@@ -1,9 +1,12 @@
 //! Condition-based refinement (SoW 2.3.4): group guarded nodes with
-//! complementary reaching conditions into if/else.
+//! complementary reaching conditions into if/else. Condition-aware refinement
+//! (SoW 2.3.5): group guarded nodes that test one variable for equality into
+//! a switch.
 
 use crate::hir::acyclic::negate;
 use crate::hir::expr::VarExpr;
 use crate::hir::op::{Cmp, IntCmp};
+use crate::hir::stmt::{IfStmt, SwitchStmt};
 use crate::hir::{Expr, Lit, Stmt};
 
 /// True when `a` and `b` are exact opposites: one is the other's negation,
@@ -85,6 +88,102 @@ pub fn merge_complementary(stmts: Vec<Stmt>) -> Vec<Stmt> {
         }
         out.push(s);
     }
+    out
+}
+
+/// True when `stmts` contain a `break` or `continue`, which would bind to a
+/// switch instead of the loop they leave if the statements moved into one.
+fn jumps_loop(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(|s| match s {
+        Stmt::Break | Stmt::Continue => true,
+        Stmt::If(i) => jumps_loop(&i.then_stmts) || jumps_loop(&i.else_stmts),
+        Stmt::Loop(l) => jumps_loop(&l.body),
+        Stmt::Switch(sw) => sw.cases.iter().any(|(_, b)| jumps_loop(b)) || jumps_loop(&sw.default),
+        Stmt::TryCatch(t) => {
+            jumps_loop(&t.try_body)
+                || t.catches.iter().any(|c| jumps_loop(&c.body))
+                || t.finally_body.as_deref().is_some_and(jumps_loop)
+        }
+        _ => false,
+    })
+}
+
+/// `(v, c)` when `i` can become the case `c` of a switch on `v`: a plain
+/// `if (v == c) {..}` whose body leaves `v` alone and does not `break` or
+/// `continue`.
+fn case_guard(i: &IfStmt) -> Option<(&VarExpr, &Lit)> {
+    let (v, c) = equality_guard(&i.cond)?;
+    let fits = i.else_stmts.is_empty()
+        && !writes_any(&i.then_stmts, std::slice::from_ref(&v.name))
+        && !jumps_loop(&i.then_stmts);
+    fits.then_some((v, c))
+}
+
+/// True when `i` tests the same variable as `run` for a constant that no
+/// earlier case in `run` uses.
+fn joins(run: &[IfStmt], i: &IfStmt) -> bool {
+    let Some((first, _)) = run.first().and_then(case_guard) else {
+        return false;
+    };
+    let Some((v, c)) = case_guard(i) else {
+        return false;
+    };
+    first.name == v.name
+        && run
+            .iter()
+            .all(|r| case_guard(r).is_some_and(|(_, c0)| c0 != c))
+}
+
+/// Emit `run` as one switch when it holds two or more cases, otherwise as the
+/// plain `if`s it came from.
+fn flush(run: &mut Vec<IfStmt>, out: &mut Vec<Stmt>) {
+    let var = run
+        .first()
+        .and_then(|i| equality_guard(&i.cond))
+        .map(|(v, _)| v.clone());
+    let Some(var) = var.filter(|_| run.len() > 1) else {
+        out.extend(run.drain(..).map(Stmt::If));
+        return;
+    };
+    let cases = run
+        .drain(..)
+        .filter_map(|i| {
+            let c = equality_guard(&i.cond)?.1.clone();
+            Some((c, i.then_stmts))
+        })
+        .collect();
+    out.push(Stmt::Switch(SwitchStmt {
+        value: Expr::Var(var),
+        cases,
+        default: Vec::new(),
+    }));
+}
+
+/// Fold a run of adjacent `if (v == c) {A}` statements on one variable into
+/// `switch (v) { case c: A }`. Each constant may appear once, so at most one
+/// guard can hold, and no body may rewrite `v`, so later guards still read
+/// the value the first one did. A lone equality guard is left as it is.
+// shortcut: only adjacent guards with an empty else are grouped, there is no
+// default case, and a call inside a body is assumed not to change `v` (no
+// alias analysis); upgrade when guards interleave or `v` can be aliased.
+pub fn merge_equalities(stmts: Vec<Stmt>) -> Vec<Stmt> {
+    let mut out = Vec::new();
+    let mut run: Vec<IfStmt> = Vec::new();
+    for s in stmts {
+        let s = match s {
+            Stmt::If(i) if joins(&run, &i) => {
+                run.push(i);
+                continue;
+            }
+            other => other,
+        };
+        flush(&mut run, &mut out);
+        match s {
+            Stmt::If(i) if case_guard(&i).is_some() => run.push(i),
+            other => out.push(other),
+        }
+    }
+    flush(&mut run, &mut out);
     out
 }
 
@@ -211,6 +310,93 @@ mod tests {
             Expr::bool(true),
         ] {
             assert_eq!(equality_guard(&e), None);
+        }
+    }
+
+    fn when_eq(name: &str, value: u64, body: Vec<Stmt>) -> Stmt {
+        Stmt::if_then_else(eq(name, value), body, Vec::new())
+    }
+
+    fn lit(value: u64) -> Lit {
+        Lit::Int {
+            value,
+            bits: 32,
+            signed: true,
+        }
+    }
+
+    #[test]
+    fn adjacent_equalities_on_one_variable_become_a_switch() {
+        let out = merge_equalities(vec![
+            when_eq("x", 1, vec![mark("a")]),
+            when_eq("x", 2, vec![mark("b")]),
+        ]);
+        assert_eq!(
+            out,
+            [Stmt::Switch(SwitchStmt {
+                value: Expr::var("x", Ty::Int(32, true)),
+                cases: vec![(lit(1), vec![mark("a")]), (lit(2), vec![mark("b")])],
+                default: Vec::new(),
+            })]
+        );
+    }
+
+    #[test]
+    fn a_lone_equality_stays_an_if() {
+        let input = vec![mark("pre"), when_eq("x", 1, vec![mark("a")])];
+        assert_eq!(merge_equalities(input.clone()), input);
+    }
+
+    #[test]
+    fn other_variables_repeats_and_other_statements_split_the_run() {
+        let by_var = vec![
+            when_eq("x", 1, vec![mark("a")]),
+            when_eq("y", 2, vec![mark("b")]),
+        ];
+        let repeat = vec![
+            when_eq("x", 1, vec![mark("a")]),
+            when_eq("x", 1, vec![mark("b")]),
+        ];
+        let split = vec![
+            when_eq("x", 1, vec![mark("a")]),
+            mark("between"),
+            when_eq("x", 2, vec![mark("b")]),
+        ];
+        for input in [by_var, repeat, split] {
+            assert_eq!(merge_equalities(input.clone()), input);
+        }
+    }
+
+    #[test]
+    fn guards_with_an_else_are_kept() {
+        let with_else = Stmt::if_then_else(eq("x", 1), vec![mark("a")], vec![mark("z")]);
+        let input = vec![with_else, when_eq("x", 2, vec![mark("b")])];
+        assert_eq!(merge_equalities(input.clone()), input);
+    }
+
+    #[test]
+    fn a_body_that_rewrites_the_variable_is_not_grouped() {
+        let x = Expr::var("x", Ty::Int(32, true));
+        let rewrite = Stmt::let_binding(x, Expr::int(9, 32, true));
+        let out = merge_equalities(vec![
+            when_eq("x", 1, vec![rewrite.clone()]),
+            when_eq("x", 2, vec![mark("a")]),
+            when_eq("x", 3, vec![mark("b")]),
+        ]);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0], when_eq("x", 1, vec![rewrite]));
+        assert!(matches!(&out[1], Stmt::Switch(sw) if sw.cases.len() == 2));
+    }
+
+    #[test]
+    fn a_body_that_leaves_a_loop_is_not_grouped() {
+        let nested = Stmt::if_then_else(flag("c"), vec![Stmt::Break], Vec::new());
+        for jump in [Stmt::Break, Stmt::Continue, nested] {
+            let input = vec![
+                when_eq("x", 1, vec![jump]),
+                when_eq("x", 2, vec![mark("b")]),
+            ];
+            assert_eq!(merge_equalities(input.clone()), input);
         }
     }
 }
