@@ -2,7 +2,9 @@
 //! complementary reaching conditions into if/else.
 
 use crate::hir::acyclic::negate;
-use crate::hir::{Expr, Stmt};
+use crate::hir::expr::VarExpr;
+use crate::hir::op::{Cmp, IntCmp};
+use crate::hir::{Expr, Lit, Stmt};
 
 /// True when `a` and `b` are exact opposites: one is the other's negation,
 /// in the form `negate` produces (`e` and `e ^ true`, or `true` and `false`).
@@ -10,6 +12,24 @@ use crate::hir::{Expr, Stmt};
 // complementary; upgrade if refinement needs to group raw comparison guards.
 pub fn complementary(a: &Expr, b: &Expr) -> bool {
     negate(a.clone()) == *b || negate(b.clone()) == *a
+}
+
+/// `(v, c)` when `cond` is `v == c` (either operand order) for a variable `v`
+/// and an integer constant `c`: the shape one switch case is made from.
+// shortcut: only integer constants compared with `==` against a plain variable
+// are recognized; upgrade when switches over other literals are wanted.
+pub fn equality_guard(cond: &Expr) -> Option<(&VarExpr, &Lit)> {
+    let Expr::Cmp(c) = cond else {
+        return None;
+    };
+    if c.pred != Cmp::Int(IntCmp::Eq) {
+        return None;
+    }
+    let (v, l) = match (&*c.arg1, &*c.arg2) {
+        (Expr::Var(v), Expr::Literal(l)) | (Expr::Literal(l), Expr::Var(v)) => (v, l),
+        _ => return None,
+    };
+    matches!(l, Lit::Int { .. }).then_some((v, l))
 }
 
 /// Names of the variables `e` reads, or false when `e` has a shape this check
@@ -147,5 +167,50 @@ mod tests {
             guarded(negate(c), "b"),
         ];
         assert_eq!(merge_complementary(input.clone()), input);
+    }
+
+    fn eq(name: &str, value: u64) -> Expr {
+        Expr::cmp(
+            Cmp::Int(IntCmp::Eq),
+            Expr::var(name, Ty::Int(32, true)),
+            Expr::int(value, 32, true),
+        )
+    }
+
+    #[test]
+    fn a_variable_equal_to_a_constant_is_an_equality_guard() {
+        let guard = eq("x", 3);
+        let (v, l) = equality_guard(&guard).expect("x == 3 is an equality guard");
+        assert_eq!(v.name, "x");
+        assert_eq!(Expr::Literal(l.clone()), Expr::int(3, 32, true));
+
+        let swapped = Expr::cmp(
+            Cmp::Int(IntCmp::Eq),
+            Expr::int(3, 32, true),
+            Expr::var("x", Ty::Int(32, true)),
+        );
+        assert_eq!(
+            equality_guard(&swapped).map(|(v, _)| v.name.as_str()),
+            Some("x")
+        );
+    }
+
+    #[test]
+    fn other_comparisons_and_operands_are_not_equality_guards() {
+        let x = || Expr::var("x", Ty::Int(32, true));
+        let ne = Expr::cmp(Cmp::Int(IntCmp::Ne), x(), Expr::int(3, 32, true));
+        let lt = Expr::cmp(Cmp::Int(IntCmp::Slt), x(), Expr::int(3, 32, true));
+        let two_vars = Expr::cmp(Cmp::Int(IntCmp::Eq), x(), Expr::var("y", Ty::Int(32, true)));
+        let on_bool = Expr::cmp(Cmp::Int(IntCmp::Eq), x(), Expr::bool(true));
+        for e in [
+            ne,
+            lt,
+            two_vars,
+            on_bool,
+            flag("entry.cond"),
+            Expr::bool(true),
+        ] {
+            assert_eq!(equality_guard(&e), None);
+        }
     }
 }
