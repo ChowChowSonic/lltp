@@ -180,9 +180,34 @@ fn joins(run: &[IfStmt], i: &IfStmt) -> bool {
             .all(|r| case_guard(r).is_some_and(|(_, c0)| c0 != c))
 }
 
-/// Emit `run` as one switch when it holds two or more cases, otherwise as the
-/// plain `if`s it came from.
-fn flush(run: &mut Vec<IfStmt>, out: &mut Vec<Stmt>) {
+/// True when `i` runs exactly when no case of `run` does: its guard is
+/// `v != c` for every case constant `c` of the switch on `v`, and its body
+/// does not `break` or `continue`.
+fn closes(run: &[IfStmt], i: &IfStmt) -> bool {
+    let Some((v, _)) = run.first().and_then(case_guard) else {
+        return false;
+    };
+    if run.len() < 2 || !i.else_stmts.is_empty() || jumps_loop(&i.then_stmts) {
+        return false;
+    }
+    let mut parts = Vec::new();
+    conjuncts(i.cond.clone(), &mut parts);
+    let mut seen = Vec::new();
+    for p in &parts {
+        match negated_equality(p) {
+            Some((pv, c)) if pv.name == v.name => seen.push(c),
+            _ => return false,
+        }
+    }
+    seen.len() == run.len()
+        && run
+            .iter()
+            .all(|r| case_guard(r).is_some_and(|(_, c)| seen.contains(&c)))
+}
+
+/// Emit `run` as one switch with `default` as its default arm when it holds
+/// two or more cases, otherwise as the plain `if`s it came from.
+fn flush(run: &mut Vec<IfStmt>, out: &mut Vec<Stmt>, default: Vec<Stmt>) {
     let var = run
         .first()
         .and_then(|i| equality_guard(&i.cond))
@@ -201,17 +226,20 @@ fn flush(run: &mut Vec<IfStmt>, out: &mut Vec<Stmt>) {
     out.push(Stmt::Switch(SwitchStmt {
         value: Expr::Var(var),
         cases,
-        default: Vec::new(),
+        default,
     }));
 }
 
 /// Fold a run of adjacent `if (v == c) {A}` statements on one variable into
 /// `switch (v) { case c: A }`. Each constant may appear once, so at most one
 /// guard can hold, and no body may rewrite `v`, so later guards still read
-/// the value the first one did. A lone equality guard is left as it is.
-// shortcut: only adjacent guards with an empty else are grouped, there is no
-// default case, and a call inside a body is assumed not to change `v` (no
-// alias analysis); upgrade when guards interleave or `v` can be aliased.
+/// the value the first one did. An `if` right after the run whose guard is
+/// "`v` is none of the cases" becomes the default arm. A lone equality guard
+/// is left as it is.
+// shortcut: only adjacent guards with an empty else are grouped, the default
+// arm must directly follow the last case, and a call inside a body is assumed
+// not to change `v` (no alias analysis); upgrade when guards interleave or
+// `v` can be aliased.
 pub fn merge_equalities(stmts: Vec<Stmt>) -> Vec<Stmt> {
     let mut out = Vec::new();
     let mut run: Vec<IfStmt> = Vec::new();
@@ -221,15 +249,19 @@ pub fn merge_equalities(stmts: Vec<Stmt>) -> Vec<Stmt> {
                 run.push(i);
                 continue;
             }
+            Stmt::If(i) if closes(&run, &i) => {
+                flush(&mut run, &mut out, i.then_stmts);
+                continue;
+            }
             other => other,
         };
-        flush(&mut run, &mut out);
+        flush(&mut run, &mut out, Vec::new());
         match s {
             Stmt::If(i) if case_guard(&i).is_some() => run.push(i),
             other => out.push(other),
         }
     }
-    flush(&mut run, &mut out);
+    flush(&mut run, &mut out, Vec::new());
     out
 }
 
@@ -467,5 +499,48 @@ mod tests {
         for e in [none_of, other_var, same_const, eq("x", 1), flag("c")] {
             assert_eq!(simplify_guard(e.clone()), e);
         }
+    }
+
+    #[test]
+    fn an_if_for_none_of_the_cases_becomes_the_default() {
+        let none = |first: u64, second: u64| {
+            Expr::binary(BinOp::And, negate(eq("x", first)), negate(eq("x", second)))
+        };
+        for guard in [none(1, 2), none(2, 1)] {
+            let out = merge_equalities(vec![
+                when_eq("x", 1, vec![mark("a")]),
+                when_eq("x", 2, vec![mark("b")]),
+                Stmt::if_then_else(guard, vec![mark("d")], Vec::new()),
+            ]);
+            assert!(matches!(
+                &out[..],
+                [Stmt::Switch(sw)] if sw.cases.len() == 2 && sw.default == [mark("d")]
+            ));
+        }
+    }
+
+    #[test]
+    fn a_default_that_misses_a_case_or_breaks_is_kept_apart() {
+        let misses = negate(eq("x", 1));
+        let all = Expr::binary(BinOp::And, negate(eq("x", 1)), negate(eq("x", 2)));
+        for (guard, body) in [(misses, vec![mark("d")]), (all, vec![Stmt::Break])] {
+            let out = merge_equalities(vec![
+                when_eq("x", 1, vec![mark("a")]),
+                when_eq("x", 2, vec![mark("b")]),
+                Stmt::if_then_else(guard, body, Vec::new()),
+            ]);
+            assert_eq!(out.len(), 2);
+            assert!(matches!(&out[0], Stmt::Switch(sw) if sw.default.is_empty()));
+            assert!(matches!(&out[1], Stmt::If(_)));
+        }
+    }
+
+    #[test]
+    fn a_single_case_with_a_default_is_left_for_if_else() {
+        let input = vec![
+            when_eq("x", 1, vec![mark("a")]),
+            Stmt::if_then_else(negate(eq("x", 1)), vec![mark("d")], Vec::new()),
+        ];
+        assert_eq!(merge_equalities(input.clone()), input);
     }
 }
