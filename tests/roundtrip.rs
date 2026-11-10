@@ -12,7 +12,9 @@ use lltp::backend::c_goto;
 use lltp::build_module;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
 use lltp::hir::Module;
-use lltp::hir::verify::{are_equivalent, structured_to_cfg};
+use lltp::hir::Stmt;
+use lltp::hir::stmt::LoopKind;
+use lltp::hir::verify::{are_equivalent, split_tests, structured_to_cfg};
 
 /// Fixtures the baseline is expected to round-trip.
 const SUPPORTED: &[&str] = &[
@@ -28,6 +30,10 @@ const SUPPORTED: &[&str] = &[
     "float_basic",
     "logic_short_circuit",
     "ternary_value",
+    "do_while_false",
+    "do_while_entry_false",
+    "post_test_with_break",
+    "nested_post_test",
 ];
 
 /// Fixtures that need GEP / globals / aggregates: must fail *cleanly* (an
@@ -134,7 +140,7 @@ fn pending_fixtures_fail_cleanly() {
 fn recovered_fixtures_structure_back_to_their_cfgs() {
     let conf = FrontendConfig::default();
     let mut failures: Vec<String> = Vec::new();
-    let mut duplicated: Vec<String> = Vec::new();
+    let mut shaped: Vec<String> = Vec::new();
     let mut checked = 0;
 
     for name in SUPPORTED {
@@ -174,8 +180,11 @@ fn recovered_fixtures_structure_back_to_their_cfgs() {
             // shape comparison only holds where structurize worked on the graph
             // as recovered; a tree that had to duplicate an arm is recorded.
             let structured = structured_to_cfg(&body);
+            // A block that runs body work before its test is two nodes in the
+            // shape, so the graph is read the same way before the lengths are compared.
+            let graph = split_tests(&graph);
             if structured.len() != graph.len() {
-                duplicated.push(format!("[{name}] {}", func.sig.name));
+                shaped.push(format!("[{name}] {}", func.sig.name));
             } else if !are_equivalent(&graph, &structured) {
                 failures.push(format!(
                     "[{name}] {}: structured body is not equivalent to its CFG",
@@ -187,9 +196,20 @@ fn recovered_fixtures_structure_back_to_their_cfgs() {
     }
 
     assert!(checked > 0, "no fixture reached structurization");
-    // The only fixture whose arms reconverge at different joins, so its fork
-    // must be duplicated: `mixed`'s `&&` and `||`.
-    assert_eq!(duplicated, ["[logic_short_circuit] mixed".to_string()]);
+    // Two things make a tree carry more nodes than the graph it was read from: a
+    // fork whose arms reconverge at different joins must be duplicated (`mixed`'s `&&`
+    // and `||`), and a loop whose test runs after body work keeps that test as a node
+    // of its own. Both are recorded, so a change in either set shows up here.
+    assert_eq!(
+        shaped,
+        vec![
+            "[logic_short_circuit] mixed".to_string(),
+            "[do_while_false] main".to_string(),
+            "[do_while_entry_false] main".to_string(),
+            "[post_test_with_break] main".to_string(),
+            "[nested_post_test] main".to_string(),
+        ]
+    );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
 }
 
@@ -329,4 +349,95 @@ fn parameter_slot_folds_into_the_parameter_name() {
     let exe = dir.join(format!("param_slot{}", std::env::consts::EXE_SUFFIX));
     let (code, _) = build_and_run(&rebuilt_c, &exe).expect("build and run rebuilt C");
     assert_eq!(code, Some(42), "see {}", rebuilt_c.display());
+}
+/// The shapes the inference reports, per fixture. A loop that runs its guard before
+/// any body work is `PreTest`; one that runs body work first is `PostTest`; a loop
+/// left only by breaking out of an arm is `Unconditional`.
+#[test]
+fn fixtures_report_their_loop_shapes() {
+    let conf = FrontendConfig::default();
+    let mut reported: Vec<String> = Vec::new();
+
+    for name in SUPPORTED {
+        let compiled = match compile_c_to_ir(&conf, &fixture(name)) {
+            Ok(c) => c,
+            Err(e) => {
+                reported.push(format!("[{name}] {e}"));
+                continue;
+            }
+        };
+        let ctxt = Context::create();
+        let module = build_module(&ctxt, &compiled.ir).expect("IR should parse");
+        let recovered = match Module::from_module(&module) {
+            Ok(m) => m,
+            Err(e) => {
+                reported.push(format!("[{name}] recovery: {e}"));
+                continue;
+            }
+        };
+
+        for mut func in recovered.funcs {
+            let body = match func.structurize() {
+                Ok(body) => body.to_vec(),
+                Err(e) => {
+                    reported.push(format!("[{name}] {}: {e}", func.sig.name));
+                    continue;
+                }
+            };
+            for node in &body {
+                report_shape(name, &func.sig.name, node, &mut reported);
+            }
+        }
+    }
+
+    assert_eq!(
+        reported,
+        vec![
+            "[loop_branch] main: pre-test".to_string(),
+            "[self_loop] main: pre-test".to_string(),
+            "[helper_func] helper: pre-test".to_string(),
+            "[counting_func] count_up: pre-test".to_string(),
+            "[counting_func] count_down: pre-test".to_string(),
+            "[bool_basic] main: pre-test".to_string(),
+            "[do_while_false] main: post-test".to_string(),
+            "[do_while_entry_false] main: post-test".to_string(),
+            "[post_test_with_break] main: post-test".to_string(),
+            "[nested_post_test] main: pre-test".to_string(),
+            "[nested_post_test] main: post-test".to_string(),
+        ]
+    );
+}
+/// Record each loop node's shape, including the ones nested inside a body.
+fn report_shape(name: &str, func: &str, stmt: &Stmt, out: &mut Vec<String>) {
+    match stmt {
+        Stmt::Loop(node) => {
+            out.push(format!(
+                "[{name}] {func}: {}",
+                match node.kind {
+                    LoopKind::PreTest => "pre-test",
+                    LoopKind::PostTest => "post-test",
+                    LoopKind::Unconditional => "unguarded",
+                }
+            ));
+            for s in &node.body {
+                report_shape(name, func, s, out);
+            }
+        }
+        Stmt::If(node) => {
+            for s in node.then_stmts.iter().chain(node.else_stmts.iter()) {
+                report_shape(name, func, s, out);
+            }
+        }
+        Stmt::Switch(node) => {
+            for (_, b) in &node.cases {
+                for s in b {
+                    report_shape(name, func, s, out);
+                }
+            }
+            for s in &node.default {
+                report_shape(name, func, s, out);
+            }
+        }
+        _ => {}
+    }
 }

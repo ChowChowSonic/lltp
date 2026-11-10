@@ -46,7 +46,7 @@ impl StmtEmitter for CLanguage {
     }
     fn emit_loop(&self, stmt: &LoopStmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "while(")?;
-        if let Some(cond) = &stmt.cond {
+        if let Some(cond) = &stmt.guard {
             self.emit_expr(cond, out)?;
         } else {
             write!(out, "true")?;
@@ -180,7 +180,9 @@ mod test {
     use lltp::backend::{ExprEmitter, LowerTarget, StmtEmitter};
     use lltp::hir::expr::{CallExpr, CastExpr, IndexExpr};
     use lltp::hir::op::{BinOp, CastKind};
-    use lltp::hir::stmt::{BranchStmt, CatchClause, GotoStmt, LabelStmt, LoopStmt, TryCatchStmt};
+    use lltp::hir::stmt::{
+        BranchStmt, CatchClause, GotoStmt, LabelStmt, LoopKind, LoopStmt, TryCatchStmt,
+    };
     use lltp::hir::{Expr, Lit, Stmt, Ty};
 
     use super::CLanguage;
@@ -355,13 +357,29 @@ mod test {
     #[test]
     fn loop_with_and_without_a_condition() {
         let guarded = Stmt::Loop(LoopStmt {
-            cond: Some(var("a")),
+            kind: LoopKind::PreTest,
+            guard: Some(var("a")),
+            test_block: None,
+
+            guard_at_node: true,
+
+            latch: None,
+
+            header: None,
             body: vec![Stmt::Break],
         });
         assert_eq!(emit_stmt(&guarded), "while(a){\n\tbreak\n}\n");
 
         let infinite = Stmt::Loop(LoopStmt {
-            cond: None,
+            kind: LoopKind::Unconditional,
+            guard: None,
+            test_block: None,
+
+            guard_at_node: true,
+
+            latch: None,
+
+            header: None,
             body: vec![Stmt::Continue],
         });
         assert_eq!(emit_stmt(&infinite), "while(true){\n\tcontinue\n}\n");
@@ -428,7 +446,15 @@ mod test {
         let stmts = [
             binding("flag", Expr::bool(true)),
             Stmt::Loop(LoopStmt {
-                cond: Some(Expr::binary(BinOp::And, var("flag"), Expr::bool(false))),
+                kind: LoopKind::PreTest,
+                guard: Some(Expr::binary(BinOp::And, var("flag"), Expr::bool(false))),
+                test_block: None,
+
+                guard_at_node: true,
+
+                latch: None,
+
+                header: None,
                 body: vec![Stmt::if_then_else(
                     var("flag"),
                     vec![Stmt::Break],

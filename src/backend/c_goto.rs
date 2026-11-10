@@ -117,6 +117,7 @@ fn val(v: &Expr) -> Result<String, String> {
             Expr::Var(VarExpr { name, .. }) => name.clone(),
             other => format!("(*{})", val(other)?),
         },
+        Expr::UnaryOp(UnaryExpr { op: UnOp::Not, arg }) => format!("!{}", val(arg)?),
         Expr::Literal(Lit::Int { value, bits: 1, .. }) => {
             String::from(if *value != 0 { "1" } else { "0" })
         }

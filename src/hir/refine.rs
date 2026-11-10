@@ -1,15 +1,14 @@
 //! Condition-based refinement (SoW 2.3.4): group guarded nodes with
 //! complementary reaching conditions into if/else.
 
-use crate::hir::acyclic::negate;
 use crate::hir::{Expr, Stmt};
 
 /// True when `a` and `b` are exact opposites: one is the other's negation,
-/// in the form `negate` produces (`e` and `e ^ true`, or `true` and `false`).
+/// or both are boolean constants of opposite value.
 // shortcut: syntactic match only, so `x < y` and `x >= y` are not seen as
 // complementary; upgrade if refinement needs to group raw comparison guards.
 pub fn complementary(a: &Expr, b: &Expr) -> bool {
-    negate(a.clone()) == *b || negate(b.clone()) == *a
+    Expr::negate(a.clone()) == *b || Expr::negate(b.clone()) == *a
 }
 
 /// Names of the variables `e` reads, or false when `e` has a shape this check
@@ -80,8 +79,8 @@ mod tests {
     #[test]
     fn a_flag_and_its_negation_are_complementary() {
         let c = flag("entry.cond");
-        assert!(complementary(&c, &negate(c.clone())));
-        assert!(complementary(&negate(c.clone()), &c));
+        assert!(complementary(&c, &Expr::negate(c.clone())));
+        assert!(complementary(&Expr::negate(c.clone()), &c));
     }
 
     #[test]
@@ -94,7 +93,7 @@ mod tests {
         let (a, b) = (flag("a.cond"), flag("b.cond"));
         assert!(!complementary(&a, &b));
         assert!(!complementary(&a, &a));
-        assert!(!complementary(&a, &negate(b)));
+        assert!(!complementary(&a, &Expr::negate(b)));
     }
 
     fn mark(name: &str) -> Stmt {
@@ -110,7 +109,7 @@ mod tests {
         let c = flag("entry.cond");
         let out = merge_complementary(vec![
             guarded(c.clone(), "a"),
-            guarded(negate(c.clone()), "b"),
+            guarded(Expr::negate(c.clone()), "b"),
         ]);
         assert_eq!(
             out,
@@ -125,7 +124,7 @@ mod tests {
             mark("pre"),
             guarded(c.clone(), "a"),
             guarded(d, "b"),
-            guarded(negate(c), "c"),
+            guarded(Expr::negate(c), "c"),
         ];
         assert_eq!(merge_complementary(input.clone()), input);
     }
@@ -134,7 +133,7 @@ mod tests {
     fn pairs_with_a_non_empty_else_are_kept() {
         let c = flag("c");
         let first = Stmt::if_then_else(c.clone(), vec![mark("a")], vec![mark("x")]);
-        let input = vec![first, guarded(negate(c), "b")];
+        let input = vec![first, guarded(Expr::negate(c), "b")];
         assert_eq!(merge_complementary(input.clone()), input);
     }
 
@@ -144,7 +143,7 @@ mod tests {
         let rewrite = Stmt::let_binding(c.clone(), Expr::bool(false));
         let input = vec![
             Stmt::if_then_else(c.clone(), vec![rewrite], Vec::new()),
-            guarded(negate(c), "b"),
+            guarded(Expr::negate(c), "b"),
         ];
         assert_eq!(merge_complementary(input.clone()), input);
     }

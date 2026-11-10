@@ -9,7 +9,7 @@ use crate::hir::op::BinOp;
 use crate::hir::reaching::{Cond, EdgeSet, reaching_conditions};
 use crate::hir::refine::merge_complementary;
 use crate::hir::stmt::BranchStmt;
-use crate::hir::{Cfg, Expr, Lit, Stmt, Ty};
+use crate::hir::{Cfg, Expr, Stmt, Ty};
 
 /// Blocks of `region` reachable from `source`, in reverse postorder over the
 /// edges not in `skip`. On an acyclic region every edge points forward in
@@ -57,15 +57,6 @@ pub fn cond_var(block: &str) -> String {
     format!("{block}.cond")
 }
 
-/// `!e` in the HIR's own idiom (`e ^ true`), undoing a double negation.
-pub(crate) fn negate(e: Expr) -> Expr {
-    match e {
-        Expr::Literal(Lit::Bool(b)) => Expr::bool(!b),
-        Expr::BinaryOp(b) if b.op == BinOp::Xor && *b.arg2 == Expr::bool(true) => *b.arg1,
-        other => Expr::binary(BinOp::Xor, other, Expr::bool(true)),
-    }
-}
-
 /// The edge `from -> to` as an expression: the branch boolean when `to` is
 /// the then-target, its negation when `to` is the else-target. Errors when
 /// `from` has no conditional branch to `to`.
@@ -87,7 +78,7 @@ fn edge_expr(cfg: &Cfg, from: &str, to: &str) -> Result<Expr, StructurizeError> 
     if then_block == to {
         Ok(taken)
     } else if else_block.as_deref() == Some(to) {
-        Ok(negate(taken))
+        Ok(Expr::negate(taken))
     } else {
         Err(bad())
     }
@@ -113,7 +104,7 @@ pub fn cond_to_expr(cfg: &Cfg, cond: &Cond) -> Result<Expr, StructurizeError> {
         Cond::True => Ok(Expr::bool(true)),
         Cond::False => Ok(Expr::bool(false)),
         Cond::Edge { from, to } => edge_expr(cfg, from, to),
-        Cond::Not(inner) => Ok(negate(cond_to_expr(cfg, inner)?)),
+        Cond::Not(inner) => Ok(Expr::negate(cond_to_expr(cfg, inner)?)),
         Cond::And(terms) => combine(cfg, terms, BinOp::And),
         Cond::Or(terms) => combine(cfg, terms, BinOp::Or),
     }
@@ -319,7 +310,7 @@ mod tests {
     }
 
     fn not_taken() -> Expr {
-        Expr::binary(BinOp::Xor, taken(), Expr::bool(true))
+        Expr::negate(taken())
     }
 
     #[test]

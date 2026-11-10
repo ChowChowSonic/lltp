@@ -5,6 +5,7 @@ pub mod expr;
 pub mod flat;
 pub mod flow;
 pub mod func;
+pub mod loops;
 pub mod lowering;
 pub mod module;
 pub mod op;
@@ -20,8 +21,9 @@ pub use crate::errors::{HirError, LowerError, StructurizeError};
 pub use cfg::{Block, Cfg, exception_targets, successors_of};
 pub use expr::Expr;
 pub use func::{FnSig, Function, Param};
+pub use loops::LoopShape;
 pub use module::Module;
-pub use stmt::Stmt;
+pub use stmt::{LoopKind, Stmt};
 pub use ty::Ty;
 
 #[derive(Debug, Clone, PartialEq)]

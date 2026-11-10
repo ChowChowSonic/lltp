@@ -72,6 +72,19 @@ impl Expr {
         Expr::Literal(Lit::Bool(val))
     }
 
+    /// Negation. A double negation is undone and a boolean constant is flipped,
+    /// so the same guard is never wrapped twice.
+    pub fn negate(e: Expr) -> Self {
+        match e {
+            Expr::Literal(Lit::Bool(b)) => Expr::bool(!b),
+            Expr::UnaryOp(u) if u.op == UnOp::Not => *u.arg,
+            other => Expr::UnaryOp(UnaryExpr {
+                op: UnOp::Not,
+                arg: Box::new(other),
+            }),
+        }
+    }
+
     /// Construct an integer literal expression.
     pub fn int(value: u64, bits: usize, signed: bool) -> Self {
         Expr::Literal(Lit::Int {
@@ -133,6 +146,8 @@ impl Expr {
                     Ty::Ptr(pointee) => *pointee,
                     other => other,
                 },
+                // A guard is read as a boolean.
+                UnOp::Not => Ty::Bool,
             },
             Expr::BinaryOp(b) => b.arg1.ty(),
             Expr::Cmp(_) => Ty::Bool,

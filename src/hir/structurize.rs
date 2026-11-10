@@ -2,13 +2,12 @@ use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 
 use crate::errors::StructurizeError;
 use crate::hir::cfg::retarget_edge;
-use crate::hir::expr::{BinaryExpr, VarExpr};
+use crate::hir::expr::VarExpr;
 pub use crate::hir::flow::reducible;
 use crate::hir::flow::{
     DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, normalize_loop_entries,
     normalize_loop_exits, reachable, reachable_from, t1t2_reduce,
 };
-use crate::hir::op::BinOp;
 use crate::hir::stmt::{BranchStmt, IfStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt};
 use crate::hir::{Cfg, Expr, Lit, Stmt, Ty};
 
@@ -60,6 +59,9 @@ pub fn structurize_with(
     // the loop below cannot re-run a pass on the same shape.
     let mut created = HashSet::new();
     let mut declined = HashSet::new();
+    // Names whose definition was folded into a guard: they are no longer read, so
+    // the backend must not declare them.
+    let mut folded = HashSet::new();
     loop {
         // Node splitting first. A cycle entered at more than one node is
         // irreducible, and the entry dispatch cannot make it single-entry — it
@@ -85,7 +87,7 @@ pub fn structurize_with(
         if normalized.len() > max_blocks {
             return Err(StructurizeError::IrreducibleControlFlow);
         }
-        match structure_cfg(&normalized) {
+        match structure_cfg(&normalized, &mut folded) {
             Err(StructurizeError::ParallelJoinsNeedNodeSplitting { fork })
                 if current.len() <= max_blocks =>
             {
@@ -96,6 +98,10 @@ pub fn structurize_with(
                 }
                 current = next;
             }
+            Ok(stmts) => {
+                locals.retain(|(n, _)| !folded.contains(n));
+                return Ok(stmts);
+            }
             other => return other,
         }
     }
@@ -103,7 +109,7 @@ pub fn structurize_with(
 
 /// Dominance/post-dominance setup plus region structuring over an
 /// already-normalized CFG.
-fn structure_cfg(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
+fn structure_cfg(cfg: &Cfg, folded: &mut HashSet<String>) -> Result<Vec<Stmt>, StructurizeError> {
     let dom = dominators(cfg);
     let pdom = PostDomInfo::from(cfg);
     let reach = reachable(cfg);
@@ -117,6 +123,7 @@ fn structure_cfg(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
         &cfg.entry,
         &BTreeSet::new(),
         None,
+        folded,
     )
 }
 
@@ -126,10 +133,16 @@ fn structure_loop(
     pdom: &PostDomInfo,
     tree: &LoopTree,
     loop_idx: usize,
+    folded: &mut HashSet<String>,
 ) -> Result<Stmt, StructurizeError> {
     let l = &tree.loops[loop_idx];
     let header = &l.header;
     let exit_target = tree.exit[loop_idx].as_ref();
+
+    let shape = crate::hir::loops::loop_shape(cfg, tree, loop_idx)?;
+    if let Some(name) = &shape.folded {
+        folded.insert(name.clone());
+    }
 
     let (prefix, branch) = cfg.split_block(header)?;
     let succs = &cfg.blocks[header].succ;
@@ -140,17 +153,19 @@ fn structure_loop(
         false
     };
 
-    let back_edge_srcs: Vec<String> = l.back_edges.iter().map(|(src, _)| src.clone()).collect();
-    let latch = if back_edge_srcs.len() == 1 {
-        Some(back_edge_srcs[0].clone())
+    // The statements the region runs first. When the guard is read at the region
+    // entry, they are the test block's own prefix: a definition folded into the
+    // guard is no longer a statement, so the tree does not carry it.
+    let prefix = if shape.test_block.as_ref() == Some(header) {
+        shape.preamble.clone()
     } else {
-        None
+        prefix
     };
 
     let ctx = LoopContext {
         header: header.clone(),
         exit: exit_target.cloned(),
-        latch,
+        latch: shape.latch.clone(),
     };
 
     let mut body_frame_exits = BTreeSet::from([header.clone()]);
@@ -172,23 +187,6 @@ fn structure_loop(
         }
         let body_entry = &body_succs[0];
 
-        let cond = if branch.as_ref().is_none_or(|b| b.then_block == *body_entry) {
-            branch
-                .as_ref()
-                .and_then(|b| b.cond.clone())
-                .unwrap_or(Expr::Nop)
-        } else {
-            let c = branch
-                .as_ref()
-                .and_then(|b| b.cond.clone())
-                .unwrap_or(Expr::Nop);
-            Expr::BinaryOp(BinaryExpr {
-                op: BinOp::Xor,
-                arg1: Box::new(c),
-                arg2: Box::new(Expr::Literal(Lit::Bool(true))),
-            })
-        };
-
         let mut body_nodes = l.body.clone();
         body_nodes.remove(header);
 
@@ -207,6 +205,7 @@ fn structure_loop(
                 body_entry,
                 &body_frame_exits,
                 Some(&ctx),
+                folded,
             )?);
             if body_stmts.is_empty() {
                 body_stmts.push(placeholder());
@@ -214,7 +213,13 @@ fn structure_loop(
         }
 
         Ok(Stmt::Loop(LoopStmt {
-            cond: Some(cond),
+            kind: shape.kind,
+            guard: shape.guard.clone(),
+            test_block: shape.test_block.clone(),
+
+            guard_at_node: shape.guard_at_node,
+            latch: shape.latch.clone(),
+            header: Some(header.clone()),
             body: body_stmts,
         }))
     } else {
@@ -245,13 +250,20 @@ fn structure_loop(
                 body_entry,
                 &body_frame_exits,
                 Some(&ctx),
+                folded,
             )?);
             if body_stmts.is_empty() {
                 body_stmts.push(placeholder());
             }
 
             Ok(Stmt::Loop(LoopStmt {
-                cond: None,
+                kind: shape.kind,
+                guard: shape.guard.clone(),
+                test_block: shape.test_block.clone(),
+
+                guard_at_node: shape.guard_at_node,
+                latch: shape.latch.clone(),
+                header: Some(header.clone()),
                 body: body_stmts,
             }))
         } else if body_succs.len() == 2 {
@@ -283,6 +295,7 @@ fn structure_loop(
                 first_b,
                 &body_frame_exits,
                 Some(&ctx),
+                folded,
             )?;
             let mut region_else = structure_region(
                 cfg,
@@ -293,6 +306,7 @@ fn structure_loop(
                 second_b,
                 &body_frame_exits,
                 Some(&ctx),
+                folded,
             )?;
 
             if region_then.is_empty() {
@@ -310,7 +324,13 @@ fn structure_loop(
             }));
 
             Ok(Stmt::Loop(LoopStmt {
-                cond: None,
+                kind: shape.kind,
+                guard: shape.guard.clone(),
+                test_block: shape.test_block.clone(),
+
+                guard_at_node: shape.guard_at_node,
+                latch: shape.latch.clone(),
+                header: Some(header.clone()),
                 body: body_stmts,
             }))
         } else {
@@ -320,7 +340,13 @@ fn structure_loop(
             }
 
             Ok(Stmt::Loop(LoopStmt {
-                cond: None,
+                kind: shape.kind,
+                guard: shape.guard.clone(),
+                test_block: shape.test_block.clone(),
+
+                guard_at_node: shape.guard_at_node,
+                latch: shape.latch.clone(),
+                header: Some(header.clone()),
                 body: body_stmts,
             }))
         }
@@ -381,6 +407,7 @@ fn structure_region(
     entry: &str,
     frame_exits: &BTreeSet<String>,
     loop_ctx: Option<&LoopContext>,
+    folded: &mut HashSet<String>,
 ) -> Result<Vec<Stmt>, StructurizeError> {
     if nodes.is_empty() || frame_exits.contains(entry) || !nodes.contains(entry) {
         return Ok(Vec::new());
@@ -389,7 +416,7 @@ fn structure_region(
     if let Some(loop_idx) = tree.get_loop_for_header(entry)
         && loop_ctx.is_none_or(|ctx| ctx.header != entry)
     {
-        let loop_stmt = structure_loop(cfg, dom, pdom, tree, loop_idx)?;
+        let loop_stmt = structure_loop(cfg, dom, pdom, tree, loop_idx, folded)?;
         let mut stmts = vec![loop_stmt];
 
         if let Some(exit_node) = &tree.exit[loop_idx]
@@ -409,6 +436,7 @@ fn structure_region(
                     exit_node,
                     frame_exits,
                     loop_ctx,
+                    folded,
                 )?;
                 stmts.extend(cont_stmts);
             }
@@ -524,6 +552,7 @@ fn structure_region(
                     &s_in[0],
                     frame_exits,
                     loop_ctx,
+                    folded,
                 )?);
                 return Ok(prefix);
             }
@@ -544,6 +573,7 @@ fn structure_region(
                 &s_in[0],
                 frame_exits,
                 loop_ctx,
+                folded,
             )?;
             let in_arm_stmts = if in_arm_stmts.is_empty() {
                 vec![placeholder()]
@@ -616,6 +646,7 @@ fn structure_region(
                 first,
                 &arm_frame_exits,
                 loop_ctx,
+                folded,
             )?;
             let mut else_stmts = structure_region(
                 cfg,
@@ -626,6 +657,7 @@ fn structure_region(
                 second,
                 &arm_frame_exits,
                 loop_ctx,
+                folded,
             )?;
             // An empty else arm must still materialize a block in the
             // rebuilt CFG so the arm's edge to the join is preserved —
@@ -655,8 +687,17 @@ fn structure_region(
                 && !frame_exits.contains(jn)
             {
                 let tail_nodes = reachable_from(cfg, jn, nodes);
-                let cont_stmts =
-                    structure_region(cfg, dom, pdom, tree, &tail_nodes, jn, frame_exits, loop_ctx)?;
+                let cont_stmts = structure_region(
+                    cfg,
+                    dom,
+                    pdom,
+                    tree,
+                    &tail_nodes,
+                    jn,
+                    frame_exits,
+                    loop_ctx,
+                    folded,
+                )?;
                 prefix.extend(cont_stmts);
             }
             Ok(prefix)
@@ -724,6 +765,7 @@ fn structure_region(
                         current_succ,
                         frame_exits,
                         loop_ctx,
+                        folded,
                     )?;
                     if arm_stmts.is_empty() {
                         arm_stmts.push(placeholder());
@@ -772,6 +814,7 @@ fn structure_region(
                     current_succ,
                     &arm_frame_exits,
                     loop_ctx,
+                    folded,
                 )?;
                 // An arm consisting solely of the join block is materialized
                 // by the tail continuation below; every other arm needs a
@@ -815,8 +858,17 @@ fn structure_region(
                 && !frame_exits.contains(jn)
             {
                 let tail_nodes = reachable_from(cfg, jn, nodes);
-                let cont_stmts =
-                    structure_region(cfg, dom, pdom, tree, &tail_nodes, jn, frame_exits, loop_ctx)?;
+                let cont_stmts = structure_region(
+                    cfg,
+                    dom,
+                    pdom,
+                    tree,
+                    &tail_nodes,
+                    jn,
+                    frame_exits,
+                    loop_ctx,
+                    folded,
+                )?;
                 prefix.extend(cont_stmts);
             }
 
@@ -1072,7 +1124,7 @@ impl LoopTree {
         self.loops.iter().position(|l| l.header == header)
     }
 
-    fn build(
+    pub(crate) fn build(
         cfg: &Cfg,
         dom: &DomInfo,
         reach: &BTreeSet<String>,
