@@ -99,7 +99,7 @@ fn read_vars(e: &Expr, out: &mut Vec<String>) -> bool {
 
 /// True when `stmts` may assign one of `names`. Statements that can hide
 /// writes (try/catch, invoke) count as writing.
-fn writes_any(stmts: &[Stmt], names: &[String]) -> bool {
+pub(crate) fn writes_any(stmts: &[Stmt], names: &[String]) -> bool {
     stmts.iter().any(|s| match s {
         Stmt::Let(l) => matches!(&*l.dest, Expr::Var(v) if names.contains(&v.name)),
         Stmt::If(i) => writes_any(&i.then_stmts, names) || writes_any(&i.else_stmts, names),
