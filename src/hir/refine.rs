@@ -5,7 +5,7 @@
 
 use crate::hir::acyclic::negate;
 use crate::hir::expr::VarExpr;
-use crate::hir::op::{Cmp, IntCmp};
+use crate::hir::op::{BinOp, Cmp, IntCmp};
 use crate::hir::stmt::{IfStmt, SwitchStmt};
 use crate::hir::{Expr, Lit, Stmt};
 
@@ -33,6 +33,52 @@ pub fn equality_guard(cond: &Expr) -> Option<(&VarExpr, &Lit)> {
         _ => return None,
     };
     matches!(l, Lit::Int { .. }).then_some((v, l))
+}
+
+/// `(v, c)` when `e` is `!(v == c)`, in the form `negate` produces.
+fn negated_equality(e: &Expr) -> Option<(&VarExpr, &Lit)> {
+    let Expr::BinaryOp(b) = e else {
+        return None;
+    };
+    if b.op != BinOp::Xor || *b.arg2 != Expr::bool(true) {
+        return None;
+    }
+    equality_guard(&b.arg1)
+}
+
+/// The operands of a chain of `&`, left to right.
+fn conjuncts(e: Expr, out: &mut Vec<Expr>) {
+    match e {
+        Expr::BinaryOp(b) if b.op == BinOp::And => {
+            conjuncts(*b.arg1, out);
+            conjuncts(*b.arg2, out);
+        }
+        other => out.push(other),
+    }
+}
+
+/// Drop each `v != c` from a conjunction that also has `v == d` for another
+/// constant `d`, since `v == d` already rules `v == c` out. This turns the
+/// reaching condition of a later switch case, `v != 1 & v == 2`, into
+/// `v == 2`. A guard with nothing to drop comes back unchanged.
+pub fn simplify_guard(e: Expr) -> Expr {
+    let mut parts = Vec::new();
+    conjuncts(e.clone(), &mut parts);
+    let before = parts.len();
+    let equal: Vec<(String, Lit)> = parts
+        .iter()
+        .filter_map(|p| equality_guard(p).map(|(v, c)| (v.name.clone(), c.clone())))
+        .collect();
+    parts.retain(|p| match negated_equality(p) {
+        Some((v, c)) => !equal.iter().any(|(n, k)| *n == v.name && k != c),
+        None => true,
+    });
+    if parts.len() == before {
+        return e;
+    }
+    let mut rest = parts.into_iter();
+    let first = rest.next().unwrap_or_else(|| Expr::bool(true));
+    rest.fold(first, |acc, p| Expr::binary(BinOp::And, acc, p))
 }
 
 /// Names of the variables `e` reads, or false when `e` has a shape this check
@@ -397,6 +443,29 @@ mod tests {
                 when_eq("x", 2, vec![mark("b")]),
             ];
             assert_eq!(merge_equalities(input.clone()), input);
+        }
+    }
+
+    #[test]
+    fn a_negated_case_is_dropped_when_another_case_holds() {
+        let later = Expr::binary(BinOp::And, negate(eq("x", 1)), eq("x", 2));
+        assert_eq!(simplify_guard(later), eq("x", 2));
+
+        let third = Expr::binary(
+            BinOp::And,
+            Expr::binary(BinOp::And, negate(eq("x", 1)), negate(eq("x", 2))),
+            eq("x", 3),
+        );
+        assert_eq!(simplify_guard(third), eq("x", 3));
+    }
+
+    #[test]
+    fn guards_with_nothing_to_drop_are_unchanged() {
+        let none_of = Expr::binary(BinOp::And, negate(eq("x", 1)), negate(eq("x", 2)));
+        let other_var = Expr::binary(BinOp::And, negate(eq("y", 1)), eq("x", 2));
+        let same_const = Expr::binary(BinOp::And, negate(eq("x", 2)), eq("x", 2));
+        for e in [none_of, other_var, same_const, eq("x", 1), flag("c")] {
+            assert_eq!(simplify_guard(e.clone()), e);
         }
     }
 }
