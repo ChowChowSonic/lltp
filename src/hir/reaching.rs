@@ -47,6 +47,34 @@ pub fn graph_slice(cfg: &Cfg, source: &str, sink: &str, skip: &EdgeSet) -> BTree
     from_source.intersection(&to_sink).cloned().collect()
 }
 
+/// For every block of `region`, the blocks of `region` it can reach along one
+/// or more edges not in `skip`. A block lists itself only when it sits on a
+/// cycle, so after skipping the back edges nothing reaches itself.
+pub fn region_reachability(
+    cfg: &Cfg,
+    region: &BTreeSet<String>,
+    skip: &EdgeSet,
+) -> BTreeMap<String, BTreeSet<String>> {
+    region
+        .iter()
+        .map(|start| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![start.clone()];
+            while let Some(n) = stack.pop() {
+                for m in &cfg.blocks[&n].succ {
+                    if region.contains(m)
+                        && !skip.contains(&(n.clone(), m.clone()))
+                        && seen.insert(m.clone())
+                    {
+                        stack.push(m.clone());
+                    }
+                }
+            }
+            (start.clone(), seen)
+        })
+        .collect()
+}
+
 /// A boolean condition over CFG branch outcomes. Build it through `!`,
 /// `and` and `or` so it stays simplified and in one canonical form.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -371,5 +399,43 @@ mod tests {
             reaching_conditions(&cfg, "a", "b", &EdgeSet::new()),
             Some(BTreeMap::new())
         );
+    }
+
+    fn reach(
+        edges: &[(&str, &str)],
+        region: &[&str],
+        skip: &EdgeSet,
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        let cfg = Cfg::cfg_from("entry", edges);
+        region_reachability(&cfg, &set(region), skip)
+    }
+
+    #[test]
+    fn reachability_follows_forward_edges_inside_the_region() {
+        let edges = [
+            ("entry", "a"),
+            ("entry", "b"),
+            ("a", "join"),
+            ("b", "join"),
+            ("join", "exit"),
+        ];
+        let r = reach(&edges, &["entry", "a", "b", "join"], &EdgeSet::new());
+        assert_eq!(r["entry"], set(&["a", "b", "join"]));
+        assert_eq!(r["a"], set(&["join"]));
+        // `exit` is outside the region, so `join` reaches nothing in it.
+        assert_eq!(r["join"], set(&[]));
+    }
+
+    #[test]
+    fn a_block_reaches_itself_only_through_a_cycle() {
+        let edges = [("entry", "h"), ("h", "body"), ("body", "h"), ("h", "exit")];
+        let region = ["h", "body", "exit"];
+        let looped = reach(&edges, &region, &EdgeSet::new());
+        assert_eq!(looped["h"], set(&["h", "body", "exit"]));
+
+        let back: EdgeSet = [("body".to_string(), "h".to_string())].into();
+        let acyclic = reach(&edges, &region, &back);
+        assert_eq!(acyclic["h"], set(&["body", "exit"]));
+        assert_eq!(acyclic["body"], set(&[]));
     }
 }
