@@ -170,8 +170,13 @@ impl CastKind {
 /// Unary operators. `AddrOf`/`ValuAt` are not LLVM opcodes: they are the two
 /// directions of a memory cell. `AddrOf(Var(x))` is the cell itself (a store
 /// target), `ValuAt(Var(x))` is what is stored in it (a load).
+///
+/// `Not` is not an LLVM opcode either: it is the HIR's own way of writing the
+/// false arm of a branch, so a guard that has to be inverted is written as
+/// `Not` rather than as `x ^ true`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     AddrOf,
     ValuAt,
+    Not,
 }

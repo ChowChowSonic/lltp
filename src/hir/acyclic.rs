@@ -12,7 +12,7 @@ use crate::hir::refine::{
     equality_guard, merge_complementary, merge_equalities, simplify_guard, writes_any,
 };
 use crate::hir::stmt::BranchStmt;
-use crate::hir::{Cfg, Expr, Lit, Stmt, Ty};
+use crate::hir::{Cfg, Expr, Stmt, Ty};
 
 /// Blocks of `region` reachable from `source`, in reverse postorder over the
 /// edges not in `skip`. On an acyclic region every edge points forward in
@@ -60,15 +60,6 @@ pub fn cond_var(block: &str) -> String {
     format!("{block}.cond")
 }
 
-/// `!e` in the HIR's own idiom (`e ^ true`), undoing a double negation.
-pub(crate) fn negate(e: Expr) -> Expr {
-    match e {
-        Expr::Literal(Lit::Bool(b)) => Expr::bool(!b),
-        Expr::BinaryOp(b) if b.op == BinOp::Xor && *b.arg2 == Expr::bool(true) => *b.arg1,
-        other => Expr::binary(BinOp::Xor, other, Expr::bool(true)),
-    }
-}
-
 /// The edge `from -> to` as an expression: the branch boolean when `to` is
 /// the then-target, its negation when `to` is the else-target. Errors when
 /// `from` has no conditional branch to `to`.
@@ -90,7 +81,7 @@ fn edge_expr(cfg: &Cfg, from: &str, to: &str) -> Result<Expr, StructurizeError> 
     if then_block == to {
         Ok(taken)
     } else if else_block.as_deref() == Some(to) {
-        Ok(negate(taken))
+        Ok(Expr::negate(taken))
     } else {
         Err(bad())
     }
@@ -116,7 +107,7 @@ pub fn cond_to_expr(cfg: &Cfg, cond: &Cond) -> Result<Expr, StructurizeError> {
         Cond::True => Ok(Expr::bool(true)),
         Cond::False => Ok(Expr::bool(false)),
         Cond::Edge { from, to } => edge_expr(cfg, from, to),
-        Cond::Not(inner) => Ok(negate(cond_to_expr(cfg, inner)?)),
+        Cond::Not(inner) => Ok(Expr::negate(cond_to_expr(cfg, inner)?)),
         Cond::And(terms) => combine(cfg, terms, BinOp::And),
         Cond::Or(terms) => combine(cfg, terms, BinOp::Or),
     }
@@ -174,7 +165,7 @@ fn count_stmts(stmts: &[Stmt], name: &str) -> usize {
             Stmt::Let(l) => count_expr(&l.dest, name) + count_expr(&l.src, name),
             Stmt::Eval(e) => count_expr(e, name),
             Stmt::Loop(l) => {
-                l.cond.as_ref().map_or(0, |c| count_expr(c, name)) + count_stmts(&l.body, name)
+                l.guard.clone().map_or(0, |c| count_expr(&c, name)) + count_stmts(&l.body, name)
             }
             Stmt::TryCatch(t) => {
                 let catches: usize = t
@@ -238,6 +229,14 @@ fn inline_compare(cfg: &Cfg, body: &mut Vec<Stmt>, cond: Expr) -> Expr {
 fn inline_flags(e: Expr, known: &BTreeMap<String, Expr>) -> Expr {
     match e {
         Expr::Var(v) => known.get(&v.name).cloned().unwrap_or(Expr::Var(v)),
+        // A negated flag is still a reading of that flag, so the compare has to go
+        // inside the `!` rather than only at the top of the expression.
+        Expr::UnaryOp(u) => Expr::unary(u.op, inline_flags(*u.arg, known)),
+        Expr::Cmp(c) => Expr::cmp(
+            c.pred,
+            inline_flags(*c.arg1, known),
+            inline_flags(*c.arg2, known),
+        ),
         Expr::BinaryOp(b) => Expr::binary(
             b.op,
             inline_flags(*b.arg1, known),
@@ -259,6 +258,11 @@ fn guard_vars(stmts: &[Stmt], out: &mut BTreeSet<String>) {
             Expr::Var(v) => {
                 out.insert(v.name.clone());
             }
+            Expr::UnaryOp(u) => vars(&u.arg, out),
+            Expr::Cmp(c) => {
+                vars(&c.arg1, out);
+                vars(&c.arg2, out);
+            }
             Expr::BinaryOp(b) => {
                 vars(&b.arg1, out);
                 vars(&b.arg2, out);
@@ -266,11 +270,29 @@ fn guard_vars(stmts: &[Stmt], out: &mut BTreeSet<String>) {
             _ => {}
         }
     }
+    // The same statements `prune` walks: a boolean read inside an arm is still a
+    // reading of it, so it has to be kept.
     for s in stmts {
-        if let Stmt::If(i) = s {
-            vars(&i.cond, out);
-            guard_vars(&i.then_stmts, out);
-            guard_vars(&i.else_stmts, out);
+        match s {
+            Stmt::If(i) => {
+                vars(&i.cond, out);
+                guard_vars(&i.then_stmts, out);
+                guard_vars(&i.else_stmts, out);
+            }
+            Stmt::Switch(sw) => {
+                vars(&sw.value, out);
+                for (_, body) in &sw.cases {
+                    guard_vars(body, out);
+                }
+                guard_vars(&sw.default, out);
+            }
+            Stmt::Loop(l) => {
+                if let Some(g) = &l.guard {
+                    vars(g, out);
+                }
+                guard_vars(&l.body, out);
+            }
+            _ => {}
         }
     }
 }
@@ -390,6 +412,7 @@ pub fn structure_acyclic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::hir::Lit;
     use crate::hir::op::{Cmp, IntCmp};
     use crate::hir::stmt::SwitchStmt;
     use crate::hir::{Block, Stmt};
@@ -505,7 +528,7 @@ mod tests {
     }
 
     fn not_taken() -> Expr {
-        Expr::binary(BinOp::Xor, taken(), Expr::bool(true))
+        Expr::negate(taken())
     }
 
     #[test]
