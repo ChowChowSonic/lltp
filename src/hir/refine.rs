@@ -3,9 +3,8 @@
 //! (SoW 2.3.5): group guarded nodes that test one variable for equality into
 //! a switch.
 
-use crate::hir::acyclic::negate;
 use crate::hir::expr::VarExpr;
-use crate::hir::op::{BinOp, Cmp, IntCmp};
+use crate::hir::op::{BinOp, Cmp, IntCmp, UnOp};
 use crate::hir::stmt::{IfStmt, SwitchStmt};
 use crate::hir::{Expr, Lit, Stmt};
 
@@ -37,13 +36,13 @@ pub fn equality_guard(cond: &Expr) -> Option<(&VarExpr, &Lit)> {
 
 /// `(v, c)` when `e` is `!(v == c)`, in the form `negate` produces.
 fn negated_equality(e: &Expr) -> Option<(&VarExpr, &Lit)> {
-    let Expr::BinaryOp(b) = e else {
+    let Expr::UnaryOp(u) = e else {
         return None;
     };
-    if b.op != BinOp::Xor || *b.arg2 != Expr::bool(true) {
+    if u.op != UnOp::Not {
         return None;
     }
-    equality_guard(&b.arg1)
+    equality_guard(&u.arg)
 }
 
 /// The operands of a chain of `&`, left to right.
@@ -480,12 +479,16 @@ mod tests {
 
     #[test]
     fn a_negated_case_is_dropped_when_another_case_holds() {
-        let later = Expr::binary(BinOp::And, negate(eq("x", 1)), eq("x", 2));
+        let later = Expr::binary(BinOp::And, Expr::negate(eq("x", 1)), eq("x", 2));
         assert_eq!(simplify_guard(later), eq("x", 2));
 
         let third = Expr::binary(
             BinOp::And,
-            Expr::binary(BinOp::And, negate(eq("x", 1)), negate(eq("x", 2))),
+            Expr::binary(
+                BinOp::And,
+                Expr::negate(eq("x", 1)),
+                Expr::negate(eq("x", 2)),
+            ),
             eq("x", 3),
         );
         assert_eq!(simplify_guard(third), eq("x", 3));
@@ -493,9 +496,13 @@ mod tests {
 
     #[test]
     fn guards_with_nothing_to_drop_are_unchanged() {
-        let none_of = Expr::binary(BinOp::And, negate(eq("x", 1)), negate(eq("x", 2)));
-        let other_var = Expr::binary(BinOp::And, negate(eq("y", 1)), eq("x", 2));
-        let same_const = Expr::binary(BinOp::And, negate(eq("x", 2)), eq("x", 2));
+        let none_of = Expr::binary(
+            BinOp::And,
+            Expr::negate(eq("x", 1)),
+            Expr::negate(eq("x", 2)),
+        );
+        let other_var = Expr::binary(BinOp::And, Expr::negate(eq("y", 1)), eq("x", 2));
+        let same_const = Expr::binary(BinOp::And, Expr::negate(eq("x", 2)), eq("x", 2));
         for e in [none_of, other_var, same_const, eq("x", 1), flag("c")] {
             assert_eq!(simplify_guard(e.clone()), e);
         }
@@ -504,7 +511,11 @@ mod tests {
     #[test]
     fn an_if_for_none_of_the_cases_becomes_the_default() {
         let none = |first: u64, second: u64| {
-            Expr::binary(BinOp::And, negate(eq("x", first)), negate(eq("x", second)))
+            Expr::binary(
+                BinOp::And,
+                Expr::negate(eq("x", first)),
+                Expr::negate(eq("x", second)),
+            )
         };
         for guard in [none(1, 2), none(2, 1)] {
             let out = merge_equalities(vec![
@@ -521,8 +532,12 @@ mod tests {
 
     #[test]
     fn a_default_that_misses_a_case_or_breaks_is_kept_apart() {
-        let misses = negate(eq("x", 1));
-        let all = Expr::binary(BinOp::And, negate(eq("x", 1)), negate(eq("x", 2)));
+        let misses = Expr::negate(eq("x", 1));
+        let all = Expr::binary(
+            BinOp::And,
+            Expr::negate(eq("x", 1)),
+            Expr::negate(eq("x", 2)),
+        );
         for (guard, body) in [(misses, vec![mark("d")]), (all, vec![Stmt::Break])] {
             let out = merge_equalities(vec![
                 when_eq("x", 1, vec![mark("a")]),
@@ -539,7 +554,7 @@ mod tests {
     fn a_single_case_with_a_default_is_left_for_if_else() {
         let input = vec![
             when_eq("x", 1, vec![mark("a")]),
-            Stmt::if_then_else(negate(eq("x", 1)), vec![mark("d")], Vec::new()),
+            Stmt::if_then_else(Expr::negate(eq("x", 1)), vec![mark("d")], Vec::new()),
         ];
         assert_eq!(merge_equalities(input.clone()), input);
     }
