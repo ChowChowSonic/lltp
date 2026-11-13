@@ -34,12 +34,24 @@ const SUPPORTED: &[&str] = &[
     "do_while_entry_false",
     "post_test_with_break",
     "nested_post_test",
+    "for_counted",
+    "for_continue_runs_step",
+    "for_no_init",
+    "for_non_constant_step",
+    "for_induction_reassigned_inside",
+    "for_negative_step",
+    "for_empty_body",
 ];
 
 /// Fixtures that need GEP / globals / aggregates: must fail *cleanly* (an
 /// `Err`, not a panic) until those are implemented. If one starts working,
 /// move it to SUPPORTED.
-const PENDING: &[&str] = &["string_basic", "string_loop", "struct_array"];
+const PENDING: &[&str] = &[
+    "string_basic",
+    "string_loop",
+    "struct_array",
+    "for_step_through_a_slot",
+];
 
 fn out_dir() -> PathBuf {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("roundtrip");
@@ -208,6 +220,12 @@ fn recovered_fixtures_structure_back_to_their_cfgs() {
             "[do_while_entry_false] main".to_string(),
             "[post_test_with_break] main".to_string(),
             "[nested_post_test] main".to_string(),
+            "[for_counted] main".to_string(),
+            "[for_no_init] main".to_string(),
+            "[for_non_constant_step] main".to_string(),
+            "[for_induction_reassigned_inside] main".to_string(),
+            "[for_negative_step] main".to_string(),
+            "[for_empty_body] main".to_string(),
         ]
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
@@ -393,17 +411,24 @@ fn fixtures_report_their_loop_shapes() {
     assert_eq!(
         reported,
         vec![
-            "[loop_branch] main: pre-test".to_string(),
-            "[self_loop] main: pre-test".to_string(),
-            "[helper_func] helper: pre-test".to_string(),
-            "[counting_func] count_up: pre-test".to_string(),
-            "[counting_func] count_down: pre-test".to_string(),
+            "[loop_branch] main: counted".to_string(),
+            "[self_loop] main: counted".to_string(),
+            "[helper_func] helper: counted".to_string(),
+            "[counting_func] count_up: counted".to_string(),
+            "[counting_func] count_down: counted".to_string(),
             "[bool_basic] main: pre-test".to_string(),
             "[do_while_false] main: post-test".to_string(),
             "[do_while_entry_false] main: post-test".to_string(),
             "[post_test_with_break] main: post-test".to_string(),
-            "[nested_post_test] main: pre-test".to_string(),
+            "[nested_post_test] main: counted".to_string(),
             "[nested_post_test] main: post-test".to_string(),
+            "[for_counted] main: counted".to_string(),
+            "[for_continue_runs_step] main: counted".to_string(),
+            "[for_no_init] main: counted".to_string(),
+            "[for_non_constant_step] main: pre-test".to_string(),
+            "[for_induction_reassigned_inside] main: pre-test".to_string(),
+            "[for_negative_step] main: counted".to_string(),
+            "[for_empty_body] main: counted".to_string(),
         ]
     );
 }
@@ -416,6 +441,7 @@ fn report_shape(name: &str, func: &str, stmt: &Stmt, out: &mut Vec<String>) {
                 match node.kind {
                     LoopKind::PreTest => "pre-test",
                     LoopKind::PostTest => "post-test",
+                    LoopKind::Counted => "counted",
                     LoopKind::Unconditional => "unguarded",
                 }
             ));

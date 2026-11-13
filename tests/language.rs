@@ -366,6 +366,9 @@ mod test {
             latch: None,
 
             header: None,
+
+            induction: None,
+
             body: vec![Stmt::Break],
         });
         assert_eq!(emit_stmt(&guarded), "while(a){\n\tbreak\n}\n");
@@ -380,6 +383,9 @@ mod test {
             latch: None,
 
             header: None,
+
+            induction: None,
+
             body: vec![Stmt::Continue],
         });
         assert_eq!(emit_stmt(&infinite), "while(true){\n\tcontinue\n}\n");
@@ -455,6 +461,9 @@ mod test {
                 latch: None,
 
                 header: None,
+
+                induction: None,
+
                 body: vec![Stmt::if_then_else(
                     var("flag"),
                     vec![Stmt::Break],

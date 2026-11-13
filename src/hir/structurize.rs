@@ -220,6 +220,8 @@ fn structure_loop(
             guard_at_node: shape.guard_at_node,
             latch: shape.latch.clone(),
             header: Some(header.clone()),
+
+            induction: shape.induction.clone(),
             body: body_stmts,
         }))
     } else {
@@ -264,6 +266,8 @@ fn structure_loop(
                 guard_at_node: shape.guard_at_node,
                 latch: shape.latch.clone(),
                 header: Some(header.clone()),
+
+                induction: shape.induction.clone(),
                 body: body_stmts,
             }))
         } else if body_succs.len() == 2 {
@@ -331,6 +335,8 @@ fn structure_loop(
                 guard_at_node: shape.guard_at_node,
                 latch: shape.latch.clone(),
                 header: Some(header.clone()),
+
+                induction: shape.induction.clone(),
                 body: body_stmts,
             }))
         } else {
@@ -347,6 +353,8 @@ fn structure_loop(
                 guard_at_node: shape.guard_at_node,
                 latch: shape.latch.clone(),
                 header: Some(header.clone()),
+
+                induction: shape.induction.clone(),
                 body: body_stmts,
             }))
         }

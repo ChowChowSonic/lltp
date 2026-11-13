@@ -11,8 +11,11 @@
 use std::collections::BTreeSet;
 
 use crate::errors::StructurizeError;
+use crate::hir::Lit;
 use crate::hir::coalesce::{def_name, uses};
 use crate::hir::flow::NaturalLoop;
+use crate::hir::op::{BinOp, UnOp};
+use crate::hir::stmt::InductionVar;
 use crate::hir::stmt::{BranchStmt, LetStmt, LoopKind};
 use crate::hir::structurize::LoopTree;
 use crate::hir::{Cfg, Expr, Stmt};
@@ -48,6 +51,10 @@ pub struct LoopShape {
     /// The statements the test block runs before its guard.
     pub preamble: Vec<Stmt>,
     pub folded: Option<String>,
+    /// The induction variable, when the loop is counted.
+    pub induction: Option<InductionVar>,
+    /// The block that steps it: the last block on the way back to the guard.
+    pub step_block: Option<String>,
 }
 
 impl LoopShape {
@@ -218,6 +225,124 @@ fn arm_returns_here(cfg: &Cfg, test: &BlockTest, body: &BTreeSet<String>) -> boo
     }
 }
 
+/// The variable a guard compares, looking through a negation. A guard that is not a
+/// comparison of a variable names no induction variable.
+fn guard_variable(guard: &Option<Expr>) -> Option<String> {
+    let inner = match guard.as_ref() {
+        Some(Expr::Cmp(c)) => c,
+        Some(Expr::UnaryOp(u)) if u.op == UnOp::Not => match u.arg.as_ref() {
+            Expr::Cmp(c) => c,
+            _ => return None,
+        },
+        _ => return None,
+    };
+    for side in [inner.arg1.as_ref(), inner.arg2.as_ref()] {
+        if let Expr::Var(v) = side {
+            return Some(v.name.clone());
+        }
+    }
+    None
+}
+
+/// Whether `block` is the block that steps `name`: the only thing it does is
+/// `name = name + c` or `name = name - c` with `c` a constant, and it returns
+/// unconditionally to the guard. A place is not a step, since a slot that survived
+/// promotion had its address taken.
+fn is_step_block(cfg: &Cfg, block: &str, name: &str, header: &str) -> Option<Expr> {
+    let blk = cfg.get_block(block)?;
+    let branch = match blk.stmts.last()? {
+        Stmt::Branch(b) => b,
+        _ => return None,
+    };
+    if branch.is_conditional() || branch.then_block != header {
+        return None;
+    }
+    let idx = blk.stmts.iter().position(|s| def_name(s) == Some(name))?;
+    // The step is the last thing the block does before it returns, so the terminator
+    // is the statement right after it.
+    if idx + 2 != blk.stmts.len() {
+        return None;
+    }
+    let (dest, src) = match &blk.stmts[idx] {
+        Stmt::Let(LetStmt { dest, src }) => (dest, src),
+        _ => return None,
+    };
+    if !matches!(dest.as_ref(), Expr::Var(v) if v.name == name) {
+        return None;
+    }
+    let bin = match src.as_ref() {
+        Expr::BinaryOp(b) if b.op == BinOp::Add || b.op == BinOp::Sub => b,
+        _ => return None,
+    };
+    if !matches!(bin.arg1.as_ref(), Expr::Var(v) if v.name == name) {
+        return None;
+    }
+    match bin.arg2.as_ref() {
+        Expr::Literal(Lit::Int { value, .. }) if *value != 0 => Some((**src).clone()),
+        _ => None,
+    }
+}
+
+/// The value of `name` that reaches the guard on the entry edge. When `name` is
+/// written inside the region, or the entry edge is not a single block, the init is
+/// not a clause of the loop and is left out.
+fn entry_init(cfg: &Cfg, l: &NaturalLoop, name: &str) -> Option<Expr> {
+    let header = cfg.get_block(&l.header)?;
+    let entry: Vec<&String> = header
+        .pred
+        .iter()
+        .filter(|p| !l.body.contains(*p))
+        .collect();
+    if entry.len() != 1 {
+        return None;
+    }
+    let blk = cfg.get_block(entry[0])?;
+    let def = match blk.stmts.iter().rev().find(|s| def_name(s) == Some(name))? {
+        Stmt::Let(LetStmt { src, .. }) => src,
+        _ => return None,
+    };
+    Some((**def).clone())
+}
+
+/// The counted claim: a pre-test guard on a variable the loop steps by a constant,
+/// with that step the only way back to the guard. A block that returns to the guard
+/// without stepping is a `continue` that skips the step, so the loop is not counted
+/// and the claim is left to `PreTest`.
+fn counted_induction(
+    cfg: &Cfg,
+    l: &NaturalLoop,
+    guard: &Option<Expr>,
+) -> Option<(InductionVar, String)> {
+    let name = guard_variable(guard)?;
+    if l.back_edges.len() != 1 {
+        return None;
+    }
+    let step = l.back_edges[0].0.clone();
+    let update = is_step_block(cfg, &step, &name, &l.header)?;
+    for n in &l.body {
+        if n == &step {
+            continue;
+        }
+        let Some(blk) = cfg.get_block(n) else {
+            continue;
+        };
+        for s in &blk.stmts {
+            if def_name(s) == Some(name.as_str()) {
+                return None;
+            }
+        }
+    }
+    let init = entry_init(cfg, l, &name);
+    Some((
+        InductionVar {
+            name,
+            init,
+            step: Some(update),
+        },
+        step,
+    ))
+}
+
 /// The shape of loop `idx`.
 pub fn loop_shape(cfg: &Cfg, tree: &LoopTree, idx: usize) -> Result<LoopShape, StructurizeError> {
     let l = &tree.loops[idx];
@@ -236,6 +361,8 @@ pub fn loop_shape(cfg: &Cfg, tree: &LoopTree, idx: usize) -> Result<LoopShape, S
             join,
             preamble: Vec::new(),
             folded: None,
+            induction: None,
+            step_block: None,
         });
     };
 
@@ -280,6 +407,18 @@ pub fn loop_shape(cfg: &Cfg, tree: &LoopTree, idx: usize) -> Result<LoopShape, S
         None
     };
 
+    // A counted loop is a pre-test guard plus the step on the way back, so the claim
+    // only applies where the guard is already read at the node.
+    let counted = if kind == LoopKind::PreTest && guard_at_node {
+        counted_induction(cfg, l, &guard)
+    } else {
+        None
+    };
+    let kind = match &counted {
+        Some(_) => LoopKind::Counted,
+        None => kind,
+    };
+
     let latch = single_back_edge(l);
 
     Ok(LoopShape {
@@ -292,6 +431,8 @@ pub fn loop_shape(cfg: &Cfg, tree: &LoopTree, idx: usize) -> Result<LoopShape, S
         join,
         preamble: test.preamble.clone(),
         folded: test.folded.clone(),
+        induction: counted.as_ref().map(|(i, _)| i.clone()),
+        step_block: counted.as_ref().map(|(_, step)| step.clone()),
     })
 }
 
@@ -509,6 +650,155 @@ mod tests {
     /// A post-test loop read as a pre-test one has to change the rebuilt shape: the
     /// guard node moves from after the body work to before it.
     #[test]
+    fn a_step_that_is_not_a_constant_update_is_not_claimed() {
+        let cfg = counted_graph(Expr::binary(
+            BinOp::Add,
+            Expr::var("i", I32),
+            Expr::var("k", I32),
+        ));
+        let s = shape_of(&cfg).unwrap();
+        assert_eq!(s.kind, LoopKind::PreTest, "{s:?}");
+        assert_eq!(s.induction, None);
+    }
+
+    #[test]
+    fn a_variable_written_in_the_body_is_not_an_induction_variable() {
+        let mut cfg = counted_graph(Expr::int(1, 32, true));
+        let Some(body) = cfg.get_block_mut("body") else {
+            panic!("the body block is missing");
+        };
+        body.stmts.insert(
+            0,
+            Stmt::let_binding(Expr::var("i", I32), Expr::int(2, 32, true)),
+        );
+        let s = shape_of(&cfg).unwrap();
+        assert_eq!(s.induction, None, "{s:?}");
+    }
+
+    #[test]
+    fn a_step_through_a_place_is_not_claimed() {
+        // The slot had its address taken, so the write is through a place rather than
+        // the variable itself.
+        let cell = Expr::unary(UnOp::ValuAt, Expr::var("i", Ty::Ptr(Box::new(I32))));
+        let update = Expr::binary(BinOp::Add, cell.clone(), Expr::int(1, 32, true));
+        let cfg = counted_graph_with(cell, update);
+        let s = shape_of(&cfg).unwrap();
+        assert_eq!(s.induction, None, "{s:?}");
+    }
+
+    #[test]
+    fn a_counted_loop_with_no_entry_definition_keeps_the_step() {
+        let mut cfg = counted_graph(Expr::int(1, 32, true));
+        let Some(entry) = cfg.get_block_mut("entry") else {
+            panic!("the entry block is missing");
+        };
+        entry.stmts.clear();
+        let s = shape_of(&cfg).unwrap();
+        let ind = s
+            .induction
+            .as_ref()
+            .expect("the step is still the way back");
+        assert_eq!(ind.init, None, "no init clause");
+        assert_eq!(ind.name, "i");
+        assert_eq!(s.kind, LoopKind::Counted, "{s:?}");
+    }
+
+    /// The back path has to be the step itself: a `continue` that returns to the
+    /// guard without stepping is what a `while` does and a `for` cannot.
+    #[test]
+    fn a_continue_that_returns_to_the_guard_without_stepping_is_not_claimed() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build("entry", vec![], Some(br(None, "cond", None))),
+                Block::build(
+                    "cond",
+                    vec![def("cmp", guard("i"))],
+                    Some(br(Some(flag("cmp")), "body", Some("exit"))),
+                ),
+                Block::build(
+                    "body",
+                    vec![],
+                    Some(br(Some(flag("x")), "cond", Some("work"))),
+                ),
+                Block::build(
+                    "work",
+                    vec![Stmt::let_binding(
+                        Expr::var("i", I32),
+                        Expr::binary(BinOp::Add, Expr::var("i", I32), Expr::int(1, 32, true)),
+                    )],
+                    Some(br(None, "cond", None)),
+                ),
+                Block::build("exit", vec![], Some(Stmt::ret_void())),
+            ],
+        );
+        let s = shape_of(&cfg).unwrap();
+        assert_eq!(s.kind, LoopKind::PreTest, "{s:?}");
+        assert_eq!(s.induction, None);
+    }
+
+    #[test]
+    fn an_empty_body_with_the_step_on_the_way_back_is_counted() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build("entry", vec![], Some(br(None, "cond", None))),
+                Block::build(
+                    "cond",
+                    vec![def("cmp", guard("i"))],
+                    Some(br(Some(flag("cmp")), "step", Some("exit"))),
+                ),
+                Block::build(
+                    "step",
+                    vec![Stmt::let_binding(
+                        Expr::var("i", I32),
+                        Expr::binary(BinOp::Add, Expr::var("i", I32), Expr::int(1, 32, true)),
+                    )],
+                    Some(br(None, "cond", None)),
+                ),
+                Block::build("exit", vec![], Some(Stmt::ret_void())),
+            ],
+        );
+        let s = shape_of(&cfg).unwrap();
+        assert_eq!(s.kind, LoopKind::Counted, "{s:?}");
+        assert_eq!(s.step_block.as_deref(), Some("step"));
+    }
+
+    /// A counted loop with an empty body still has one statement to place, so the
+    /// shape reports the step through the block that carries it.
+    fn counted_graph(value: Expr) -> Cfg {
+        let var = Expr::var("i", I32);
+        counted_graph_with(var.clone(), Expr::binary(BinOp::Add, var, value))
+    }
+
+    fn counted_graph_with(dest: Expr, src: Expr) -> Cfg {
+        Cfg::assemble(
+            "entry",
+            vec![
+                Block::build(
+                    "entry",
+                    vec![Stmt::let_binding(
+                        Expr::var("i", I32),
+                        Expr::int(0, 32, true),
+                    )],
+                    Some(br(None, "cond", None)),
+                ),
+                Block::build(
+                    "cond",
+                    vec![def("cmp", guard("i"))],
+                    Some(br(Some(flag("cmp")), "body", Some("exit"))),
+                ),
+                Block::build(
+                    "body",
+                    vec![Stmt::let_binding(dest, src)],
+                    Some(br(None, "cond", None)),
+                ),
+                Block::build("exit", vec![], Some(Stmt::ret_void())),
+            ],
+        )
+    }
+
+    #[test]
     fn claiming_the_wrong_position_changes_the_shape() {
         let cfg = Cfg::assemble(
             "entry",
@@ -530,6 +820,9 @@ mod tests {
             guard_at_node: true,
             latch: Some("loop".to_string()),
             header: Some("loop".to_string()),
+
+            induction: None,
+
             body: vec![work.clone()],
         });
         let pre = Stmt::Loop(LoopStmt {
@@ -539,6 +832,9 @@ mod tests {
             guard_at_node: true,
             latch: Some("loop".to_string()),
             header: Some("loop".to_string()),
+
+            induction: None,
+
             body: vec![work],
         });
         let post_tree = [post];
@@ -578,5 +874,49 @@ mod tests {
             "the folded guard is no longer read: {:?}",
             func.locals
         );
+    }
+    #[test]
+    fn a_step_block_on_the_way_back_is_counted() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build(
+                    "entry",
+                    vec![Stmt::let_binding(
+                        Expr::var("i", I32),
+                        Expr::int(0, 32, true),
+                    )],
+                    Some(br(None, "cond", None)),
+                ),
+                Block::build(
+                    "cond",
+                    vec![def("cmp", guard("i"))],
+                    Some(br(Some(flag("cmp")), "body", Some("exit"))),
+                ),
+                Block::build(
+                    "body",
+                    vec![Stmt::let_binding(
+                        Expr::var("i", I32),
+                        Expr::binary(BinOp::Add, Expr::var("i", I32), Expr::int(1, 32, true)),
+                    )],
+                    Some(br(None, "cond", None)),
+                ),
+                Block::build("exit", vec![], Some(Stmt::ret_void())),
+            ],
+        );
+        let s = shape_of(&cfg).unwrap();
+        assert_eq!(s.kind, LoopKind::Counted, "{s:?}");
+        let ind = s.induction.as_ref().expect("the induction variable");
+        assert_eq!(ind.name, "i");
+        assert_eq!(
+            ind.step,
+            Some(Expr::binary(
+                BinOp::Add,
+                Expr::var("i", I32),
+                Expr::int(1, 32, true)
+            ))
+        );
+        assert_eq!(ind.init, Some(Expr::int(0, 32, true)));
+        assert_eq!(s.step_block.as_deref(), Some("body"));
     }
 }

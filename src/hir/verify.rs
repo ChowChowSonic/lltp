@@ -204,7 +204,9 @@ impl ReBuilder {
                     // When the test point is inside the body, the `If` in the body is the
                     // test, so this node has no test position of its own.
                     match node.kind {
-                        LoopKind::PreTest => {
+                        // Counted reads its guard at the node too: the step is recorded
+                        // on the shape, and its position is checked by the step split.
+                        LoopKind::PreTest | LoopKind::Counted => {
                             let test = self.fresh();
                             let join = self.fresh();
                             let be = self.fresh();
@@ -478,6 +480,9 @@ mod tests {
 
             latch: None,
             header: None,
+
+            induction: None,
+
             body: vec![Stmt::Let(LetStmt {
                 dest: Box::new(Expr::Literal(Lit::Bool(false))),
                 src: Box::new(Expr::Literal(Lit::Bool(true))),
@@ -510,6 +515,9 @@ mod tests {
 
                 latch: None,
                 header: None,
+
+                induction: None,
+
                 body: vec![Stmt::Break],
             }),
             Stmt::Ret(RetStmt { value: None }),
@@ -540,6 +548,9 @@ mod tests {
 
             latch: None,
             header: None,
+
+            induction: None,
+
             body: vec![
                 Stmt::If(IfStmt {
                     cond: cond(),
@@ -583,6 +594,9 @@ mod tests {
 
             latch: None,
             header: None,
+
+            induction: None,
+
             body: vec![Stmt::Break],
         })];
         let cfg = structured_to_cfg(&body);
