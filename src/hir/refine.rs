@@ -3,7 +3,6 @@
 //! (SoW 2.3.5): group guarded nodes that test one variable for equality into
 //! a switch.
 
-use crate::hir::{Expr, Stmt};
 use crate::hir::acyclic::negate;
 use crate::hir::expr::VarExpr;
 use crate::hir::op::{BinOp, Cmp, IntCmp};
