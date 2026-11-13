@@ -1,4 +1,5 @@
 pub mod acyclic;
+pub mod cascade;
 pub mod cfg;
 pub mod coalesce;
 pub mod expr;

@@ -47,7 +47,7 @@ fn negated_equality(e: &Expr) -> Option<(&VarExpr, &Lit)> {
 }
 
 /// The operands of a chain of `&`, left to right.
-fn conjuncts(e: Expr, out: &mut Vec<Expr>) {
+pub(crate) fn conjuncts(e: Expr, out: &mut Vec<Expr>) {
     match e {
         Expr::BinaryOp(b) if b.op == BinOp::And => {
             conjuncts(*b.arg1, out);
