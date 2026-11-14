@@ -69,12 +69,14 @@ pub enum LowerError {
 /// Errors occurring during control-flow structurization.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum StructurizeError {
-    #[error("irreducible control flow (node splitting is Task 5)")]
+    #[error("irreducible control flow: every cycle has a single entry after node splitting")]
     IrreducibleControlFlow,
     #[error("multi-exit loop at header {header} with divergent exits {exits:?}")]
     MultiExitLoop { header: String, exits: Vec<String> },
     #[error("abnormal loop exit from {block:?} to {target:?}")]
     AbnormalLoopExit { block: String, target: String },
+    #[error("continue from {block:?} returns to the header without passing the guard in {latch:?}")]
+    ContinueSkipsGuard { block: String, latch: String },
     #[error("abnormal entry into loop {header:?} at {block:?} from {src:?}")]
     AbnormalLoopEntry {
         header: String,
@@ -125,13 +127,15 @@ pub enum FrontendError {
 #[derive(Error, Debug)]
 pub enum PipelineError {
     #[error("Unable to ingest IR due to reason:\n{0}")]
+    IngestError(IngestError),
+    #[error("Unable to ingest IR due to reason:\n{0}")]
     ModuleParsingError(LowerError),
     #[error("Failed to properly apply passes to IR due to reason:\n{0}")]
     PassApplicationError(String),
     #[error(
         "Refusing to convert IR into the {0} language - IR contains disallowed instructions. Please write a pass to remove all {1} statements"
     )]
-    DissallowedStmtError(String, String),
+    DisallowedStmtError(String, String),
     #[error("Failed to emit function {0} due to reason:\n{1}")]
     FunctionEmissionError(String, String),
 }
