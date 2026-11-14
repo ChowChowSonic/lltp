@@ -295,6 +295,18 @@ fn prune(stmts: Vec<Stmt>, dead: &BTreeSet<String>) -> Vec<Stmt> {
         .collect()
 }
 
+/// `prune` for statements paired with the block they came from.
+fn prune_nodes(nodes: Vec<(String, Stmt)>, dead: &BTreeSet<String>) -> Vec<(String, Stmt)> {
+    nodes
+        .into_iter()
+        .flat_map(|(b, s)| {
+            prune(vec![s], dead)
+                .into_iter()
+                .map(move |s| (b.clone(), s))
+        })
+        .collect()
+}
+
 /// Structure the region from `source` to `sink` as a flat sequence: each block
 /// in reverse postorder, its statements guarded by `if (reaching condition)`
 /// unless that condition is always true. A tested branch's condition is stored
@@ -373,18 +385,24 @@ pub fn structure_acyclic(
             continue;
         }
         if conds[&n] == Cond::True {
-            out.extend(body);
+            out.extend(body.into_iter().map(|s| (n.clone(), s)));
         } else {
             let guard = cond_to_expr(cfg, &conds[&n])?;
             let guard = simplify_guard(inline_flags(guard, &before));
-            out.push(Stmt::if_then_else(guard, body, Vec::new()));
+            out.push((n.clone(), Stmt::if_then_else(guard, body, Vec::new())));
         }
     }
     let mut read = BTreeSet::new();
-    guard_vars(&out, &mut read);
+    for (_, s) in &out {
+        guard_vars(std::slice::from_ref(s), &mut read);
+    }
     let dead: BTreeSet<String> = inlined.difference(&read).cloned().collect();
     locals.retain(|(l, _)| !dead.contains(l));
-    Ok(merge_complementary(merge_equalities(prune(out, &dead))))
+    let out: Vec<Stmt> = prune_nodes(out, &dead)
+        .into_iter()
+        .map(|(_, s)| s)
+        .collect();
+    Ok(merge_complementary(merge_equalities(out)))
 }
 
 #[cfg(test)]
