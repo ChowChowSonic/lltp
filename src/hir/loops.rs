@@ -443,7 +443,7 @@ mod tests {
     use crate::hir::flow::{dominators, reachable};
     use crate::hir::op::{Cmp, IntCmp};
     use crate::hir::stmt::{BranchStmt, LoopStmt};
-    use crate::hir::structurize::{LoopTree, structurize};
+    use crate::hir::structurize::LoopTree;
     use crate::hir::verify::{are_equivalent, structured_to_cfg};
     use crate::hir::{Block, Expr, Function, Stmt, Ty};
 
@@ -637,7 +637,7 @@ mod tests {
                 Block::build("exit", vec![], Some(Stmt::ret_void())),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         let Stmt::Loop(node) = &stmts[0] else {
             panic!("expected the loop node, got {stmts:?}");
         };
