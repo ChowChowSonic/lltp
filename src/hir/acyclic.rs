@@ -9,7 +9,7 @@ use crate::errors::StructurizeError;
 use crate::hir::op::BinOp;
 use crate::hir::reaching::{Cond, EdgeSet, reaching_conditions};
 use crate::hir::refine::{
-    equality_guard, merge_complementary, merge_equalities, simplify_guard, writes_any,
+    merge_complementary, merge_equalities, read_vars, simplify_guard, writes_any,
 };
 use crate::hir::stmt::BranchStmt;
 use crate::hir::{Cfg, Expr, Lit, Stmt, Ty};
@@ -205,6 +205,13 @@ fn uses(cfg: &Cfg, name: &str) -> usize {
         .sum()
 }
 
+/// The variables `e` reads, when `e` is a compare of plain operands (variables
+/// and constants), which is safe to repeat in a guard.
+fn compare_vars(e: &Expr) -> Option<Vec<String>> {
+    let mut names = Vec::new();
+    (matches!(e, Expr::Cmp(_)) && read_vars(e, &mut names)).then_some(names)
+}
+
 /// A branch on a compare that was stored in a temporary becomes a branch on
 /// the compare itself, so the guards below can see `v == c`. The compare's
 /// `let` is taken out of `body`. Only done when the temporary is used by that
@@ -222,10 +229,10 @@ fn inline_compare(cfg: &Cfg, body: &mut Vec<Stmt>, cond: Expr) -> Expr {
     let Stmt::Let(l) = &body[pos] else {
         return cond;
     };
-    let Some((v, _)) = equality_guard(&l.src) else {
+    let Some(operands) = compare_vars(&l.src) else {
         return cond;
     };
-    if uses(cfg, &name) != 2 || writes_any(&body[pos + 1..], std::slice::from_ref(&v.name)) {
+    if uses(cfg, &name) != 2 || writes_any(&body[pos + 1..], &operands) {
         return cond;
     }
     let compare = (*l.src).clone();
@@ -249,7 +256,7 @@ fn inline_flags(e: Expr, known: &BTreeMap<String, Expr>) -> Expr {
 
 /// True when `body` may rewrite the variable that the compare `eq` reads.
 fn rewrites(body: &[Stmt], eq: &Expr) -> bool {
-    equality_guard(eq).is_some_and(|(v, _)| writes_any(body, std::slice::from_ref(&v.name)))
+    compare_vars(eq).is_some_and(|operands| writes_any(body, &operands))
 }
 
 /// Collect the variables the guards of `stmts` read.
@@ -311,20 +318,20 @@ fn prune_nodes(nodes: Vec<(String, Stmt)>, dead: &BTreeSet<String>) -> Vec<(Stri
 /// in reverse postorder, its statements guarded by `if (reaching condition)`
 /// unless that condition is always true. A tested branch's condition is stored
 /// in a fresh boolean (`cond_var`) at the end of its block, and that boolean is
-/// added to `locals`. A branch on `v == c` is kept as that compare in later
-/// guards while nothing rewrites `v`, and its boolean is dropped once no guard
-/// reads it. Runs of guards `v == c` then become a switch (2.3.5) and
-/// neighbouring nodes with complementary guards one if/else (2.3.4). The
-/// sink's own statements are included, but whatever follows the sink is left
-/// to the caller.
+/// added to `locals`. A branch on a compare of variables and constants is kept
+/// as that compare in later guards while nothing rewrites its operands, and its
+/// boolean is dropped once no guard reads it. Runs of guards `v == c` then
+/// become a switch (2.3.5) and neighbouring nodes with complementary guards one
+/// if/else (2.3.4). The sink's own statements are included, but whatever
+/// follows the sink is left to the caller.
 ///
 /// Errors with `NotAcyclicRegion` when the region still has a cycle after
 /// skipping the edges in `skip`, when `sink` is unreachable, or when control
 /// can leave the region anywhere but the sink.
 // shortcut: a branch boolean is only replaced by its compare when that
-// compare is `variable == integer constant`; other conditions keep their own
-// boolean even when if/else grouping leaves it used once, so upgrade with a
-// def-use check.
+// compare reads plain variables and constants; other conditions (a call, a
+// load) keep their own boolean even when if/else grouping leaves it used once,
+// so upgrade with a def-use check.
 pub fn structure_acyclic(
     cfg: &Cfg,
     source: &str,
@@ -375,7 +382,7 @@ pub fn structure_acyclic(
             if !locals.iter().any(|(l, _)| *l == name) {
                 locals.push((name.clone(), Ty::Bool));
             }
-            if equality_guard(&c).is_some() {
+            if compare_vars(&c).is_some() {
                 known.insert(name.clone(), c.clone());
                 inlined.insert(name.clone());
             }
@@ -847,6 +854,38 @@ mod tests {
             &out[1],
             Stmt::If(i) if i.then_stmts == [mark("join"), Stmt::ret_void()]
         ));
+        assert!(locals.is_empty());
+    }
+
+    fn x_below(value: u64) -> Expr {
+        Expr::cmp(Cmp::Int(IntCmp::Slt), x(), Expr::int(value, 32, true))
+    }
+
+    #[test]
+    fn a_branch_on_any_compare_keeps_the_compare_in_both_guards() {
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build(
+                    "entry",
+                    vec![],
+                    Some(branch(Some(x_below(1)), "a", Some("b"))),
+                ),
+                Block::build("a", vec![mark("a")], Some(branch(None, "join", None))),
+                Block::build("b", vec![mark("b")], Some(branch(None, "join", None))),
+                Block::build("join", vec![mark("join")], Some(Stmt::ret_void())),
+            ],
+        );
+        let mut locals = Vec::new();
+        let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
+        assert_eq!(
+            out,
+            vec![
+                Stmt::if_then_else(x_below(1), vec![mark("a")], vec![mark("b")]),
+                mark("join"),
+                Stmt::ret_void(),
+            ]
+        );
         assert!(locals.is_empty());
     }
 }
