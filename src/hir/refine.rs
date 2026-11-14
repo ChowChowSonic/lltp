@@ -83,7 +83,7 @@ pub fn simplify_guard(e: Expr) -> Expr {
 
 /// Names of the variables `e` reads, or false when `e` has a shape this check
 /// does not understand.
-fn read_vars(e: &Expr, out: &mut Vec<String>) -> bool {
+pub(crate) fn read_vars(e: &Expr, out: &mut Vec<String>) -> bool {
     match e {
         Expr::Literal(_) => true,
         Expr::Var(v) => {
