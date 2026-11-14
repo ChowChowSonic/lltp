@@ -76,21 +76,21 @@ pub fn pipeline(lang: &impl Language, ir: &str) -> Result<String, PipelineError>
 /// Which nodes this backend can express. A node the target cannot print has to be
 /// rewritten away before emission reaches it.
 fn check_capabilities(lang: &impl Language, func: &Function) -> Result<(), PipelineError> {
-    check_stmts(lang, &func.body)
+    match check_stmts(lang, &func.body) {
+        Ok(x) if !lang.allows_multiple_return() && [0, 1].contains(&x) => Err(
+            PipelineError::DisallowedStmtError(lang.name().to_string(), "Ret".to_string()),
+        ),
+        Ok(_) => Ok(()),
+        Err(x) => Err(x),
+    }
 }
 
-fn check_stmts(lang: &impl Language, stmts: &[Stmt]) -> Result<(), PipelineError> {
+fn check_stmts(lang: &impl Language, stmts: &[Stmt]) -> Result<usize, PipelineError> {
     let mut returns = 0;
     for stmt in stmts {
         match stmt {
             Stmt::Ret(_) => {
                 returns += 1;
-                if !lang.allows_multiple_return() && returns > 1 {
-                    return Err(PipelineError::DisallowedStmtError(
-                        lang.name().to_string(),
-                        "Ret".to_string(),
-                    ));
-                }
             }
             Stmt::Switch(node) => {
                 if !lang.allows_switch() {
@@ -100,16 +100,22 @@ fn check_stmts(lang: &impl Language, stmts: &[Stmt]) -> Result<(), PipelineError
                     ));
                 }
                 for (_, body) in &node.cases {
-                    check_stmts(lang, body)?;
+                    returns += check_stmts(lang, body)?;
                 }
-                check_stmts(lang, &node.default)?;
+                returns += check_stmts(lang, &node.default)?;
+            }
+            Stmt::Branch(_) => {
+                return Err(PipelineError::FunctionEmissionError(
+                    lang.name().to_string(),
+                    "structured body contains a branch".to_string(),
+                ));
             }
             Stmt::If(node) => {
-                check_stmts(lang, &node.then_stmts)?;
-                check_stmts(lang, &node.else_stmts)?;
+                returns += check_stmts(lang, &node.then_stmts)?;
+                returns += check_stmts(lang, &node.else_stmts)?;
             }
             Stmt::Loop(node) => {
-                check_stmts(lang, &node.body)?;
+                returns += check_stmts(lang, &node.body)?;
             }
             Stmt::Goto(_) | Stmt::Label(_) if !lang.allows_goto() => {
                 // Labels are only expressible where `goto` is, since they exist
@@ -125,6 +131,15 @@ fn check_stmts(lang: &impl Language, stmts: &[Stmt]) -> Result<(), PipelineError
                     "TryCatch".to_string(),
                 ));
             }
+            Stmt::TryCatch(stmt) => {
+                returns += check_stmts(lang, &stmt.try_body)?;
+                if let Some(b) = &stmt.finally_body {
+                    returns += check_stmts(lang, b)?;
+                }
+                for x in &stmt.catches {
+                    returns += check_stmts(lang, &x.body)?;
+                }
+            }
             Stmt::Invoke(_) if !lang.allows_unwind_fork() => {
                 // Without unwind/fork the contract is error-code propagation or
                 // try/catch, never an `invoke` arm.
@@ -135,10 +150,23 @@ fn check_stmts(lang: &impl Language, stmts: &[Stmt]) -> Result<(), PipelineError
             }
             // The remaining nodes are core structured control flow with no
             // capability flag, so every backend may see them.
-            _ => (),
+            Stmt::Goto(_)
+            | Stmt::Label(_)
+            | Stmt::Let(_)
+            | Stmt::Eval(_)
+            | Stmt::Unreachable
+            | Stmt::Break
+            | Stmt::Invoke(_)
+            | Stmt::Continue => (),
         }
     }
-    Ok(())
+    if !lang.allows_multiple_return() && returns > 1 {
+        return Err(PipelineError::DisallowedStmtError(
+            lang.name().to_string(),
+            "Ret".to_string(),
+        ));
+    }
+    Ok(returns)
 }
 
 #[cfg(test)]
