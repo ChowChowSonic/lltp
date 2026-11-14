@@ -1206,8 +1206,6 @@ mod tests {
         assert!(natural_loops(&cfg, &dom).is_empty());
     }
 
-    use crate::hir::structurize::structurize;
-
     fn flag(name: &str) -> Expr {
         Expr::var(name, Ty::Bool)
     }
@@ -1296,7 +1294,7 @@ mod tests {
         // that creates an exit arm always has two. So the soundness claim is the
         // guard's premise itself — the dropped nodes executed nothing — and the
         // check that remains is that the tree still structures the result.
-        assert!(structurize(&out).is_ok());
+        assert!(out.structurize().is_ok());
     }
 
     /// Both targets carry statements, so nothing can be converged: the exit
@@ -1372,7 +1370,7 @@ mod tests {
             vec!["join".to_string(), "ret".to_string()]
         );
         assert!(locals.contains(&("_exit_tag_h".to_string(), Ty::Int(32, true))));
-        assert!(structurize(&out).is_ok());
+        assert!(out.structurize().is_ok());
     }
 
     /// A `switch` inside the loop with two arms leaving it cannot be dispatched:
@@ -1459,7 +1457,7 @@ mod tests {
         // The `continue` arm is carried through the dispatch rather than turned
         // into a break: the entry still reaches the enclosing header.
         assert!(reachable_from(&out, &entry, &all).contains("oh"));
-        assert!(structurize(&out).is_ok());
+        assert!(out.structurize().is_ok());
     }
 
     /// A region entered at two nodes, from one fork that branches to both. The

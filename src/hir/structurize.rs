@@ -26,19 +26,6 @@ struct LoopContext {
     exit: Option<String>,
     latch: Option<String>,
 }
-/// Reduce a reducible CFG to structured statements. Irreducible graphs and
-/// parallel acyclic joins are lifted automatically by node splitting
-/// (duplicating blocks until every cycle is single-entry and every fork arm
-/// owns its downstream); a growth budget turns pathological shapes back into
-/// errors instead of unbounded duplication.
-///
-/// This wrapper has no `locals` to write to, so a tag the dispatches introduce is
-/// not recorded anywhere: the emitted code assigns it without declaring it. Use
-/// `structurize_with` through `Function::structurize` when a backend is going to
-/// print the result.
-pub fn structurize(cfg: &Cfg) -> Result<Vec<Stmt>, StructurizeError> {
-    structurize_with(cfg, &mut Vec::new(), cfg.len().saturating_mul(8).max(64))
-}
 
 /// The same run, with the variables the normalization introduces recorded so the
 /// backend can declare them (`exit_tag_*` is read after the loop, `entry_tag_*`
@@ -1224,11 +1211,10 @@ mod test {
         hir::{
             cfg::Cfg,
             flow::{dominators, natural_loops, normalize_loop_exits, reachable, reducible},
-            structurize::{LoopTree, split_fork, split_nodes, structurize},
+            structurize::{LoopTree, split_fork, split_nodes},
             verify::{are_equivalent, structured_to_cfg},
         },
     };
-
     fn tree(cfg: &Cfg) -> LoopTree {
         LoopTree::build(cfg, &dominators(cfg), &reachable(cfg)).unwrap()
     }
@@ -1251,7 +1237,7 @@ mod test {
         // Splitting must leave every cycle single-entry.
         assert!(reducible(&split));
         // The previously-unstructurizable irreducible cycle now structures.
-        assert!(structurize(&cfg).is_ok());
+        assert!(cfg.structurize().is_ok());
     }
 
     #[test]
@@ -1268,7 +1254,7 @@ mod test {
         );
         let split = split_nodes(&cfg).unwrap();
         assert!(reducible(&split));
-        assert!(structurize(&cfg).is_ok());
+        assert!(cfg.structurize().is_ok());
     }
 
     #[test]
@@ -1430,7 +1416,7 @@ mod test {
             "entry",
             &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "h")],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1440,7 +1426,7 @@ mod test {
             "entry",
             &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "ex")],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1458,7 +1444,7 @@ mod test {
                 ("latch", "h"),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1478,7 +1464,7 @@ mod test {
                 ("T", "oh"),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1497,7 +1483,7 @@ mod test {
                 ("b2", "h2"),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1513,7 +1499,7 @@ mod test {
                 ("latch", "h"),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1529,14 +1515,14 @@ mod test {
                 ("c2", "h"),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
     #[test]
     fn straight_line_round_trips() {
         let cfg = Cfg::cfg_from("a", &[("a", "b"), ("b", "c")]);
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1552,21 +1538,21 @@ mod test {
                 ("join", "exit"),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
     #[test]
     fn if_else_round_trips() {
         let cfg = Cfg::cfg_from("e", &[("e", "a"), ("e", "b")]);
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
     #[test]
     fn if_without_else_round_trips() {
         let cfg = Cfg::cfg_from("e", &[("e", "a"), ("e", "j"), ("a", "j")]);
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1586,7 +1572,7 @@ mod test {
                 ("j2", "t"),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
     }
 
@@ -1611,7 +1597,7 @@ mod test {
         // joins, so each arm must own a private copy of its downstream.
         let normalized = normalize_loop_exits(&cfg, &mut Vec::new(), &mut HashSet::new(), 64);
         let split = split_fork(&normalized, "e").unwrap();
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&split, &structured_to_cfg(&stmts)));
     }
 
@@ -1651,7 +1637,7 @@ mod test {
                 );
             }
         }
-        let stmts = structurize(&cfg);
+        let stmts = cfg.structurize();
         assert!(stmts.is_ok());
     }
     #[test]
@@ -1667,7 +1653,7 @@ mod test {
                 ("join", "exit"),
             ],
         );
-        let stmts = structurize(&cfg).unwrap();
+        let stmts = cfg.structurize().unwrap();
         assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)))
     }
 }
