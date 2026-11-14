@@ -8,7 +8,7 @@ use crate::hir::flow::{
     DomInfo, NaturalLoop, PostDomInfo, dominators, natural_loops, normalize_loop_entries,
     normalize_loop_exits, reachable, reachable_from, t1t2_reduce,
 };
-use crate::hir::stmt::{BranchStmt, IfStmt, LetStmt, LoopStmt, RetStmt, SwitchStmt};
+use crate::hir::stmt::{BranchStmt, IfStmt, LoopStmt, RetStmt, SwitchStmt};
 use crate::hir::{Cfg, Expr, Lit, Stmt, Ty};
 
 pub struct LoopTree {
@@ -1114,17 +1114,7 @@ fn split_fork(cfg: &Cfg, fork: &str) -> Result<Cfg, StructurizeError> {
 /// A statement that occupies a block without changing its semantics, used to
 /// materialize bare (statement-free) arm blocks in the rebuilt CFG.
 fn placeholder() -> Stmt {
-    Stmt::Let(LetStmt {
-        dest: Box::new(Expr::Var(VarExpr {
-            name: "_unused".into(),
-            dtype: Ty::Void,
-        })),
-        src: Box::new(Expr::Literal(Lit::Int {
-            value: 0,
-            bits: 32,
-            signed: true,
-        })),
-    })
+    Stmt::Eval(Expr::Nop)
 }
 
 impl LoopTree {

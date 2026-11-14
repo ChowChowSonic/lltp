@@ -62,6 +62,17 @@ impl Function {
         self.sig.params.iter().map(|p| p.name.clone()).collect()
     }
 
+    pub fn create_local(&mut self, typ: Ty, name: String) -> Option<&(String, Ty)> {
+        let mut index = 0;
+        let mut deduped_name = name.clone();
+        while self.locals.iter().find(|x| x.0 == deduped_name).is_some() {
+            index += 1;
+            deduped_name = format!("{}{}", name, index);
+        }
+        self.locals.push((deduped_name, typ.clone()));
+        self.locals.last()
+    }
+
     /// Run structurization on this function's CFG, populating and returning `self.body`.
     ///
     /// The dispatches can introduce their own variable — the tag read after the loop
