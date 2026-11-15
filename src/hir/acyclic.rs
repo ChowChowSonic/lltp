@@ -6,8 +6,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::errors::StructurizeError;
+use crate::hir::cascade::cascade_exclusive;
 use crate::hir::op::BinOp;
-use crate::hir::reaching::{Cond, EdgeSet, reaching_conditions};
+use crate::hir::reaching::{
+    Cond, EdgeSet, mutually_unreachable, reaching_conditions, region_reachability,
+};
 use crate::hir::refine::{
     merge_complementary, merge_equalities, read_vars, simplify_guard, writes_any,
 };
@@ -321,9 +324,10 @@ fn prune_nodes(nodes: Vec<(String, Stmt)>, dead: &BTreeSet<String>) -> Vec<(Stri
 /// added to `locals`. A branch on a compare of variables and constants is kept
 /// as that compare in later guards while nothing rewrites its operands, and its
 /// boolean is dropped once no guard reads it. Runs of guards `v == c` then
-/// become a switch (2.3.5) and neighbouring nodes with complementary guards one
-/// if/else (2.3.4). The sink's own statements are included, but whatever
-/// follows the sink is left to the caller.
+/// become a switch (2.3.5), neighbouring nodes that can never both run one
+/// if / else if / else (2.3.6), and neighbouring nodes with complementary
+/// guards one if/else (2.3.4). The sink's own statements are included, but
+/// whatever follows the sink is left to the caller.
 ///
 /// Errors with `NotAcyclicRegion` when the region still has a cycle after
 /// skipping the edges in `skip`, when `sink` is unreachable, or when control
@@ -405,10 +409,10 @@ pub fn structure_acyclic(
     }
     let dead: BTreeSet<String> = inlined.difference(&read).cloned().collect();
     locals.retain(|(l, _)| !dead.contains(l));
-    let out: Vec<Stmt> = prune_nodes(out, &dead)
-        .into_iter()
-        .map(|(_, s)| s)
-        .collect();
+    let reach = region_reachability(cfg, &region, skip);
+    let out = cascade_exclusive(prune_nodes(out, &dead), |a, b| {
+        mutually_unreachable(&reach, a, b)
+    });
     Ok(merge_complementary(merge_equalities(out)))
 }
 
@@ -801,8 +805,11 @@ mod tests {
             out,
             vec![
                 Stmt::let_binding(taken(), x_is(1)),
-                Stmt::if_then_else(x_is(1), vec![set_x(9)], vec![]),
-                Stmt::if_then_else(not_taken(), vec![mark("b")], vec![]),
+                Stmt::if_then_else(
+                    x_is(1),
+                    vec![set_x(9)],
+                    vec![Stmt::if_then_else(not_taken(), vec![mark("b")], vec![])],
+                ),
                 mark("join"),
                 Stmt::ret_void(),
             ]
@@ -887,5 +894,73 @@ mod tests {
             ]
         );
         assert!(locals.is_empty());
+    }
+
+    #[test]
+    fn a_chain_of_compares_becomes_an_else_if_chain() {
+        let jump = || Some(branch(None, "join", None));
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build(
+                    "entry",
+                    vec![],
+                    Some(branch(Some(x_below(1)), "a", Some("b"))),
+                ),
+                Block::build("a", vec![mark("a")], jump()),
+                Block::build("b", vec![], Some(branch(Some(x_below(2)), "c", Some("d")))),
+                Block::build("c", vec![mark("c")], jump()),
+                Block::build("d", vec![mark("d")], jump()),
+                Block::build("join", vec![mark("join")], Some(Stmt::ret_void())),
+            ],
+        );
+        let mut locals = Vec::new();
+        let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
+        // The join's own guard is the unsimplified "a, c or d ran", so it stays
+        // an `if`; the three arms before it are one chain.
+        assert_eq!(out.len(), 2);
+        assert_eq!(
+            out[0],
+            Stmt::if_then_else(
+                x_below(1),
+                vec![mark("a")],
+                vec![Stmt::if_then_else(
+                    x_below(2),
+                    vec![mark("c")],
+                    vec![mark("d")]
+                )],
+            )
+        );
+        assert!(matches!(
+            &out[1],
+            Stmt::If(i) if i.then_stmts == [mark("join"), Stmt::ret_void()]
+        ));
+        assert!(locals.is_empty());
+    }
+
+    #[test]
+    fn nodes_on_one_path_are_not_cascaded() {
+        // entry -> a -> b -> join, with entry and a each able to skip ahead.
+        let cfg = Cfg::assemble(
+            "entry",
+            vec![
+                Block::build(
+                    "entry",
+                    vec![],
+                    Some(branch(Some(x_below(1)), "a", Some("join"))),
+                ),
+                Block::build(
+                    "a",
+                    vec![mark("a")],
+                    Some(branch(Some(x_below(2)), "b", Some("join"))),
+                ),
+                Block::build("b", vec![mark("b")], Some(branch(None, "join", None))),
+                Block::build("join", vec![mark("join")], Some(Stmt::ret_void())),
+            ],
+        );
+        let mut locals = Vec::new();
+        let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
+        let has_else = |s: &Stmt| matches!(s, Stmt::If(i) if !i.else_stmts.is_empty());
+        assert!(!out.iter().any(has_else));
     }
 }
