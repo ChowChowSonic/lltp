@@ -176,7 +176,10 @@ mod tests {
                 ),
                 at(
                     "arm3",
-                    guarded(and(Expr::negate(flag("c1")), Expr::negate(flag("c2"))), vec![mark("d")]),
+                    guarded(
+                        and(Expr::negate(flag("c1")), Expr::negate(flag("c2"))),
+                        vec![mark("d")],
+                    ),
                 ),
             ],
             arms,
