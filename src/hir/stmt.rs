@@ -41,9 +41,48 @@ pub struct LetStmt {
     pub dest: Box<Expr>,
     pub src: Box<Expr>,
 }
+/// Where a loop's guard is evaluated, relative to its body.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoopKind {
+    /// The guard runs before any body statement: `while (guard)`.
+    PreTest,
+    /// At least one body statement runs before the guard: `do { … } while (guard)`.
+    PostTest,
+    /// A pre-test guard plus an induction variable the loop steps by a constant:
+    /// `for (init; guard; step)`.
+    Counted,
+    /// No guard: the loop is left only through `Break`.
+    Unconditional,
+}
+
+/// The variable a counted loop steps. `init` is the value that reaches the guard on
+/// the entry edge, `step` the update on the way back; either may be absent, since a
+/// `for` with no init clause is still a counted loop.
+#[derive(Debug, Clone, PartialEq)]
+pub struct InductionVar {
+    pub name: String,
+    pub init: Option<Expr>,
+    pub step: Option<Expr>,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct LoopStmt {
-    pub cond: Option<Expr>,
+    pub kind: LoopKind,
+    /// The condition that must hold for the loop to run again. `None` when the loop
+    /// node itself does not test: the test then stays inside the body.
+    pub guard: Option<Expr>,
+    /// The block the guard is read in.
+    pub test_block: Option<String>,
+    /// Whether this node reads the guard. When the test point is inside the body,
+    /// the `If` stays there and the node carries no guard.
+    pub guard_at_node: bool,
+    /// The block control returns to when the guard holds.
+    pub latch: Option<String>,
+    /// The block the loop region is entered at, so a node can be read back against
+    /// the graph it came from.
+    pub header: Option<String>,
+    /// The induction variable, when the shape claims a counted loop.
+    pub induction: Option<InductionVar>,
     pub body: Vec<Stmt>,
 }
 #[derive(Debug, Clone, PartialEq)]

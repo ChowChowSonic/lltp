@@ -83,7 +83,7 @@ impl StmtEmitter for CLanguage {
     }
     fn emit_loop(&self, stmt: &LoopStmt, out: &mut impl Write) -> std::fmt::Result {
         write!(out, "while(")?;
-        if let Some(cond) = &stmt.cond {
+        if let Some(cond) = &stmt.guard {
             self.emit_expr(cond, out)?;
         } else {
             write!(out, "true")?;

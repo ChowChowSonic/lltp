@@ -1,11 +1,17 @@
+use crate::hir::flow::keep_reachable;
+use crate::hir::flow::{dominators, natural_loops};
+use crate::hir::loops::{block_test, is_test_point};
 use crate::hir::{
     Cfg, Stmt,
-    stmt::{GotoStmt, IfStmt, LabelStmt, LoopStmt, SwitchStmt, TryCatchStmt},
+    stmt::{GotoStmt, IfStmt, LabelStmt, LoopKind, LoopStmt, SwitchStmt, TryCatchStmt},
 };
 use std::collections::{BTreeSet, HashMap};
 
 struct ReBuilder {
     succ: HashMap<String, Vec<String>>,
+    /// The statements each node runs, so the position a guard is read at is part of
+    /// the shape and not only the edges.
+    stmts: HashMap<String, Vec<Stmt>>,
     all: Vec<String>,
     next: usize,
 }
@@ -16,6 +22,12 @@ impl ReBuilder {
         self.next += 1;
         self.all.push(n.clone());
         n
+    }
+    fn record(&mut self, node: &str, stmt: &Stmt) {
+        self.stmts
+            .entry(node.to_string())
+            .or_default()
+            .push(stmt.clone());
     }
     fn edge(&mut self, from: &str, to: &str) {
         if from == to {
@@ -67,16 +79,20 @@ impl ReBuilder {
     }
     fn region(
         &mut self,
+        entry: &str,
         stmts: &[Stmt],
         brk: Option<&String>,
         cont: Option<&String>,
         labels: &mut HashMap<String, String>,
     ) -> (String, Option<String>) {
-        let entry = self.fresh();
-        let mut cur = Some(entry.clone());
+        let mut cur = Some(entry.to_string());
         for s in stmts {
             match s {
-                Stmt::Let { .. } | Stmt::Eval(_) => {}
+                Stmt::Let { .. } | Stmt::Eval(_) => {
+                    if let Some(c) = &cur {
+                        self.record(c, s);
+                    }
+                }
                 Stmt::Ret { .. } | Stmt::Unreachable => cur = None,
                 Stmt::Break => {
                     if let Some(c) = &cur {
@@ -85,7 +101,13 @@ impl ReBuilder {
                     }
                     cur = None;
                 }
-
+                Stmt::Continue => {
+                    if let Some(c) = &cur {
+                        let j = cont.expect("Continue outside any loop");
+                        self.edge(c, j);
+                    }
+                    cur = None;
+                }
                 Stmt::Goto(GotoStmt { target }) => {
                     if let Some(c) = &cur {
                         let t = labels
@@ -106,28 +128,27 @@ impl ReBuilder {
                     catches,
                     finally_body,
                 }) => {
-                    let Some(c) = &cur else {
-                        continue;
-                    };
-
-                    let (te, tx) = self.region(try_body, brk, cont, labels);
+                    let Some(c) = &cur else { continue };
+                    let n = self.fresh();
+                    let (te, tx) = self.region(&n, try_body, brk, cont, labels);
                     self.edge(c, &te);
 
-                    let mut fallthrough_exits = Vec::new();
+                    let mut fallthrough_exits: Vec<String> = Vec::new();
                     if let Some(x) = tx {
-                        fallthrough_exits.push(x);
+                        fallthrough_exits.push(x.clone());
                     }
-
                     for catch in catches {
-                        let (ce, cx) = self.region(&catch.body, brk, cont, labels);
+                        let n = self.fresh();
+                        let (ce, cx) = self.region(&n, &catch.body, brk, cont, labels);
                         self.edge(c, &ce);
                         if let Some(x) = cx {
-                            fallthrough_exits.push(x);
+                            fallthrough_exits.push(x.clone());
                         }
                     }
                     if let Some(fb) = finally_body.as_ref().filter(|b| !b.is_empty()) {
                         if !fallthrough_exits.is_empty() {
-                            let (fe, fx) = self.region(fb, brk, cont, labels);
+                            let n = self.fresh();
+                            let (fe, fx) = self.region(&n, fb, brk, cont, labels);
                             for x in &fallthrough_exits {
                                 self.edge(x, &fe);
                             }
@@ -139,28 +160,30 @@ impl ReBuilder {
                         cur = None;
                     } else {
                         let join = self.fresh();
-                        for x in fallthrough_exits {
-                            self.edge(&x, &join);
+                        for x in &fallthrough_exits {
+                            self.edge(x, &join);
                         }
                         cur = Some(join);
                     }
                 }
                 Stmt::If(IfStmt {
+                    cond: _,
                     then_stmts,
                     else_stmts,
-                    ..
                 }) => {
-                    let Some(c) = cur else { continue }; // dead code: skip
-                    let (te, tx) = self.region(then_stmts, brk, cont, labels);
-                    self.edge(&c, &te);
+                    let Some(c) = &cur else { continue };
+                    let n = self.fresh();
+                    let (te, tx) = self.region(&n, then_stmts, brk, cont, labels);
+                    self.edge(c, &te);
                     let mut join: Option<String> = None;
                     if else_stmts.is_empty() {
                         let j = self.fresh(); // false path continues after the If
-                        self.edge(&c, &j);
+                        self.edge(c, &j);
                         join = Some(j);
                     } else {
-                        let (ee, ex) = self.region(else_stmts, brk, cont, labels);
-                        self.edge(&c, &ee);
+                        let n = self.fresh();
+                        let (ee, ex) = self.region(&n, else_stmts, brk, cont, labels);
+                        self.edge(c, &ee);
                         if let Some(x) = ex {
                             let j = self.fresh();
                             self.edge(&x, &j);
@@ -174,30 +197,67 @@ impl ReBuilder {
                     }
                     cur = join; // None if both arms terminated
                 }
-                Stmt::Loop(LoopStmt {
-                    body, cond: lcond, ..
-                }) => {
-                    let Some(c) = cur else { continue };
-                    let header = self.fresh();
-                    let join = self.fresh(); // false-exit: cond fails → after loop
-                    let (be, bx) = self.region(body, Some(&join), Some(&header), labels);
-                    self.edge(&c, &header);
-                    self.edge(&header, &be); // cond true → body
-                    if lcond.is_some() {
-                        self.edge(&header, &join); // cond false → after
-                    }
-                    if let Some(x) = bx {
-                        self.edge(&x, &header);
-                    } // body falls out → header (back edge)
-                    cur = Some(join);
-                }
+                Stmt::Loop(node) => {
+                    let Some(c) = &cur else { continue };
 
+                    // Only a node that reads its own guard has a guard position to place.
+                    // When the test point is inside the body, the `If` in the body is the
+                    // test, so this node has no test position of its own.
+                    match node.kind {
+                        // Counted reads its guard at the node too: the step is recorded
+                        // on the shape, and its position is checked by the step split.
+                        LoopKind::PreTest | LoopKind::Counted => {
+                            let test = self.fresh();
+                            let join = self.fresh();
+                            let be = self.fresh();
+                            let (be, bx) =
+                                self.region(&be, &node.body, Some(&join), Some(&test), labels);
+                            self.edge(c, &test);
+                            self.edge(&test, &be);
+                            if node.guard.is_some() {
+                                self.edge(&test, &join);
+                            }
+                            if let Some(x) = bx {
+                                self.edge(&x, &test);
+                            }
+                            cur = Some(join);
+                        }
+                        LoopKind::PostTest => {
+                            let be = self.fresh();
+                            let test = self.fresh();
+                            let join = self.fresh();
+                            let (be, bx) =
+                                self.region(&be, &node.body, Some(&join), Some(&test), labels);
+                            self.edge(c, &be);
+                            if let Some(x) = bx {
+                                self.edge(&x, &test);
+                            }
+                            self.edge(&test, &be);
+                            if node.guard.is_some() {
+                                self.edge(&test, &join);
+                            }
+                            cur = Some(join);
+                        }
+                        LoopKind::Unconditional => {
+                            let be = self.fresh();
+                            let join = self.fresh();
+                            let (be, bx) =
+                                self.region(&be, &node.body, Some(&join), Some(&be), labels);
+                            self.edge(c, &be);
+                            if let Some(x) = bx {
+                                self.edge(&x, &be);
+                            }
+                            cur = Some(join);
+                        }
+                    }
+                }
                 Stmt::Switch(SwitchStmt { cases, default, .. }) => {
-                    let Some(c) = cur else { continue };
+                    let Some(c) = &cur else { continue };
                     let mut join: Option<String> = None;
-                    for (_, body) in cases {
-                        let (ae, ax) = self.region(body, brk, cont, labels);
-                        self.edge(&c, &ae);
+                    for (_, b) in cases {
+                        let n = self.fresh();
+                        let (ae, ax) = self.region(&n, b, brk, cont, labels);
+                        self.edge(c, &ae);
                         if let Some(x) = ax {
                             let j = join.get_or_insert_with(|| self.fresh());
                             self.edge(&x, j);
@@ -205,10 +265,11 @@ impl ReBuilder {
                     }
                     if default.is_empty() {
                         let j = join.get_or_insert_with(|| self.fresh());
-                        self.edge(&c, j);
+                        self.edge(c, j);
                     } else {
-                        let (de, dx) = self.region(default, brk, cont, labels);
-                        self.edge(&c, &de);
+                        let n = self.fresh();
+                        let (de, dx) = self.region(&n, default, brk, cont, labels);
+                        self.edge(c, &de);
                         if let Some(x) = dx {
                             let j = join.get_or_insert_with(|| self.fresh());
                             self.edge(&x, j);
@@ -216,43 +277,121 @@ impl ReBuilder {
                     }
                     cur = join;
                 }
-                Stmt::Continue => {
-                    if let Some(c) = &cur {
-                        let j = cont.expect("Continue outside any loop");
-                        self.edge(c, j);
-                    }
-                    cur = None;
-                }
-
                 Stmt::Invoke(i) => {
-                    let Some(c) = cur else { continue };
-                    // The control arm only, and only where the tree labels it:
-                    // in a straight-line region the fallthrough is implicit.
+                    let Some(c) = &cur else { continue };
+                    // The control arm only, and only where the tree labels it: in a
+                    // straight-line region the fallthrough is implicit.
                     if let Some(node) = labels.get(&i.normal) {
-                        self.edge(&c, node);
+                        self.edge(c, node);
                     }
                     cur = None;
                 }
                 Stmt::Branch { .. } => unreachable!("structured input must not contain Branch"),
             }
         }
-        (entry, cur)
+        (entry.to_string(), cur)
     }
 }
 
 pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
     let mut b = ReBuilder {
         succ: HashMap::new(),
+        stmts: HashMap::new(),
         all: Vec::new(),
         next: 0,
     };
     let mut labels = HashMap::new();
     b.collect_labels(body, &mut labels);
-    let (entry, _) = b.region(body, None, None, &mut labels);
+    let top = b.fresh();
+    let (entry, _) = b.region(&top, body, None, None, &mut labels);
     for n in &b.all {
+        b.stmts.entry(n.clone()).or_default();
         b.succ.entry(n.clone()).or_default();
     }
-    Cfg::from_edges(entry, b.succ)
+    let mut cfg = Cfg::from_edges(entry, b.succ.clone());
+    for (n, s) in &b.stmts {
+        if let Some(blk) = cfg.blocks.get_mut(n) {
+            blk.stmts = s.clone();
+        }
+    }
+    cfg
+}
+
+/// A graph view where each block is split into the statements it runs and the test
+/// that follows them, so the position a guard is read at is part of the shape.
+///
+/// A block whose statements are only the definition its branch reads is one node:
+/// that definition is part of the test, not body work the tree has to carry.
+pub fn split_tests(cfg: &Cfg) -> Cfg {
+    let dom = dominators(cfg);
+    // Only the block a loop tests at has a guard position to place. A branch inside
+    // a straight-line region runs its condition as part of that region, so splitting
+    // it would claim a position the tree never claims.
+    let mut test_points: BTreeSet<String> = BTreeSet::new();
+    for l in natural_loops(cfg, &dom) {
+        for n in &l.body {
+            if is_test_point(cfg, &l.body, n) {
+                test_points.insert(n.clone());
+            }
+        }
+    }
+
+    let mut head: HashMap<String, String> = HashMap::new();
+    let mut tail: HashMap<String, String> = HashMap::new();
+    let mut stmts: HashMap<String, Vec<Stmt>> = HashMap::new();
+    let mut next = 0usize;
+
+    for name in cfg.order.clone() {
+        let Ok(test) = block_test(cfg, &name) else {
+            continue;
+        };
+        if !test_points.contains(&name)
+            || !test.branch.is_some_and(|b| b.is_conditional())
+            || test.preamble.is_empty()
+        {
+            head.insert(name.clone(), name.clone());
+            tail.insert(name.clone(), name.clone());
+            stmts.insert(name.clone(), test.preamble.clone());
+            continue;
+        }
+        // Body work runs here, then the test: two nodes.
+        head.insert(name.clone(), name.clone());
+        let t = format!("t{next}");
+        next += 1;
+        tail.insert(name.clone(), t.clone());
+        stmts.insert(name.clone(), test.preamble.clone());
+    }
+
+    let mut succ: HashMap<String, Vec<String>> = HashMap::new();
+    for name in cfg.order.clone() {
+        let Some(blk) = cfg.get_block(&name) else {
+            continue;
+        };
+        if let Some(t) = tail.get(&name) {
+            succ.entry(t.clone()).or_default();
+        }
+        if let Some(h) = head.get(&name) {
+            succ.entry(h.clone()).or_default();
+        }
+        if head.get(&name) != tail.get(&name) {
+            succ.entry(head[&name].clone())
+                .or_default()
+                .push(tail[&name].clone());
+        }
+        for s in &blk.succ {
+            if let Some(h) = head.get(s) {
+                succ.entry(tail[&name].clone()).or_default().push(h.clone());
+            }
+        }
+    }
+
+    let mut out = Cfg::from_edges(head[&cfg.entry].clone(), succ);
+    for (n, s) in &stmts {
+        if let Some(blk) = out.blocks.get_mut(n) {
+            blk.stmts = s.clone();
+        }
+    }
+    out
 }
 
 pub fn color_fingerprint(cfg: &Cfg) -> String {
@@ -288,26 +427,23 @@ pub fn color_fingerprint(cfg: &Cfg) -> String {
     v.sort();
     format!("E{}|{:?}", color[&cfg.entry], v)
 }
-use crate::hir::flow::keep_reachable;
+
 pub fn are_equivalent(a: &Cfg, b: &Cfg) -> bool {
-    let a = keep_reachable(&a.collapse_chains());
-    let b = keep_reachable(&b.collapse_chains());
+    let a = keep_reachable(&split_tests(a).collapse_chains());
+    let b = keep_reachable(&split_tests(b).collapse_chains());
     a.blocks.len() == b.blocks.len() && color_fingerprint(&a) == color_fingerprint(&b)
 }
 
 // fresh(): "b0","b1",…
 // edge(&mut self, from, to): record the successor, deduped; `pred` is derived
 // by `Cfg::from_edges`.
-
-// Returns the block the path continues from (Some), or None when the path
-// terminated (Ret / Break / Continue / Goto).
 #[cfg(test)]
 mod tests {
     use super::{are_equivalent, structured_to_cfg};
     use crate::hir::exception_targets;
     use crate::hir::{
         Cfg, Expr, Lit, Stmt,
-        stmt::{IfStmt, LetStmt, LoopStmt, RetStmt},
+        stmt::{IfStmt, LetStmt, LoopKind, LoopStmt, RetStmt},
     };
 
     fn cond() -> Expr {
@@ -336,13 +472,24 @@ mod tests {
     #[test]
     fn loop_body_fallout_returns_to_the_header() {
         let body = [Stmt::Loop(LoopStmt {
-            cond: Some(cond()),
+            kind: LoopKind::PreTest,
+            guard: Some(cond()),
+            test_block: None,
+
+            guard_at_node: true,
+
+            latch: None,
+            header: None,
+
+            induction: None,
+
             body: vec![Stmt::Let(LetStmt {
                 dest: Box::new(Expr::Literal(Lit::Bool(false))),
                 src: Box::new(Expr::Literal(Lit::Bool(true))),
             })],
         })];
         let cfg = structured_to_cfg(&body);
+        println!("GRAPH: {cfg:?}");
         // b0 entry, b1 header, b2 join, b3 body (falls out)
         assert_eq!(cfg.blocks.len(), 4);
         assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b1".to_string()]);
@@ -360,7 +507,17 @@ mod tests {
     fn loop_with_break_shape() {
         let body = [
             Stmt::Loop(LoopStmt {
-                cond: Some(cond()),
+                kind: LoopKind::PreTest,
+                guard: Some(cond()),
+                test_block: None,
+
+                guard_at_node: true,
+
+                latch: None,
+                header: None,
+
+                induction: None,
+
                 body: vec![Stmt::Break],
             }),
             Stmt::Ret(RetStmt { value: None }),
@@ -383,7 +540,17 @@ mod tests {
     #[test]
     fn continue_targets_the_loop_header() {
         let body = [Stmt::Loop(LoopStmt {
-            cond: Some(cond()),
+            kind: LoopKind::PreTest,
+            guard: Some(cond()),
+            test_block: None,
+
+            guard_at_node: true,
+
+            latch: None,
+            header: None,
+
+            induction: None,
+
             body: vec![
                 Stmt::If(IfStmt {
                     cond: cond(),
@@ -414,23 +581,31 @@ mod tests {
         assert_eq!(cfg.exits.len(), 2);
     }
 
-    /// `loop { break }` (cond: None): the header has no false exit, the join
-    /// is reachable only through the break.
+    /// An unguarded loop has no test node of its own: the entry node is the body,
+    /// and the join is reachable only through the break.
     #[test]
     fn infinite_loop_has_no_false_exit() {
         let body = [Stmt::Loop(LoopStmt {
-            cond: None,
+            kind: LoopKind::Unconditional,
+            guard: None,
+            test_block: None,
+
+            guard_at_node: true,
+
+            latch: None,
+            header: None,
+
+            induction: None,
+
             body: vec![Stmt::Break],
         })];
         let cfg = structured_to_cfg(&body);
-        // b0 entry, b1 header, b2 join, b3 body entry (break)
-        assert_eq!(cfg.blocks.len(), 4);
+        // b0 entry, b1 the body (break), b2 join
+        assert_eq!(cfg.blocks.len(), 3);
         assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b1".to_string()]);
-        assert_eq!(cfg.blocks["b1"].succ, vec!["b3".to_string()]);
-        assert_eq!(cfg.blocks["b3"].succ, vec!["b2".to_string()]);
-        // no false edge from the header means the join is only reachable
-        // through the break
-        assert_eq!(cfg.blocks["b2"].pred, vec!["b3".to_string()]);
+        assert_eq!(cfg.blocks["b1"].succ, vec!["b2".to_string()]);
+        // nothing tests, so the join has one incoming edge: the break
+        assert_eq!(cfg.blocks["b2"].pred, vec!["b1".to_string()]);
         assert_eq!(cfg.exits.len(), 1);
     }
 
