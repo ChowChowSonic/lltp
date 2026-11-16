@@ -2,7 +2,6 @@
 //! can never both run are written as one cascading `if` / `else if` / `else`
 //! instead of separate `if`s.
 
-use crate::hir::acyclic::negate;
 use crate::hir::op::BinOp;
 use crate::hir::refine::{conjuncts, merge_equalities, read_vars, writes_any};
 use crate::hir::stmt::IfStmt;
@@ -17,7 +16,7 @@ pub fn drop_known_false(guard: Expr, facts: &[Expr]) -> Expr {
     let mut parts = Vec::new();
     conjuncts(guard.clone(), &mut parts);
     let before = parts.len();
-    parts.retain(|p| !facts.contains(&negate(p.clone())));
+    parts.retain(|p| !facts.contains(&Expr::negate(p.clone())));
     if parts.len() == before {
         return guard;
     }
@@ -133,17 +132,17 @@ mod tests {
 
     #[test]
     fn operands_the_earlier_arms_settle_are_dropped() {
-        let second = and(negate(flag("c1")), flag("c2"));
+        let second = and(Expr::negate(flag("c1")), flag("c2"));
         assert_eq!(drop_known_false(second, &[flag("c1")]), flag("c2"));
 
-        let third = and(negate(flag("c1")), negate(flag("c2")));
+        let third = and(Expr::negate(flag("c1")), Expr::negate(flag("c2")));
         let facts = [flag("c1"), flag("c2")];
         assert_eq!(drop_known_false(third, &facts), Expr::bool(true));
     }
 
     #[test]
     fn a_guard_the_facts_do_not_settle_is_unchanged() {
-        let guard = and(negate(flag("c1")), flag("c2"));
+        let guard = and(Expr::negate(flag("c1")), flag("c2"));
         for facts in [vec![], vec![flag("c2")], vec![flag("other")]] {
             assert_eq!(drop_known_false(guard.clone(), &facts), guard);
         }
@@ -173,11 +172,11 @@ mod tests {
                 at("arm1", guarded(flag("c1"), vec![mark("a")])),
                 at(
                     "arm2",
-                    guarded(and(negate(flag("c1")), flag("c2")), vec![mark("b")]),
+                    guarded(and(Expr::negate(flag("c1")), flag("c2")), vec![mark("b")]),
                 ),
                 at(
                     "arm3",
-                    guarded(and(negate(flag("c1")), negate(flag("c2"))), vec![mark("d")]),
+                    guarded(and(Expr::negate(flag("c1")), Expr::negate(flag("c2"))), vec![mark("d")]),
                 ),
             ],
             arms,
