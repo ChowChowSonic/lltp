@@ -1,6 +1,8 @@
 use inkwell::context::Context;
+use lltp::build_module;
 use lltp::frontend::{FrontendConfig, compile_c_to_ir};
-use lltp::{build_module, hir::lowering::build_graph};
+use lltp::hir::lowering::build_graph;
+use std::collections::HashSet;
 use std::fs;
 
 #[test]
@@ -17,12 +19,18 @@ fn all_fixtures_ingest_and_build_cfgs() {
             let module =
                 build_module(&ctxt, &compiled.ir).expect("Unable to construct module from IR");
 
+            // Function names are reserved so no value gets the same name.
+            let reserved: HashSet<String> = module
+                .get_functions()
+                .map(|f| f.get_name().to_string_lossy().into_owned())
+                .collect();
+
             // build_graph is per function; declarations have no body.
             for func in module.get_functions() {
                 if func.count_basic_blocks() == 0 {
                     continue;
                 }
-                build_graph(&func).unwrap_or_else(|e| {
+                build_graph(&func, &reserved).unwrap_or_else(|e| {
                     panic!(
                         "CFG build failed for {path:?} in `{}`: {e}",
                         func.get_name().to_string_lossy()
