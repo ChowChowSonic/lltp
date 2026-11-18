@@ -445,6 +445,7 @@ mod tests {
         Cfg, Expr, Lit, Stmt,
         stmt::{IfStmt, LetStmt, LoopKind, LoopStmt, RetStmt},
     };
+    use std::collections::HashSet;
 
     fn cond() -> Expr {
         Expr::Literal(Lit::Bool(true))
@@ -655,8 +656,8 @@ declare void @pers()
         assert!(cfg.blocks["lp"].pred.is_empty());
         assert_eq!(cfg.exits, vec!["end".to_string()]);
 
-        let mut func =
-            crate::hir::lowering::lower_function(&func_val).expect("Function lowering failed");
+        let mut func = crate::hir::lowering::lower_function(&func_val, &HashSet::new())
+            .expect("Function lowering failed");
         let func_imut = func.clone();
 
         // `InvokeInst` operands are [args..., normal dest, unwind dests,
@@ -707,11 +708,26 @@ declare void @pers()
 "#;
         let ctxt = inkwell::context::Context::create();
         let module = crate::build_module(&ctxt, ir).expect("invoke IR should parse");
-        let err = crate::hir::Module::from_module(&module)
+        let func_val = module.get_first_function().expect("module has a function");
+
+        let err = crate::hir::flat::recover_function(&func_val, &HashSet::new())
             .expect_err("invoke must be reported as unsupported");
         assert!(
             err.to_string().contains("Invoke"),
             "unexpected error: {err}"
+        );
+
+        // a `hir::module` does not stop there: the instruction-level path keeps the
+        // `Invoke` node, so the graph still carries the arm.
+        let recovered = crate::hir::Module::from_module(&module)
+            .expect("the module entry should dispatch exception IR");
+        assert!(
+            recovered.funcs[0]
+                .cfg
+                .blocks
+                .values()
+                .any(|b| matches!(b.term(), Stmt::Invoke { .. })),
+            "the dispatch should keep the invoke arm"
         );
     }
 
