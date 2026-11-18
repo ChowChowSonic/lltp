@@ -1,32 +1,23 @@
 use crate::IrFormat;
-use std::fmt;
 use std::io::Error;
 use std::path::PathBuf;
 use thiserror::Error;
 
-/// Top-level error for HIR operations.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Top-level error for HIR operations: the recovery, structuring and pass layer.
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum HirError {
-    Lower(LowerError),
-    Structurize(StructurizeError),
-}
-
-impl fmt::Display for HirError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            HirError::Lower(e) => write!(f, "lowering error: {e}"),
-            HirError::Structurize(e) => write!(f, "structurize error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for HirError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            HirError::Lower(e) => Some(e),
-            HirError::Structurize(e) => Some(e),
-        }
-    }
+    #[error("lowering error: {0}")]
+    Lower(#[source] LowerError),
+    #[error("structurize error: {0}")]
+    Structurize(#[source] StructurizeError),
+    /// A pass failed. The pass name is carried so the pipeline can report which
+    /// stage of `Language::pipeline` the failure came from.
+    #[error("pass {pass:?} failed: {error}")]
+    Pass {
+        pass: &'static str,
+        #[source]
+        error: LowerError,
+    },
 }
 
 impl From<LowerError> for HirError {
@@ -127,15 +118,39 @@ pub enum FrontendError {
 #[derive(Error, Debug)]
 pub enum PipelineError {
     #[error("Unable to ingest IR due to reason:\n{0}")]
-    IngestError(IngestError),
-    #[error("Unable to ingest IR due to reason:\n{0}")]
-    ModuleParsingError(LowerError),
+    IngestError(#[source] IngestError),
+    /// An HIR failure, reported with the function it happened in. `error` stays
+    /// typed so a caller can match `HirError::Structurize` / `HirError::Lower` /
+    /// `HirError::Pass` instead of reading a formatted string. `origin` is the
+    /// function name at the per-function boundary and the module name at the
+    /// module boundary, where recovery has not picked a function yet.
+    #[error("Failed to build HIR for {origin:?} due to reason:\n{error}")]
+    Hir {
+        origin: String,
+        #[source]
+        error: HirError,
+    },
+    /// The pipeline reports recovery failures as `Hir`, which keeps the
+    /// `LowerError` typed instead of flattening it into a message.
+    #[deprecated = "match PipelineError::Hir { error: HirError::Lower(..), .. } instead"]
+    #[error("Failed to build HIR due to reason:\n{0}")]
+    ModuleParsingError(#[source] LowerError),
+    /// The pipeline reports pass failures as `Hir`, which keeps the pass name.
+    #[deprecated = "match PipelineError::Hir { error: HirError::Pass { .. }, .. } instead"]
     #[error("Failed to properly apply passes to IR due to reason:\n{0}")]
     PassApplicationError(String),
     #[error(
         "Refusing to convert IR into the {0} language - IR contains disallowed instructions. Please write a pass to remove all {1} statements"
     )]
     DisallowedStmtError(String, String),
+    /// A structured body that still contains a `Branch`: structuring left it
+    /// unstructured, so no emitter can print it.
+    #[error("Structured body of {func:?} still contains a branch at {block:?}")]
+    Unstructured { func: String, block: String },
+    /// `body` has to describe the same control flow as the `cfg` it was structured
+    /// from, which is the contract `hir::func` documents.
+    #[error("Structured body of {func:?} is not equivalent to the CFG it was built from")]
+    NotEquivalent { func: String },
     #[error("Failed to emit function {0} due to reason:\n{1}")]
     FunctionEmissionError(String, String),
 }
