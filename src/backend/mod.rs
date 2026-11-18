@@ -4,8 +4,9 @@ mod stmt;
 
 use std::fmt::{self, Write};
 
+use crate::errors::HirError;
 use crate::hir::{Function, Ty};
-use crate::{hir::LowerError, passes::Lowering};
+use crate::passes::Lowering;
 use tracing::debug;
 
 pub use expr::ExprEmitter;
@@ -140,13 +141,19 @@ pub trait Language: LowerTarget + ExprEmitter + StmtEmitter {
     /// that need bespoke lowering override this method (instead of or in
     /// addition to supplying `pipeline()`). `self` is a concrete backend, so
     /// it coerces to `&dyn LowerTarget` for the boxed passes.
-    fn lower(&self, func: &mut Function) -> Result<(), LowerError>
+    ///
+    /// The failure is reported as `HirError::Pass` with the pass name, so the
+    /// pipeline can say which stage of `pipeline()` produced it.
+    fn lower(&self, func: &mut Function) -> Result<(), HirError>
     where
         Self: Sized,
     {
         for pass in &self.pipeline() {
             debug!(pass = pass.name(), func = %func.sig.name, "running lowering pass");
-            pass.apply(func, self)?;
+            pass.apply(func, self).map_err(|error| HirError::Pass {
+                pass: pass.name(),
+                error,
+            })?;
         }
         Ok(())
     }

@@ -3,7 +3,7 @@
 use crate::errors::IngestError;
 use inkwell::context::Context;
 use inkwell::memory_buffer::MemoryBuffer;
-use inkwell::module::Module;
+use inkwell::module::Module as IrModule;
 use std::fmt;
 use std::fs::File;
 use std::io::Read;
@@ -38,8 +38,45 @@ pub fn sniff_format(header: &[u8]) -> IrFormat {
     }
 }
 
+/// Parse a buffer into a module. `origin` names where the bytes came from, so a
+/// parse failure reports its source rather than a fixed string, and `format`
+/// decides which parser runs. Textual IR needs the NUL terminator
+/// `create_module_from_ir` reads.
+pub fn parse<'ctx>(
+    ctxt: &'ctx Context,
+    buf: MemoryBuffer,
+    origin: String,
+    format: IrFormat,
+) -> Result<IrModule<'ctx>, IngestError> {
+    let parsed = match format {
+        IrFormat::Text => ctxt.create_module_from_ir(buf),
+        IrFormat::Bitcode => IrModule::parse_bitcode_from_buffer(&buf, ctxt),
+    };
+    parsed.map_err(|e| IngestError::Parse {
+        origin,
+        format,
+        detail: e.to_string(),
+    })
+}
+
+/// Parse textual IR held in memory. This is the single parse path the library
+/// uses, so `build_module` and `load_module` report the same error shape.
+pub fn parse_text<'ctx>(
+    ctxt: &'ctx Context,
+    ir: &str,
+    origin: impl Into<String>,
+) -> Result<IrModule<'ctx>, IngestError> {
+    let origin = origin.into();
+    let mut bytes = ir.as_bytes().to_vec();
+    if bytes.last() != Some(&0) {
+        bytes.push(0);
+    }
+    let buf = MemoryBuffer::create_from_memory_range(&bytes, &origin);
+    parse(ctxt, buf, origin, IrFormat::Text)
+}
+
 /// Load a `.ll` or `.bc` file into a module.
-pub fn load_module<'ctx>(ctxt: &'ctx Context, path: &Path) -> Result<Module<'ctx>, IngestError> {
+pub fn load_module<'ctx>(ctxt: &'ctx Context, path: &Path) -> Result<IrModule<'ctx>, IngestError> {
     let read_err = |detail: String| IngestError::Read {
         path: path.to_path_buf(),
         detail,
@@ -55,15 +92,7 @@ pub fn load_module<'ctx>(ctxt: &'ctx Context, path: &Path) -> Result<Module<'ctx
     let format = sniff_format(&head);
 
     let buf = MemoryBuffer::create_from_file(path).map_err(|e| read_err(e.to_string()))?;
-    let parsed = match format {
-        IrFormat::Text => ctxt.create_module_from_ir(buf),
-        IrFormat::Bitcode => Module::parse_bitcode_from_buffer(&buf, ctxt),
-    };
-    parsed.map_err(|e| IngestError::Parse {
-        origin: path.display().to_string(),
-        format,
-        detail: e.to_string(),
-    })
+    parse(ctxt, buf, path.display().to_string(), format)
 }
 
 #[cfg(test)]
