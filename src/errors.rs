@@ -148,9 +148,26 @@ pub enum PipelineError {
     #[error("Structured body of {func:?} still contains a branch at {block:?}")]
     Unstructured { func: String, block: String },
     /// `body` has to describe the same control flow as the `cfg` it was structured
-    /// from, which is the contract `hir::func` documents.
-    #[error("Structured body of {func:?} is not equivalent to the CFG it was built from")]
-    NotEquivalent { func: String },
+    /// from, which is the contract `hir::func` documents. `detail` carries both
+    /// shape fingerprints so the failure names the difference.
+    #[error(
+        "Structured body of {func:?} is not equivalent to the CFG it was built from:\n{detail}"
+    )]
+    NotEquivalent { func: String, detail: String },
+    /// A pass that claimed to preserve the shape changed it.
+    #[error("Pass {pass:?} claimed to preserve the shape of {func:?} and did not")]
+    PassChangedShape { func: String, pass: &'static str },
+    /// A node that reads its guard at a block the graph does not test at.
+    #[error("{func:?} reads a loop guard at {block:?}, which is not a test point of its loop")]
+    NotTestPoint { func: String, block: String },
+    /// An `invoke` whose unwind arm names the same block as its normal arm: that is
+    /// one block, not two arms, so the control view and the exception view agree on
+    /// it.
+    #[error("{func:?} records {target:?} as both the normal arm and an exception arm of an invoke")]
+    ArmConflict { func: String, target: String },
+    /// An arm named by a node that the graph does not carry.
+    #[error("{func:?} names {block:?} as an invoke arm that the graph does not carry")]
+    UnknownArm { func: String, block: String },
     #[error("Failed to emit function {0} due to reason:\n{1}")]
     FunctionEmissionError(String, String),
 }
