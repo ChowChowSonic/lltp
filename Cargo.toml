@@ -18,7 +18,11 @@ default-features = false
 features = ["llvm22-1"]
 
 [features]
-default = ["target-all"]
+# `verify` runs `hir::verify`'s shape check on every function the pipeline
+# structures, so `are_equivalent` has a production caller and can be turned off for
+# a build that trades the per-function fixed point for speed.
+default = ["target-all", "verify"]
+verify = []
 target-all = ["inkwell/target-all"]
 target-x86 = ["inkwell/target-x86"]
 target-aarch64 = ["inkwell/target-aarch64"]
