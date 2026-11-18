@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -42,12 +43,18 @@ fn main() -> ExitCode {
 
     // 2.1.3: one CFG per function (declarations have no body, so skip them)
     let mut loop_headers = Vec::new();
+    // Function names are reserved so no value gets the same name, the way
+    // `hir::module` reserves them.
+    let reserved: HashSet<String> = module
+        .get_functions()
+        .map(|f| f.get_name().to_string_lossy().into_owned())
+        .collect();
     for func in module.get_functions() {
         if func.count_basic_blocks() == 0 {
             continue;
         }
         let fname = func.get_name().to_string_lossy().into_owned();
-        let graph = match build_graph(&func) {
+        let graph = match build_graph(&func, &reserved) {
             Ok(g) => g,
             Err(e) => {
                 eprintln!("CFG build failed for `{fname}`: {e}");
