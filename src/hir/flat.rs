@@ -25,6 +25,7 @@ pub fn recover_function(
     })?;
     super::promote::promote_slots(&mut func);
     super::coalesce::coalesce(&mut func);
+    super::pointee::resolve_pointees(&mut func);
     Ok(func)
 }
 

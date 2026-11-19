@@ -10,6 +10,7 @@ pub mod loops;
 pub mod lowering;
 pub mod module;
 pub mod op;
+pub mod pointee;
 pub mod promote;
 pub mod reaching;
 pub mod refine;
