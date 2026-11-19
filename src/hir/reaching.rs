@@ -47,6 +47,44 @@ pub fn graph_slice(cfg: &Cfg, source: &str, sink: &str, skip: &EdgeSet) -> BTree
     from_source.intersection(&to_sink).cloned().collect()
 }
 
+/// For every block of `region`, the blocks of `region` it can reach along one
+/// or more edges not in `skip`. A block lists itself only when it sits on a
+/// cycle, so after skipping the back edges nothing reaches itself.
+pub fn region_reachability(
+    cfg: &Cfg,
+    region: &BTreeSet<String>,
+    skip: &EdgeSet,
+) -> BTreeMap<String, BTreeSet<String>> {
+    region
+        .iter()
+        .map(|start| {
+            let mut seen = BTreeSet::new();
+            let mut stack = vec![start.clone()];
+            while let Some(n) = stack.pop() {
+                for m in &cfg.blocks[&n].succ {
+                    if region.contains(m)
+                        && !skip.contains(&(n.clone(), m.clone()))
+                        && seen.insert(m.clone())
+                    {
+                        stack.push(m.clone());
+                    }
+                }
+            }
+            (start.clone(), seen)
+        })
+        .collect()
+}
+
+/// True when `a` and `b` are different blocks of `reach` and neither can reach
+/// the other. No single walk through the region then runs both, so the two
+/// can never both happen.
+pub fn mutually_unreachable(reach: &BTreeMap<String, BTreeSet<String>>, a: &str, b: &str) -> bool {
+    let (Some(from_a), Some(from_b)) = (reach.get(a), reach.get(b)) else {
+        return false;
+    };
+    a != b && !from_a.contains(b) && !from_b.contains(a)
+}
+
 /// A boolean condition over CFG branch outcomes. Build it through `!`,
 /// `and` and `or` so it stays simplified and in one canonical form.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -371,5 +409,91 @@ mod tests {
             reaching_conditions(&cfg, "a", "b", &EdgeSet::new()),
             Some(BTreeMap::new())
         );
+    }
+
+    fn reach(
+        edges: &[(&str, &str)],
+        region: &[&str],
+        skip: &EdgeSet,
+    ) -> BTreeMap<String, BTreeSet<String>> {
+        let cfg = Cfg::cfg_from("entry", edges);
+        region_reachability(&cfg, &set(region), skip)
+    }
+
+    #[test]
+    fn reachability_follows_forward_edges_inside_the_region() {
+        let edges = [
+            ("entry", "a"),
+            ("entry", "b"),
+            ("a", "join"),
+            ("b", "join"),
+            ("join", "exit"),
+        ];
+        let r = reach(&edges, &["entry", "a", "b", "join"], &EdgeSet::new());
+        assert_eq!(r["entry"], set(&["a", "b", "join"]));
+        assert_eq!(r["a"], set(&["join"]));
+        // `exit` is outside the region, so `join` reaches nothing in it.
+        assert_eq!(r["join"], set(&[]));
+    }
+
+    #[test]
+    fn a_block_reaches_itself_only_through_a_cycle() {
+        let edges = [("entry", "h"), ("h", "body"), ("body", "h"), ("h", "exit")];
+        let region = ["h", "body", "exit"];
+        let looped = reach(&edges, &region, &EdgeSet::new());
+        assert_eq!(looped["h"], set(&["h", "body", "exit"]));
+
+        let back: EdgeSet = [("body".to_string(), "h".to_string())].into();
+        let acyclic = reach(&edges, &region, &back);
+        assert_eq!(acyclic["h"], set(&["body", "exit"]));
+        assert_eq!(acyclic["body"], set(&[]));
+    }
+
+    #[test]
+    fn blocks_on_different_arms_are_mutually_unreachable() {
+        // entry -> a | b, b -> c | d, and a, c, d all meet at join.
+        let edges = [
+            ("entry", "a"),
+            ("entry", "b"),
+            ("b", "c"),
+            ("b", "d"),
+            ("a", "join"),
+            ("c", "join"),
+            ("d", "join"),
+        ];
+        let region = ["entry", "a", "b", "c", "d", "join"];
+        let r = reach(&edges, &region, &EdgeSet::new());
+        for (x, y) in [("a", "b"), ("a", "c"), ("a", "d"), ("c", "d")] {
+            assert!(mutually_unreachable(&r, x, y), "{x} and {y}");
+            assert!(mutually_unreachable(&r, y, x), "{y} and {x}");
+        }
+        for (x, y) in [("b", "c"), ("b", "d"), ("entry", "a"), ("a", "join")] {
+            assert!(!mutually_unreachable(&r, x, y), "{x} and {y}");
+        }
+    }
+
+    #[test]
+    fn a_block_or_an_unknown_name_is_never_mutually_unreachable() {
+        let r = reach(
+            &[("entry", "a"), ("entry", "b")],
+            &["entry", "a", "b"],
+            &EdgeSet::new(),
+        );
+        assert!(mutually_unreachable(&r, "a", "b"));
+        assert!(!mutually_unreachable(&r, "a", "a"));
+        assert!(!mutually_unreachable(&r, "a", "nope"));
+        assert!(!mutually_unreachable(&r, "nope", "b"));
+    }
+
+    #[test]
+    fn a_skipped_back_edge_separates_the_loop_body_from_the_exit() {
+        let edges = [("entry", "h"), ("h", "body"), ("body", "h"), ("h", "exit")];
+        let region = ["h", "body", "exit"];
+        let looped = reach(&edges, &region, &EdgeSet::new());
+        assert!(!mutually_unreachable(&looped, "body", "exit"));
+
+        let back: EdgeSet = [("body".to_string(), "h".to_string())].into();
+        let acyclic = reach(&edges, &region, &back);
+        assert!(mutually_unreachable(&acyclic, "body", "exit"));
     }
 }

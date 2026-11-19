@@ -46,7 +46,7 @@ fn negated_equality(e: &Expr) -> Option<(&VarExpr, &Lit)> {
 }
 
 /// The operands of a chain of `&`, left to right.
-fn conjuncts(e: Expr, out: &mut Vec<Expr>) {
+pub(crate) fn conjuncts(e: Expr, out: &mut Vec<Expr>) {
     match e {
         Expr::BinaryOp(b) if b.op == BinOp::And => {
             conjuncts(*b.arg1, out);
@@ -82,7 +82,7 @@ pub fn simplify_guard(e: Expr) -> Expr {
 
 /// Names of the variables `e` reads, or false when `e` has a shape this check
 /// does not understand.
-fn read_vars(e: &Expr, out: &mut Vec<String>) -> bool {
+pub(crate) fn read_vars(e: &Expr, out: &mut Vec<String>) -> bool {
     match e {
         Expr::Literal(_) => true,
         Expr::Var(v) => {
