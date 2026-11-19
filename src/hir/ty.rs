@@ -3,6 +3,8 @@ use inkwell::{
     values::BasicValueEnum,
 };
 use tracing::warn;
+const UNRESOLVED_POINTEE: &str = "unresolved pointee";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Void,
@@ -13,6 +15,22 @@ pub enum Ty {
     Array(Box<Ty>, usize),
     Opaque(String),
 }
+impl Ty {
+    /// A pointer whose pointee is not known yet (LLVM pointers are opaque).
+    pub fn unresolved_ptr() -> Ty {
+        Ty::Ptr(Box::new(Ty::Opaque(UNRESOLVED_POINTEE.to_string())))
+    }
+
+    /// Whether a pointee placeholder is still left anywhere inside this type.
+    pub fn has_unresolved_pointee(&self) -> bool {
+        match self {
+            Ty::Opaque(s) => s == UNRESOLVED_POINTEE,
+            Ty::Ptr(inner) | Ty::Array(inner, _) => inner.has_unresolved_pointee(),
+            _ => false,
+        }
+    }
+}
+
 impl<'c> From<BasicTypeEnum<'c>> for Ty {
     fn from(ty: BasicTypeEnum) -> Self {
         match ty {
@@ -25,9 +43,7 @@ impl<'c> From<BasicTypeEnum<'c>> for Ty {
                 }
             }
             BasicTypeEnum::FloatType(f) => Ty::Float(f.get_bit_width() as usize),
-            BasicTypeEnum::PointerType(_p) => {
-                Ty::Ptr(Box::new(Ty::Opaque("unresolved pointee".to_string())))
-            }
+            BasicTypeEnum::PointerType(_p) => Ty::unresolved_ptr(),
             BasicTypeEnum::ArrayType(a) => {
                 Ty::Array(Box::new(Ty::from(a.get_element_type())), a.len() as usize)
             }
