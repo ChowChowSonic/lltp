@@ -1,5 +1,5 @@
 use super::stmt::{LetStmt, RetStmt};
-use crate::errors::LowerError;
+use crate::errors::{HirError, LowerError};
 use crate::hir::expr::{CallExpr, CastExpr, VarExpr};
 use crate::hir::func::{FnSig, Function};
 use crate::hir::stmt::BranchStmt;
@@ -13,15 +13,19 @@ use std::collections::{HashMap, HashSet};
 
 use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
 
-/// Recover one function: name every value, translate each instruction, then run
-/// the variable-recovery passes over the result.
+/// Recover one function through the canonical value-naming path: name every
+/// value, translate each instruction, then run the variable-recovery passes over
+/// the result. Exception-bearing IR goes to `hir::lowering::recover`, which is the
+/// entry `hir::module` runs.
 pub fn recover_function(
     f: &FunctionValue<'_>,
     reserved: &HashSet<String>,
-) -> Result<Function, LowerError> {
-    let mut func = build(f, reserved).map_err(|detail| LowerError::RecoverError {
-        func: f.get_name().to_string_lossy().into_owned(),
-        detail,
+) -> Result<Function, HirError> {
+    let mut func = build(f, reserved).map_err(|detail| {
+        HirError::from(LowerError::RecoverError {
+            func: f.get_name().to_string_lossy().into_owned(),
+            detail,
+        })
     })?;
     super::promote::promote_slots(&mut func);
     super::coalesce::coalesce(&mut func);
@@ -29,13 +33,13 @@ pub fn recover_function(
 }
 
 impl<'c> TryFrom<&FunctionValue<'c>> for Function {
-    type Error = LowerError;
+    type Error = HirError;
 
     fn try_from(val: &FunctionValue<'c>) -> Result<Self, Self::Error> {
         let reserved: HashSet<String> =
             HashSet::from([val.get_name().to_string_lossy().into_owned()]);
 
-        recover_function(val, &reserved)
+        super::lowering::recover(val, &reserved)
     }
 }
 
@@ -454,7 +458,6 @@ impl<'ctx> Cx<'ctx> {
 fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<Function, String> {
     let sig = sig_of(f);
     let mut vnames = Namer::new(reserved);
-    let mut lnames = Namer::new(&HashSet::new());
 
     // parameters
     let mut params = HashMap::new();
@@ -480,7 +483,10 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<Function, 
     let mut labels = HashMap::new();
     for (i, bb) in blocks.iter().enumerate() {
         let raw = bb.get_name().to_string_lossy().into_owned();
-        labels.insert(*bb, block_label(&mut lnames, &raw, i));
+        // a label and a value are the same identifier in the target
+        // language, so the labels are taken from the namer that already holds the
+        // reserved function names and the parameter names.
+        labels.insert(*bb, block_label(&mut vnames, &raw, i));
     }
     // The function's entry is the first basic block LLVM emitted.
     let entry_label = labels[&blocks[0]].clone();
@@ -628,7 +634,9 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<Function, 
                             if copy_stmts.is_empty() {
                                 resolved.push(label);
                             } else {
-                                let split = lnames.value(&format!("{}_to_{label}", cx.labels[bb]));
+                                // The split block's name comes from the same
+                                // namespace as the labels it sits between.
+                                let split = vnames.value(&format!("{}_to_{label}", cx.labels[bb]));
                                 // The copies happen on the edge, so the split block
                                 // falls through to its target.
                                 edge_blocks.push(Block::build(
@@ -690,11 +698,9 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<Function, 
 
     out_blocks.extend(edge_blocks);
 
-    let mut cfg = Cfg::empty(entry_label);
-    for b in out_blocks {
-        cfg.push_block(b);
-    }
-    cfg.link_edges();
+    // `Cfg::assemble` is what derives `pred` and `exits`,
+    // so the recovery does not link edges on its own.
+    let cfg = Cfg::assemble(entry_label, out_blocks);
 
     Ok(Function {
         sig: FnSig {

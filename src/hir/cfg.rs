@@ -1,4 +1,4 @@
-use crate::errors::StructurizeError;
+use crate::errors::{HirError, StructurizeError};
 use crate::hir::{
     Stmt,
     stmt::{BranchStmt, GotoStmt, InvokeStmt},
@@ -350,12 +350,13 @@ impl Cfg {
     }
 
     /// Attempt to structure this CFG into a goto-free HIR statement tree.
-    pub fn structurize(&self) -> Result<Vec<Stmt>, StructurizeError> {
+    pub fn structurize(&self) -> Result<Vec<Stmt>, HirError> {
         crate::hir::structurize::structurize_with(
             self,
             &mut Vec::new(),
             self.len().saturating_mul(8).max(64),
         )
+        .map_err(HirError::from)
     }
 
     /// Fuse straight-through chains into single blocks.

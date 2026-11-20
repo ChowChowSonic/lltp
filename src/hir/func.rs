@@ -1,4 +1,4 @@
-use crate::errors::StructurizeError;
+use crate::errors::HirError;
 use crate::hir::{Block, Cfg, Stmt, Ty};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -79,10 +79,11 @@ impl Function {
     /// or after the entry chain — which is registered on `locals` so the backend
     /// declares it. The `Let` the passes insert is an assignment, not a declaration, so
     /// the variable has to be declared at function top.
-    pub fn structurize(&mut self) -> Result<&[Stmt], StructurizeError> {
+    pub fn structurize(&mut self) -> Result<&[Stmt], HirError> {
         let reachable = self.cfg.keep_reachable();
         let cap = reachable.len().saturating_mul(8).max(64);
-        let stmts = crate::hir::structurize::structurize_with(&reachable, &mut self.locals, cap)?;
+        let stmts = crate::hir::structurize::structurize_with(&reachable, &mut self.locals, cap)
+            .map_err(HirError::from)?;
         self.body = stmts;
         Ok(&self.body)
     }

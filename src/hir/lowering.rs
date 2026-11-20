@@ -1,17 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
 use inkwell::{
-    module::Module,
+    module::Module as IrModule,
     values::{FunctionValue, InstructionOpcode::*, InstructionValue, Operand},
 };
 use tracing::{debug, warn};
 
-use crate::errors::LowerError;
+use crate::errors::{HirError, LowerError};
 use crate::hir::{
     Block, Cfg, Lit,
     cfg::successors_of,
     expr::{BinaryExpr, CmpExpr, Expr, VarExpr},
-    flat::{Namer, block_label},
+    flat::{Namer, block_label, sanitize, value_name},
     func::{FnSig, Function, Param},
     op::{BinOp, Cmp, FloatCmp, IntCmp},
     stmt::{BranchStmt, InvokeStmt, LetStmt, RetStmt, Stmt},
@@ -19,16 +19,18 @@ use crate::hir::{
 };
 
 /// Build a CFG from an LLVM function value: one block per basic block, named
-/// the way `hir::flat` names it, in the order LLVM emitted it, with control
-/// edges taken from each terminator. Exception arms are not control edges;
+/// the way `hir::flat` names it — sanitized, deduped against `reserved`, and in
+/// the order LLVM emitted it — with control edges taken from each terminator.
+/// This is the library's only graph builder, so both recovery paths name the
+/// same function the same way. Exception arms are not control edges;
 /// `hir::cfg::exception_targets` reports them.
-pub fn build_graph(func: &FunctionValue) -> Result<Cfg, LowerError> {
+pub fn build_graph(func: &FunctionValue, reserved: &HashSet<String>) -> Result<Cfg, LowerError> {
     let blocks = func.get_basic_blocks();
     if blocks.is_empty() {
         return Err(LowerError::NoFirstBlock);
     }
 
-    let mut namer = Namer::new(&HashSet::new());
+    let mut namer = Namer::new(reserved);
     let mut raw_to_node: HashMap<String, String> = HashMap::new();
     let mut names: Vec<String> = Vec::new();
     for (i, bb) in blocks.iter().enumerate() {
@@ -51,20 +53,22 @@ pub fn build_graph(func: &FunctionValue) -> Result<Cfg, LowerError> {
             if let Ok(s) = Stmt::try_from(inst) {
                 stmts.push(s);
             } else if let Ok(e) = Expr::try_from(inst) {
-                let dest: String = inst
+                let raw = inst
                     .get_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .to_string();
-                let dtype = Ty::try_from(inst.get_type()).unwrap_or(Ty::Void);
-                if !dest.is_empty() {
-                    stmts.push(Stmt::Let(LetStmt {
-                        dest: Box::new(Expr::Var(VarExpr { name: dest, dtype })),
-                        src: Box::new(e),
-                    }));
-                } else {
+                if raw.is_empty() {
                     tracing::debug!("Skipping unnamed value");
+                    continue;
                 }
+                let dest = namer.value(&sanitize(&raw));
+                let dtype = Ty::try_from(inst.get_type())
+                    .map_err(|_| LowerError::UnsupportedOperandKind(format!("{dest:?}")))?;
+                stmts.push(Stmt::Let(LetStmt {
+                    dest: Box::new(Expr::Var(VarExpr { name: dest, dtype })),
+                    src: Box::new(e),
+                }));
             } else {
                 tracing::debug!(%name, "skipping unrecovered instruction");
             }
@@ -154,18 +158,40 @@ fn scan_block_operands(bb: &inkwell::basic_block::BasicBlock<'_>) -> Vec<String>
     ret
 }
 
-/// Instruction-level recovery: one statement per instruction, with no value
-/// naming, slot promotion, or de-SSA. Exception-bearing IR still takes this
-/// path, because `invoke`/`landingpad` are not recovered by the canonical
-/// value-naming recovery in `hir::flat`.
-pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
+/// Whether a function carries exception arms. This is the path that can read
+/// them: `hir::flat` reports `invoke`/`landingpad` as unsupported because there is
+/// no value-producing SSA result for it to name.
+fn has_exception_arms(val: &FunctionValue) -> bool {
+    val.get_basic_blocks().iter().any(|bb| {
+        bb.get_instructions()
+            .any(|inst| matches!(inst.get_opcode(), Invoke | LandingPad))
+    })
+}
+
+/// Recover one function, dispatching exception-bearing IR to the instruction-level
+/// path. This is the entry `hir::module` runs.
+pub fn recover(val: &FunctionValue, reserved: &HashSet<String>) -> Result<Function, HirError> {
+    if has_exception_arms(val) {
+        lower_function(val, reserved)
+    } else {
+        crate::hir::flat::recover_function(val, reserved)
+    }
+}
+
+/// Instruction-level recovery: one statement per instruction, with no slot
+/// promotion or de-SSA. It fills `cfg` and leaves `body` empty, so structuring is
+/// the pipeline's step rather than a second pass over the same function.
+pub fn lower_function(
+    val: &FunctionValue,
+    reserved: &HashSet<String>,
+) -> Result<Function, HirError> {
     let name = val.get_name().to_string_lossy().to_string();
     debug!(name = %name, "recovering function at instruction level");
     let params: Vec<Param> = val
         .get_params()
         .iter()
         .map(|param| Param {
-            name: crate::hir::flat::value_name(param),
+            name: sanitize(&value_name(param)),
             ty: Ty::from(*param),
         })
         .collect();
@@ -177,7 +203,7 @@ pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
         }
     };
 
-    let mut func = Function {
+    let func = Function {
         sig: FnSig {
             name,
             params,
@@ -185,37 +211,37 @@ pub fn lower_function(val: &FunctionValue) -> Result<Function, LowerError> {
             variadic: val.get_type().is_var_arg(),
         },
         locals: Vec::new(),
-        cfg: build_graph(val)?,
+        cfg: build_graph(val, reserved)?,
         body: Vec::new(),
     };
-    func.structurize()
-        .map_err(|e| LowerError::Other(e.to_string()))?;
     Ok(func)
 }
 
-/// Collect and lower all functions in an LLVM module, through the canonical
-/// recovery in `hir::flat`.
-pub fn collect_functions(module: &Module) -> Result<Vec<Function>, LowerError> {
+/// Collect and recover all functions in an LLVM module, through `recover`.
+pub fn collect_functions(module: &IrModule) -> Result<crate::hir::module::Module, HirError> {
     let recovered = crate::hir::module::Module::from_module(module)?;
     debug!(
         count = recovered.funcs.len(),
         "recovered functions from module"
     );
-    Ok(recovered.funcs)
+    Ok(recovered)
 }
 
 // ============================================================================
 // Conversion Trait Implementations
 // ============================================================================
 
-// `TryFrom<&FunctionValue> for Function` lives with the canonical recovery in
-// `hir::flat`; these cover the graph and the instruction-level nodes.
-
 impl<'c> TryFrom<&FunctionValue<'c>> for Cfg {
     type Error = LowerError;
 
+    /// `TryFrom<&FunctionValue> for Function` lives with the canonical recovery in
+    /// `hir::flat`; these cover the graph and the instruction-level nodes. A single
+    /// function has only its own name to reserve, so the graph is named the way
+    /// `hir::flat` would name it for that function alone.
     fn try_from(val: &FunctionValue<'c>) -> Result<Self, Self::Error> {
-        build_graph(val)
+        let reserved: HashSet<String> =
+            HashSet::from([val.get_name().to_string_lossy().into_owned()]);
+        build_graph(val, &reserved)
     }
 }
 
@@ -801,12 +827,15 @@ f:
         // Arm order is the node's: the then arm, then the else arm. LLVM stores
         // a conditional branch as [cond, else, then], so this is not the operand
         // order.
+        // The block named `f` takes the reserved function name, so it is
+        // disambiguated: both graph builders name a block the same way for the
+        // same function.
         assert_eq!(
             cfg.blocks["entry"].succ,
-            vec!["t".to_string(), "f".to_string()]
+            vec!["t".to_string(), "f_1".to_string()]
         );
         assert_eq!(cfg.blocks["t"].pred, vec!["entry".to_string()]);
-        assert_eq!(cfg.blocks["f"].pred, vec!["entry".to_string()]);
+        assert_eq!(cfg.blocks["f_1"].pred, vec!["entry".to_string()]);
     }
 
     #[test]
@@ -824,6 +853,38 @@ ghost:
         assert!(cfg.blocks["ghost"].succ.is_empty());
         assert!(cfg.blocks["ghost"].pred.is_empty());
         assert_eq!(cfg.exits, vec!["entry".to_string()]);
+    }
+
+    /// The two recovery paths share one naming rule, so the same function yields
+    /// the same block names: `hir::flat` takes labels from the namer that reserves
+    /// the function names, and `build_graph` uses that same namer for the values it
+    /// binds.
+    #[test]
+    fn both_recovery_paths_name_blocks_the_same_way() {
+        let ir = r#"
+define void @f() {
+entry:
+  %c = icmp sgt i32 1, 2
+  br label %t
+t:
+  ret void
+}
+"#;
+        let ctxt = inkwell::context::Context::create();
+        let module = crate::build_module(&ctxt, ir).expect("IR should parse");
+        let func_val = module.get_first_function().expect("module has a function");
+        let graph = build_cfg(ir);
+        let recovered = Function::try_from(&func_val).expect("recovery should succeed");
+        assert_eq!(graph.entry, recovered.cfg.entry);
+        assert_eq!(
+            graph.blocks.keys().cloned().collect::<Vec<String>>(),
+            recovered
+                .cfg
+                .blocks
+                .keys()
+                .cloned()
+                .collect::<Vec<String>>()
+        );
     }
 
     const IR2: &str = r#"define void @f(i32 %x) {

@@ -2,8 +2,8 @@ use std::collections::HashSet;
 
 use inkwell::module::Module as IrModule;
 
-use crate::errors::LowerError;
-use crate::hir::{FnSig, Function, flat};
+use crate::errors::HirError;
+use crate::hir::{FnSig, Function, flat, lowering};
 
 /// A recovered HIR module: the function definitions plus the external
 /// declarations they call.
@@ -15,7 +15,7 @@ pub struct Module {
 }
 
 impl Module {
-    pub fn from_module(module: &IrModule) -> Result<Self, LowerError> {
+    pub fn from_module(module: &IrModule) -> Result<Self, HirError> {
         // Function names are reserved so no local gets the same target identifier.
         let reserved: HashSet<String> = module
             .get_functions()
@@ -27,7 +27,7 @@ impl Module {
             if f.count_basic_blocks() == 0 {
                 decls.push(flat::sig_of(&f));
             } else {
-                funcs.push(flat::recover_function(&f, &reserved)?);
+                funcs.push(lowering::recover(&f, &reserved)?);
             }
         }
         Ok(Module { decls, funcs })
@@ -35,7 +35,7 @@ impl Module {
 }
 
 impl<'c> TryFrom<&IrModule<'c>> for Module {
-    type Error = LowerError;
+    type Error = HirError;
 
     fn try_from(val: &IrModule<'c>) -> Result<Self, Self::Error> {
         Self::from_module(val)

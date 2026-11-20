@@ -330,7 +330,9 @@ fn prune(stmts: Vec<Stmt>, dead: &BTreeSet<String>) -> Vec<Stmt> {
 ///
 /// Errors with `NotAcyclicRegion` when the region still has a cycle after
 /// skipping the edges in `skip`, when `sink` is unreachable, or when control
-/// can leave the region anywhere but the sink.
+/// can leave the region anywhere but the sink or a block in `boundary`.
+/// `boundary` is the enclosing frame's exits: the join a `break` arm lands on,
+/// or the header a `continue` arm goes back to.
 // shortcut: a branch boolean is only replaced by its compare when that
 // compare is `variable == integer constant`; other conditions keep their own
 // boolean even when if/else grouping leaves it used once, so upgrade with a
@@ -340,6 +342,7 @@ pub fn structure_acyclic(
     source: &str,
     sink: &str,
     skip: &EdgeSet,
+    boundary: &BTreeSet<String>,
     locals: &mut Vec<(String, Ty)>,
 ) -> Result<Vec<Stmt>, StructurizeError> {
     let bad = || StructurizeError::NotAcyclicRegion {
@@ -352,10 +355,9 @@ pub fn structure_acyclic(
         return Err(bad());
     }
     let leaks = region.iter().filter(|n| n.as_str() != sink).any(|n| {
-        cfg.blocks[n]
-            .succ
-            .iter()
-            .any(|m| !region.contains(m) && !skip.contains(&(n.clone(), m.clone())))
+        cfg.blocks[n].succ.iter().any(|m| {
+            !region.contains(m) && !boundary.contains(m) && !skip.contains(&(n.clone(), m.clone()))
+        })
     });
     if leaks {
         return Err(bad());
@@ -587,7 +589,14 @@ mod tests {
     }
 
     fn run(cfg: &Cfg, source: &str, sink: &str) -> Result<Vec<Stmt>, StructurizeError> {
-        structure_acyclic(cfg, source, sink, &EdgeSet::new(), &mut Vec::new())
+        structure_acyclic(
+            cfg,
+            source,
+            sink,
+            &EdgeSet::new(),
+            &BTreeSet::new(),
+            &mut Vec::new(),
+        )
     }
 
     fn not_acyclic(entry: &str, exit: &str) -> StructurizeError {
@@ -601,7 +610,15 @@ mod tests {
     fn diamond_becomes_if_else() {
         let cfg = diamond();
         let mut locals = Vec::new();
-        let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
+        let out = structure_acyclic(
+            &cfg,
+            "entry",
+            "join",
+            &EdgeSet::new(),
+            &BTreeSet::new(),
+            &mut locals,
+        )
+        .unwrap();
         assert_eq!(
             out,
             vec![
@@ -654,7 +671,15 @@ mod tests {
             ],
         );
         let mut locals = Vec::new();
-        let out = structure_acyclic(&cfg, "entry", "exit", &EdgeSet::new(), &mut locals).unwrap();
+        let out = structure_acyclic(
+            &cfg,
+            "entry",
+            "exit",
+            &EdgeSet::new(),
+            &BTreeSet::new(),
+            &mut locals,
+        )
+        .unwrap();
         assert_eq!(out, vec![mark("entry"), mark("mid"), Stmt::ret_void()]);
         assert!(locals.is_empty());
     }
@@ -770,7 +795,15 @@ mod tests {
             ],
         );
         let mut locals = Vec::new();
-        let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
+        let out = structure_acyclic(
+            &cfg,
+            "entry",
+            "join",
+            &EdgeSet::new(),
+            &BTreeSet::new(),
+            &mut locals,
+        )
+        .unwrap();
         assert_eq!(
             out,
             vec![
@@ -794,7 +827,15 @@ mod tests {
             ],
         );
         let mut locals = Vec::new();
-        let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
+        let out = structure_acyclic(
+            &cfg,
+            "entry",
+            "join",
+            &EdgeSet::new(),
+            &BTreeSet::new(),
+            &mut locals,
+        )
+        .unwrap();
         assert_eq!(
             out,
             vec![
@@ -831,7 +872,15 @@ mod tests {
             ],
         );
         let mut locals = Vec::new();
-        let out = structure_acyclic(&cfg, "entry", "join", &EdgeSet::new(), &mut locals).unwrap();
+        let out = structure_acyclic(
+            &cfg,
+            "entry",
+            "join",
+            &EdgeSet::new(),
+            &BTreeSet::new(),
+            &mut locals,
+        )
+        .unwrap();
         let lit = |value: u64| Lit::Int {
             value,
             bits: 32,
