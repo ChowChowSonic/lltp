@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use crate::hir::expr::{CallExpr, UnaryExpr, VarExpr};
+use crate::hir::expr::{CallExpr, IndexExpr, UnaryExpr, VarExpr};
 use crate::hir::func::FnSig;
 use crate::hir::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
 use crate::hir::stmt::{BranchStmt, LetStmt, RetStmt};
@@ -32,7 +32,11 @@ pub fn emit_module(m: &Module) -> Result<String, String> {
 fn emit_function(f: &Function, o: &mut String) -> Result<(), String> {
     writeln!(o, "{} {{", proto(&f.sig, true)?).expect("write to String");
     for (name, ty) in &f.locals {
-        writeln!(o, "    {} {name};", c_ty(ty)?).expect("write to String");
+        let decl = match ty {
+            Ty::Array(elem, len) => format!("{} {name}[{len}]", c_ty(elem)?),
+            _ => format!("{} {name}", c_ty(ty)?),
+        };
+        writeln!(o, "    {decl};").expect("write to String");
     }
     for b in f.blocks() {
         writeln!(o, "{}:", b.name).expect("write to String");
@@ -115,6 +119,7 @@ fn val(v: &Expr) -> Result<String, String> {
             arg,
         }) => match arg.as_ref() {
             Expr::Var(VarExpr { name, .. }) => name.clone(),
+            element @ Expr::Index(_) => val(element)?,
             other => format!("(*{})", val(other)?),
         },
         Expr::UnaryOp(UnaryExpr { op: UnOp::Not, arg }) => format!("!{}", val(arg)?),
@@ -162,14 +167,26 @@ fn val(v: &Expr) -> Result<String, String> {
                 .join(", ");
             format!("{name}({args})")
         }
+        Expr::Index(IndexExpr { base, index }) => format!("{}[{}]", val(base)?, val(index)?),
         Expr::Nop => String::new(),
         other => return Err(format!("cannot emit {other:?} in the goto baseline")),
     })
 }
 
+/// The C lvalue a `Let` writes: the cell behind a store's `AddrOf`, else the place itself.
+fn lvalue(dest: &Expr) -> Result<String, String> {
+    match dest {
+        Expr::UnaryOp(UnaryExpr {
+            op: UnOp::AddrOf,
+            arg,
+        }) if matches!(arg.as_ref(), Expr::Var(_) | Expr::Index(_)) => val(arg),
+        other => val(other),
+    }
+}
+
 fn stmt(s: &Stmt) -> Result<String, String> {
     Ok(match s {
-        Stmt::Let(LetStmt { dest, src }) => format!("{} = {};", val(dest)?, val(src)?),
+        Stmt::Let(LetStmt { dest, src }) => format!("{} = {};", lvalue(dest)?, val(src)?),
         Stmt::Eval(e) => format!("{};", val(e)?),
         other => return Err(format!("cannot emit {other:?} in the goto baseline")),
     })
@@ -296,5 +313,34 @@ mod tests {
         let flat = Module::from_module(&module).expect("flat module");
         let out = super::emit_module(&flat).expect("emit");
         assert_eq!(out.matches("return").count(), 1, "{out}");
+    }
+
+    /// A store and a load through `getelementptr` on a local array print as
+    /// `arr[i]`, and the array is declared with its length.
+    #[test]
+    fn array_elements_print_as_indexing() {
+        let ir = "define i32 @f() {\nentry:\n  %arr = alloca [4 x i32], align 4\n  \
+                  %p = getelementptr inbounds [4 x i32], ptr %arr, i64 0, i64 1\n  \
+                  store i32 7, ptr %p, align 4\n  \
+                  %q = getelementptr inbounds [4 x i32], ptr %arr, i64 0, i64 1\n  \
+                  %v = load i32, ptr %q, align 4\n  ret i32 %v\n}\n";
+        let ctxt = Context::create();
+        let module = build_module(&ctxt, ir).unwrap();
+        let flat = Module::from_module(&module).expect("flat module");
+        let out = super::emit_module(&flat).expect("emit");
+        assert!(out.contains("[4];"), "{out}");
+        assert!(out.contains("] = "), "{out}");
+    }
+
+    /// A GEP whose address is used as a value is not folded into a place, so
+    /// it must fail with an error rather than a panic.
+    #[test]
+    fn a_gep_used_as_a_value_is_rejected() {
+        let ir = "define ptr @f() {\nentry:\n  %arr = alloca [4 x i32], align 4\n  \
+                  %p = getelementptr inbounds [4 x i32], ptr %arr, i64 0, i64 1\n  \
+                  ret ptr %p\n}\n";
+        let ctxt = Context::create();
+        let module = build_module(&ctxt, ir).unwrap();
+        assert!(Module::from_module(&module).is_err());
     }
 }
