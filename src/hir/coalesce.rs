@@ -192,7 +192,13 @@ pub(super) fn slot_name(e: &Expr) -> Option<&str> {
 pub(super) fn uses(stmt: &Stmt) -> Vec<&Expr> {
     let mut out = Vec::new();
     match stmt {
-        Stmt::Let(LetStmt { src, .. }) => collect_names(src, &mut out),
+        Stmt::Let(LetStmt { dest, src }) => {
+            collect_names(src, &mut out);
+            // A store into `arr[i]` reads `i`, though it defines no name.
+            if place_name(dest).is_none() {
+                collect_names(dest, &mut out);
+            }
+        }
         Stmt::Eval(e) => collect_names(e, &mut out),
         Stmt::Branch(b) => {
             if let Some(c) = &b.cond {
