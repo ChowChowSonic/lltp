@@ -41,6 +41,7 @@ const SUPPORTED: &[&str] = &[
     "for_induction_reassigned_inside",
     "for_negative_step",
     "for_empty_body",
+    "array_index",
 ];
 
 /// Fixtures that need GEP / globals / aggregates: must fail *cleanly* (an
