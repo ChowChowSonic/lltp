@@ -1,9 +1,11 @@
+mod acyclic_regions;
 mod switch;
 
 use crate::backend::LowerTarget;
 use crate::hir::Function;
 use crate::hir::LowerError;
 
+pub use acyclic_regions::AcyclicRegions;
 pub use switch::SwitchToIfElse;
 
 /// A lowering pass: a target-agnostic or target-authored transformation of a

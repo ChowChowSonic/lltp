@@ -32,6 +32,12 @@ impl From<StructurizeError> for HirError {
     }
 }
 
+impl From<StructurizeError> for LowerError {
+    fn from(e: StructurizeError) -> Self {
+        LowerError::Structurize(e)
+    }
+}
+
 /// Errors occurring during lowering from LLVM IR into HIR.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum LowerError {
@@ -49,6 +55,11 @@ pub enum LowerError {
     ExpectedValueOperand,
     #[error("function has no entry basic block")]
     NoFirstBlock,
+    /// A structuring failure reported through a pass. `HirError` already wraps
+    /// `StructurizeError`, so a pass maps it here rather than flattening it into a
+    /// message, and the typed error is what `PipelineError::Hir` reports.
+    #[error("structurize error: {0}")]
+    Structurize(#[source] StructurizeError),
     #[error("constant extraction failed: {0:?}")]
     ConstantExtractionFailed(&'static str),
     #[error("cannot recover `{func:?}`: {detail:?}")]
