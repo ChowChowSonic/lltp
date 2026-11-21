@@ -42,6 +42,7 @@ const SUPPORTED: &[&str] = &[
     "for_negative_step",
     "for_empty_body",
     "array_index",
+    "struct_fields",
 ];
 
 /// Fixtures that need GEP / globals / aggregates: must fail *cleanly* (an
@@ -227,6 +228,7 @@ fn recovered_fixtures_structure_back_to_their_cfgs() {
             "[for_induction_reassigned_inside] main".to_string(),
             "[for_negative_step] main".to_string(),
             "[for_empty_body] main".to_string(),
+            "[array_index] main".to_string(),
         ]
     );
     assert!(failures.is_empty(), "\n{}", failures.join("\n\n"));
@@ -430,6 +432,7 @@ fn fixtures_report_their_loop_shapes() {
             "[for_induction_reassigned_inside] main: pre-test".to_string(),
             "[for_negative_step] main: counted".to_string(),
             "[for_empty_body] main: counted".to_string(),
+            "[array_index] main: counted".to_string(),
         ]
     );
 }

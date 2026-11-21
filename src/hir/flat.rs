@@ -11,7 +11,7 @@ use inkwell::values::{
 };
 use std::collections::{HashMap, HashSet};
 
-use super::expr::IndexExpr;
+use super::expr::{FieldExpr, IndexExpr};
 use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
 
 /// Recover one function: name every value, translate each instruction, then run
@@ -325,8 +325,7 @@ fn defines_value(inst: InstructionValue<'_>) -> Result<bool, String> {
 }
 
 fn gep_unsupported() -> String {
-    "this getelementptr form is not supported yet (only `array[index]` on a local array)"
-        .to_string()
+    "unsupported getelementptr (only `array[index]` and `struct.field` on a local)".to_string()
 }
 
 struct Cx<'ctx> {
@@ -397,12 +396,12 @@ impl<'ctx> Cx<'ctx> {
         self.slot(op).map(|s| self.var(&s))
     }
 
-    /// `arr[i]` for a GEP straight into a local array.
+    /// `arr[i]` or `s.field` for a GEP straight into a local array or struct.
     fn element(&self, gep: InstructionValue<'ctx>) -> Result<Expr, String> {
         let base = match gep.get_operand(0).and_then(|o| o.value()) {
-            Some(BasicValueEnum::PointerValue(p)) => p
-                .as_instruction()
-                .filter(|i| i.get_opcode() == Op::Alloca),
+            Some(BasicValueEnum::PointerValue(p)) => {
+                p.as_instruction().filter(|i| i.get_opcode() == Op::Alloca)
+            }
             _ => None,
         }
         .ok_or_else(gep_unsupported)?;
@@ -412,16 +411,31 @@ impl<'ctx> Cx<'ctx> {
             Some(BasicValueEnum::IntValue(i))
                 if i.is_const() && i.get_sign_extended_constant() == Some(0)
         );
-        if gep.get_num_operands() != 3
-            || !first_is_zero
-            || !matches!(self.types.get(&name), Some(Ty::Array(..)))
-        {
+        if gep.get_num_operands() != 3 || !first_is_zero {
             return Err(gep_unsupported());
         }
-        Ok(Expr::Index(IndexExpr {
-            base: Box::new(self.var(&name)),
-            index: Box::new(self.val(gep.get_operand(2))?),
-        }))
+        let base = Box::new(self.var(&name));
+        match self.types.get(&name) {
+            Some(Ty::Array(..)) => Ok(Expr::Index(IndexExpr {
+                base,
+                index: Box::new(self.val(gep.get_operand(2))?),
+            })),
+            Some(Ty::Struct(_, fields)) => {
+                let Some(BasicValueEnum::IntValue(k)) = gep.get_operand(2).and_then(|o| o.value())
+                else {
+                    return Err(gep_unsupported());
+                };
+                let field = k
+                    .get_zero_extended_constant()
+                    .and_then(|k| fields.get(k as usize))
+                    .ok_or_else(gep_unsupported)?;
+                Ok(Expr::Field(FieldExpr {
+                    base,
+                    name: field.0.clone(),
+                }))
+            }
+            _ => Err(gep_unsupported()),
+        }
     }
 
     fn val(&self, op: Option<Operand<'ctx>>) -> Result<Expr, String> {
