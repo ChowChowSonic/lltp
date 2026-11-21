@@ -157,7 +157,14 @@ impl Expr {
                 Ty::Array(element, _) => *element,
                 other => other,
             },
-            Expr::Field(_) | Expr::Call(_) | Expr::Nop => Ty::Opaque("unresolved".to_string()),
+            Expr::Field(f) => match f.base.ty() {
+                Ty::Struct(_, fields) => fields
+                    .into_iter()
+                    .find(|(name, _)| *name == f.name)
+                    .map_or_else(|| Ty::Opaque("unresolved".to_string()), |(_, t)| t),
+                _ => Ty::Opaque("unresolved".to_string()),
+            },
+            Expr::Call(_) | Expr::Nop => Ty::Opaque("unresolved".to_string()),
         }
     }
 

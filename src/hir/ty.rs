@@ -13,6 +13,8 @@ pub enum Ty {
     Float(usize /*bits*/),
     Ptr(Box<Ty>),
     Array(Box<Ty>, usize),
+    /// A named struct and its fields. LLVM keeps no field names, so they are `f0`, `f1`, ...
+    Struct(String, Vec<(String, Ty)>),
     Opaque(String),
 }
 impl Ty {
@@ -65,10 +67,22 @@ impl<'c> From<BasicTypeEnum<'c>> for Ty {
                     (array_size as u64 / size_res as u64) as usize,
                 )
             }
-            BasicTypeEnum::StructType(_) => {
-                warn!("unsupported type: struct coerced to `Ty::Opaque`");
-                Ty::Opaque("Unsupported type".to_string())
-            }
+            BasicTypeEnum::StructType(s) => match s.get_name().and_then(|n| n.to_str().ok()) {
+                Some(name) if !s.is_opaque() && !s.is_packed() => Ty::Struct(
+                    name.chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                        .collect(),
+                    s.get_field_types()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, t)| (format!("f{i}"), Ty::from(t)))
+                        .collect(),
+                ),
+                _ => {
+                    warn!("unsupported type: unnamed, packed or opaque struct");
+                    Ty::Opaque("Unsupported type".to_string())
+                }
+            },
             BasicTypeEnum::ScalableVectorType(_) => {
                 warn!("unsupported type: scalable vector coerced to `Ty::Void`");
                 Ty::Opaque("Unsupported type".to_string())
