@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::hir::expr::{BinaryExpr, CallExpr, CastExpr, CmpExpr, IndexExpr, UnaryExpr, VarExpr};
+use crate::hir::expr::{
+    BinaryExpr, CallExpr, CastExpr, CmpExpr, FieldExpr, IndexExpr, UnaryExpr, VarExpr,
+};
 use crate::hir::stmt::LetStmt;
 use crate::hir::{Block, Expr, Stmt};
 
@@ -227,6 +229,7 @@ pub(super) fn children(e: &Expr) -> Vec<&Expr> {
         Expr::BinaryOp(BinaryExpr { arg1, arg2, .. }) => vec![arg1, arg2],
         Expr::Cmp(CmpExpr { arg1, arg2, .. }) => vec![arg1, arg2],
         Expr::Cast(CastExpr { data, .. }) => vec![data],
+        Expr::Field(FieldExpr { base, .. }) => vec![base],
         Expr::Index(IndexExpr { base, index }) => vec![base, index],
         Expr::Call(CallExpr { args, .. }) => args.iter().collect(),
         _ => vec![],
@@ -374,6 +377,7 @@ pub(super) fn visit_vars_mut(e: &mut Expr, f: &mut dyn FnMut(&mut VarExpr)) {
             visit_vars_mut(arg2.as_mut(), f);
         }
         Expr::Cast(CastExpr { data, .. }) => visit_vars_mut(data.as_mut(), f),
+        Expr::Field(FieldExpr { base, .. }) => visit_vars_mut(base.as_mut(), f),
         Expr::Index(IndexExpr { base, index }) => {
             visit_vars_mut(base.as_mut(), f);
             visit_vars_mut(index.as_mut(), f);
@@ -414,10 +418,6 @@ pub(super) fn visit_stmt_vars_mut(stmt: &mut Stmt, f: &mut dyn FnMut(&mut VarExp
         }
         _ => {}
     }
-}
-
-fn rename_expr(e: &mut Expr, f: &dyn Fn(&str) -> String) {
-    visit_vars_mut(e, &mut |v| v.name = f(&v.name));
 }
 
 fn rename_stmt(stmt: &mut Stmt, f: &dyn Fn(&str) -> String) {
