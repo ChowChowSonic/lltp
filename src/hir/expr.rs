@@ -158,7 +158,8 @@ impl Expr {
                 other => other,
             },
             Expr::Field(f) => match f.base.ty() {
-                Ty::Struct(_, fields) => fields
+                Ty::Struct(s) => s
+                    .fields
                     .into_iter()
                     .find(|(name, _)| *name == f.name)
                     .map_or_else(|| Ty::Opaque("unresolved".to_string()), |(_, t)| t),

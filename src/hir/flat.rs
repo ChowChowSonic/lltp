@@ -420,14 +420,14 @@ impl<'ctx> Cx<'ctx> {
                 base,
                 index: Box::new(self.val(gep.get_operand(2))?),
             })),
-            Some(Ty::Struct(_, fields)) => {
+            Some(Ty::Struct(s)) => {
                 let Some(BasicValueEnum::IntValue(k)) = gep.get_operand(2).and_then(|o| o.value())
                 else {
                     return Err(gep_unsupported());
                 };
                 let field = k
                     .get_zero_extended_constant()
-                    .and_then(|k| fields.get(k as usize))
+                    .and_then(|k| s.fields.get(k as usize))
                     .ok_or_else(gep_unsupported)?;
                 Ok(Expr::Field(FieldExpr {
                     base,

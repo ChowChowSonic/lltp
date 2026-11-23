@@ -98,12 +98,12 @@ type StructDef = (String, Vec<(String, Ty)>);
 fn collect_structs(ty: &Ty, seen: &mut Vec<StructDef>) {
     match ty {
         Ty::Array(elem, _) => collect_structs(elem, seen),
-        Ty::Struct(name, fields) => {
-            for (_, t) in fields {
+        Ty::Struct(s) => {
+            for (_, t) in &s.fields {
                 collect_structs(t, seen);
             }
-            if !seen.iter().any(|(n, _)| n == name) {
-                seen.push((name.clone(), fields.clone()));
+            if !seen.iter().any(|(n, _)| *n == s.name) {
+                seen.push((s.name.clone(), s.fields.clone()));
             }
         }
         _ => {}
@@ -118,7 +118,7 @@ pub fn c_ty(t: &Ty) -> Result<String, String> {
         Ty::Float(32) => "float".to_string(),
         Ty::Float(64) => "double".to_string(),
         Ty::Ptr(_) => "void *".to_string(),
-        Ty::Struct(name, _) => format!("struct {name}"),
+        Ty::Struct(s) => format!("struct {}", s.name),
         other => return Err(format!("no C type for {other:?} yet")),
     })
 }
