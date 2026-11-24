@@ -6,7 +6,9 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use crate::hir::expr::{BinaryExpr, CallExpr, CastExpr, CmpExpr, IndexExpr, UnaryExpr, VarExpr};
+use crate::hir::expr::{
+    BinaryExpr, CallExpr, CastExpr, CmpExpr, FieldExpr, IndexExpr, UnaryExpr, VarExpr,
+};
 use crate::hir::stmt::LetStmt;
 use crate::hir::{Block, Expr, Stmt};
 
@@ -192,7 +194,13 @@ pub(super) fn slot_name(e: &Expr) -> Option<&str> {
 pub(super) fn uses(stmt: &Stmt) -> Vec<&Expr> {
     let mut out = Vec::new();
     match stmt {
-        Stmt::Let(LetStmt { src, .. }) => collect_names(src, &mut out),
+        Stmt::Let(LetStmt { dest, src }) => {
+            collect_names(src, &mut out);
+            // A store into `arr[i]` reads `i`, though it defines no name.
+            if place_name(dest).is_none() {
+                collect_names(dest, &mut out);
+            }
+        }
         Stmt::Eval(e) => collect_names(e, &mut out),
         Stmt::Branch(b) => {
             if let Some(c) = &b.cond {
@@ -221,6 +229,7 @@ pub(super) fn children(e: &Expr) -> Vec<&Expr> {
         Expr::BinaryOp(BinaryExpr { arg1, arg2, .. }) => vec![arg1, arg2],
         Expr::Cmp(CmpExpr { arg1, arg2, .. }) => vec![arg1, arg2],
         Expr::Cast(CastExpr { data, .. }) => vec![data],
+        Expr::Field(FieldExpr { base, .. }) => vec![base],
         Expr::Index(IndexExpr { base, index }) => vec![base, index],
         Expr::Call(CallExpr { args, .. }) => args.iter().collect(),
         _ => vec![],
@@ -354,58 +363,65 @@ fn interference(func: &Function, live_out: &[Names]) -> BTreeMap<String, Names> 
 // renaming
 // ---------------------------------------------------------------------------
 
-fn rename_expr(e: &mut Expr, f: &dyn Fn(&str) -> String) {
+/// Call `f` on every variable reference inside `e`.
+pub(super) fn visit_vars_mut(e: &mut Expr, f: &mut dyn FnMut(&mut VarExpr)) {
     match e {
-        Expr::Var(VarExpr { name, .. }) => *name = f(name),
-        Expr::UnaryOp(UnaryExpr { arg, .. }) => rename_expr(arg.as_mut(), f),
+        Expr::Var(v) => f(v),
+        Expr::UnaryOp(UnaryExpr { arg, .. }) => visit_vars_mut(arg.as_mut(), f),
         Expr::BinaryOp(BinaryExpr { arg1, arg2, .. }) => {
-            rename_expr(arg1.as_mut(), f);
-            rename_expr(arg2.as_mut(), f);
+            visit_vars_mut(arg1.as_mut(), f);
+            visit_vars_mut(arg2.as_mut(), f);
         }
         Expr::Cmp(CmpExpr { arg1, arg2, .. }) => {
-            rename_expr(arg1.as_mut(), f);
-            rename_expr(arg2.as_mut(), f);
+            visit_vars_mut(arg1.as_mut(), f);
+            visit_vars_mut(arg2.as_mut(), f);
         }
-        Expr::Cast(CastExpr { data, .. }) => rename_expr(data.as_mut(), f),
+        Expr::Cast(CastExpr { data, .. }) => visit_vars_mut(data.as_mut(), f),
+        Expr::Field(FieldExpr { base, .. }) => visit_vars_mut(base.as_mut(), f),
         Expr::Index(IndexExpr { base, index }) => {
-            rename_expr(base.as_mut(), f);
-            rename_expr(index.as_mut(), f);
+            visit_vars_mut(base.as_mut(), f);
+            visit_vars_mut(index.as_mut(), f);
         }
         Expr::Call(CallExpr { args, .. }) => {
             for a in args {
-                rename_expr(a, f);
+                visit_vars_mut(a, f);
             }
         }
         _ => {}
     }
 }
 
-fn rename_stmt(stmt: &mut Stmt, f: &dyn Fn(&str) -> String) {
+/// Call `f` on every variable reference a statement reads or writes.
+pub(super) fn visit_stmt_vars_mut(stmt: &mut Stmt, f: &mut dyn FnMut(&mut VarExpr)) {
     match stmt {
         Stmt::Let(LetStmt { dest, src }) => {
-            rename_expr(dest.as_mut(), f);
-            rename_expr(src.as_mut(), f);
+            visit_vars_mut(dest.as_mut(), f);
+            visit_vars_mut(src.as_mut(), f);
         }
-        Stmt::Eval(e) => rename_expr(e, f),
+        Stmt::Eval(e) => visit_vars_mut(e, f),
         Stmt::Branch(b) => {
             if let Some(c) = &mut b.cond {
-                rename_expr(c, f);
+                visit_vars_mut(c, f);
             }
         }
         Stmt::Ret(r) => {
             if let Some(v) = &mut r.value {
-                rename_expr(v, f);
+                visit_vars_mut(v, f);
             }
         }
         Stmt::Invoke(i) => {
             for a in &mut i.args {
-                rename_expr(a, f);
+                visit_vars_mut(a, f);
             }
             // `normal` and `catches` name blocks, not variables, so a variable
-            // rename must not touch them.
+            // visit must not touch them.
         }
         _ => {}
     }
+}
+
+fn rename_stmt(stmt: &mut Stmt, f: &dyn Fn(&str) -> String) {
+    visit_stmt_vars_mut(stmt, &mut |v| v.name = f(&v.name));
 }
 
 #[cfg(test)]

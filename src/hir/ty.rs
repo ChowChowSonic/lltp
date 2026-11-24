@@ -3,6 +3,15 @@ use inkwell::{
     values::BasicValueEnum,
 };
 use tracing::warn;
+/// Boxed inside `Ty::Struct` so a struct does not make every `Ty` bigger.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructTy {
+    pub name: String,
+    pub fields: Vec<(String, Ty)>,
+}
+
+const UNRESOLVED_POINTEE: &str = "unresolved pointee";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Ty {
     Void,
@@ -11,8 +20,26 @@ pub enum Ty {
     Float(usize /*bits*/),
     Ptr(Box<Ty>),
     Array(Box<Ty>, usize),
+    /// A named struct and its fields. LLVM keeps no field names, so they are `f0`, `f1`, ...
+    Struct(Box<StructTy>),
     Opaque(String),
 }
+impl Ty {
+    /// A pointer whose pointee is not known yet (LLVM pointers are opaque).
+    pub fn unresolved_ptr() -> Ty {
+        Ty::Ptr(Box::new(Ty::Opaque(UNRESOLVED_POINTEE.to_string())))
+    }
+
+    /// Whether a pointee placeholder is still left anywhere inside this type.
+    pub fn has_unresolved_pointee(&self) -> bool {
+        match self {
+            Ty::Opaque(s) => s == UNRESOLVED_POINTEE,
+            Ty::Ptr(inner) | Ty::Array(inner, _) => inner.has_unresolved_pointee(),
+            _ => false,
+        }
+    }
+}
+
 impl<'c> From<BasicTypeEnum<'c>> for Ty {
     fn from(ty: BasicTypeEnum) -> Self {
         match ty {
@@ -25,9 +52,7 @@ impl<'c> From<BasicTypeEnum<'c>> for Ty {
                 }
             }
             BasicTypeEnum::FloatType(f) => Ty::Float(f.get_bit_width() as usize),
-            BasicTypeEnum::PointerType(_p) => {
-                Ty::Ptr(Box::new(Ty::Opaque("unresolved pointee".to_string())))
-            }
+            BasicTypeEnum::PointerType(_p) => Ty::unresolved_ptr(),
             BasicTypeEnum::ArrayType(a) => {
                 Ty::Array(Box::new(Ty::from(a.get_element_type())), a.len() as usize)
             }
@@ -49,10 +74,24 @@ impl<'c> From<BasicTypeEnum<'c>> for Ty {
                     (array_size as u64 / size_res as u64) as usize,
                 )
             }
-            BasicTypeEnum::StructType(_) => {
-                warn!("unsupported type: struct coerced to `Ty::Opaque`");
-                Ty::Opaque("Unsupported type".to_string())
-            }
+            BasicTypeEnum::StructType(s) => match s.get_name().and_then(|n| n.to_str().ok()) {
+                Some(name) if !s.is_opaque() && !s.is_packed() => Ty::Struct(Box::new(StructTy {
+                    name: name
+                        .chars()
+                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+                        .collect(),
+                    fields: s
+                        .get_field_types()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(i, t)| (format!("f{i}"), Ty::from(t)))
+                        .collect(),
+                })),
+                _ => {
+                    warn!("unsupported type: unnamed, packed or opaque struct");
+                    Ty::Opaque("Unsupported type".to_string())
+                }
+            },
             BasicTypeEnum::ScalableVectorType(_) => {
                 warn!("unsupported type: scalable vector coerced to `Ty::Void`");
                 Ty::Opaque("Unsupported type".to_string())

@@ -11,6 +11,7 @@ use inkwell::values::{
 };
 use std::collections::{HashMap, HashSet};
 
+use super::expr::{FieldExpr, IndexExpr};
 use super::op::{BinOp, CastKind, Cmp, FloatCmp, IntCmp, UnOp};
 
 /// Recover one function: name every value, translate each instruction, then run
@@ -25,6 +26,7 @@ pub fn recover_function(
     })?;
     super::promote::promote_slots(&mut func);
     super::coalesce::coalesce(&mut func);
+    super::pointee::resolve_pointees(&mut func);
     Ok(func)
 }
 
@@ -314,11 +316,16 @@ fn defines_value(inst: InstructionValue<'_>) -> Result<bool, String> {
         | Op::FPTrunc
         | Op::FPExt
         | Op::Phi => Ok(true),
-        Op::Store | Op::Br | Op::Return | Op::Unreachable => Ok(false),
+        // A GEP names no local: a load or store folds it into its place.
+        Op::Store | Op::Br | Op::Return | Op::Unreachable | Op::GetElementPtr => Ok(false),
         Op::Call => Ok(call_kind(inst)? == CallKind::Value),
         op if BinOp::from_opcode(op).is_some() => Ok(true),
         other => Err(format!("unsupported instruction `{other:?}`")),
     }
+}
+
+fn gep_unsupported() -> String {
+    "unsupported getelementptr (only `array[index]` and `struct.field` on a local)".to_string()
 }
 
 struct Cx<'ctx> {
@@ -375,6 +382,60 @@ impl<'ctx> Cx<'ctx> {
              is not supported yet"
                 .to_string(),
         )
+    }
+
+    /// The place a load/store pointer names: an alloca slot, or one element of
+    /// an array slot (`getelementptr [N x T], ptr %arr, i64 0, i64 %i`).
+    fn place(&self, op: Option<Operand<'ctx>>) -> Result<Expr, String> {
+        if let Some(BasicValueEnum::PointerValue(p)) = op.and_then(|o| o.value())
+            && let Some(inst) = p.as_instruction()
+            && inst.get_opcode() == Op::GetElementPtr
+        {
+            return self.element(inst);
+        }
+        self.slot(op).map(|s| self.var(&s))
+    }
+
+    /// `arr[i]` or `s.field` for a GEP straight into a local array or struct.
+    fn element(&self, gep: InstructionValue<'ctx>) -> Result<Expr, String> {
+        let base = match gep.get_operand(0).and_then(|o| o.value()) {
+            Some(BasicValueEnum::PointerValue(p)) => {
+                p.as_instruction().filter(|i| i.get_opcode() == Op::Alloca)
+            }
+            _ => None,
+        }
+        .ok_or_else(gep_unsupported)?;
+        let name = self.name(base)?;
+        let first_is_zero = matches!(
+            gep.get_operand(1).and_then(|o| o.value()),
+            Some(BasicValueEnum::IntValue(i))
+                if i.is_const() && i.get_sign_extended_constant() == Some(0)
+        );
+        if gep.get_num_operands() != 3 || !first_is_zero {
+            return Err(gep_unsupported());
+        }
+        let base = Box::new(self.var(&name));
+        match self.types.get(&name) {
+            Some(Ty::Array(..)) => Ok(Expr::Index(IndexExpr {
+                base,
+                index: Box::new(self.val(gep.get_operand(2))?),
+            })),
+            Some(Ty::Struct(s)) => {
+                let Some(BasicValueEnum::IntValue(k)) = gep.get_operand(2).and_then(|o| o.value())
+                else {
+                    return Err(gep_unsupported());
+                };
+                let field = k
+                    .get_zero_extended_constant()
+                    .and_then(|k| s.fields.get(k as usize))
+                    .ok_or_else(gep_unsupported)?;
+                Ok(Expr::Field(FieldExpr {
+                    base,
+                    name: field.0.clone(),
+                }))
+            }
+            _ => Err(gep_unsupported()),
+        }
     }
 
     fn val(&self, op: Option<Operand<'ctx>>) -> Result<Expr, String> {
@@ -550,16 +611,14 @@ fn build(f: &FunctionValue<'_>, reserved: &HashSet<String>) -> Result<Function, 
             let opc = inst.get_opcode();
             let opnd = |i: u32| inst.get_operand(i);
             match opc {
-                Op::Alloca => {}
+                Op::Alloca | Op::GetElementPtr => {}
                 Op::Load => {
                     let dest = cx.var(&cx.name(inst)?);
-                    let slot = cx.slot(opnd(0))?;
-                    stmts.push(assign(dest, Expr::unary(UnOp::ValuAt, cx.var(&slot))));
+                    stmts.push(assign(dest, Expr::unary(UnOp::ValuAt, cx.place(opnd(0))?)));
                 }
                 Op::Store => {
                     let value = cx.val(opnd(0))?;
-                    let slot = cx.slot(opnd(1))?;
-                    stmts.push(assign(Expr::unary(UnOp::AddrOf, cx.var(&slot)), value));
+                    stmts.push(assign(Expr::unary(UnOp::AddrOf, cx.place(opnd(1))?), value));
                 }
                 Op::ICmp => {
                     let p = inst.get_icmp_predicate().ok_or("icmp without predicate")?;
