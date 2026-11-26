@@ -1690,7 +1690,7 @@ mod tests {
         );
         retarget_edge(&mut blk, "old", "new");
         assert_eq!(blk.succ, vec!["new".to_string()]);
-        let Stmt::Invoke(i) = blk.term() else {
+        let Some(Stmt::Invoke(i)) = blk.term() else {
             panic!("the invoke arm was replaced");
         };
         assert_eq!(i.normal, "new".to_string());
@@ -1709,7 +1709,7 @@ mod tests {
         // statement alone.
         assert!(got.succ.is_empty());
         retarget_edge(&mut got, "old", "new");
-        let Stmt::Goto(g) = got.term() else {
+        let Some(Stmt::Goto(g)) = got.term() else {
             panic!("the goto target was replaced");
         };
         assert_eq!(g.target, "new".to_string());

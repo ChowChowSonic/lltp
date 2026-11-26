@@ -56,7 +56,7 @@ pub fn promotable_slots(func: &Function) -> BTreeSet<String> {
             }
             note_escapes(src, &mut rejected);
         }
-        for e in exprs(block.term()) {
+        for e in block.term().into_iter().flat_map(exprs) {
             note_escapes(e, &mut rejected);
         }
     }
@@ -377,9 +377,10 @@ mod tests {
         let stmts = &f.blocks()[0].stmts;
         assert_eq!(stmts.len() - 1, 1);
         assert!(writes(&stmts[0], "x"));
-        assert!(
-            matches!(f.blocks()[0].term(), Stmt::Ret(RetStmt { value: Some(v) }) if is_name(v, "x"))
-        );
+        assert!(matches!(
+            f.blocks()[0].term(),
+            Some(Stmt::Ret(RetStmt { value: Some(v) })) if is_name(v, "x")
+        ));
     }
 
     #[test]

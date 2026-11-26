@@ -5,10 +5,13 @@ use crate::hir::{
 use std::fmt::{self, Write};
 
 pub trait ExprEmitter {
-    /// Default: this backend cannot express the node. Panics on reach — a
-    /// reaching call means either capability was declared without an override
-    /// (`allows_*() == true` + no `emit_*`) or a lowering pass violated its
-    /// contract. A future best-effort mode may use a recoverable signal here.
+    /// Default: this backend cannot express the node. Panics on reach.
+    ///
+    /// A reaching call means the capability was declared without an override
+    /// (`allows_*() == true` + no `emit_*`), which is a bug in the backend and is
+    /// exposed immediately rather than turned into a recoverable value. A node the
+    /// target disallows cannot reach here: the capability check reports it as
+    /// `PipelineError::DisallowedStmtError` before emission starts.
     fn emit_expr(&self, expr: &Expr, out: &mut impl Write) -> fmt::Result {
         match expr {
             Expr::Literal(i) => self.emit_literal(i, out),

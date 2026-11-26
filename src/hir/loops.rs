@@ -839,9 +839,12 @@ mod tests {
         });
         let post_tree = [post];
         let pre_tree = [pre];
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&post_tree)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&post_tree).expect("verify")
+        ));
         assert!(
-            !are_equivalent(&cfg, &structured_to_cfg(&pre_tree)),
+            !are_equivalent(&cfg, &structured_to_cfg(&pre_tree).expect("verify")),
             "a post-test loop read as pre-test must not match"
         );
     }

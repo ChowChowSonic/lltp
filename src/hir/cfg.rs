@@ -125,21 +125,13 @@ impl Block {
             pred: Vec::new(),
         }
     }
-    pub fn term_mut(&mut self) -> &mut Stmt {
-        match self.stmts.last_mut() {
-            Some(x) => x,
-            _ => unreachable!(
-                "Attempt to retrieve the terminator of a (malformed) block with no stmts!"
-            ),
-        }
+    /// A block with no statements has no terminator: a malformed block from
+    /// untrusted input reports `None` rather than panicking.
+    pub fn term_mut(&mut self) -> Option<&mut Stmt> {
+        self.stmts.last_mut()
     }
-    pub fn term(&self) -> &Stmt {
-        match self.stmts.last() {
-            Some(x) => x,
-            _ => unreachable!(
-                "Attempt to retrieve the terminator of a (malformed) block with no stmts!"
-            ),
-        }
+    pub fn term(&self) -> Option<&Stmt> {
+        self.stmts.last()
     }
 }
 

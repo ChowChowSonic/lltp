@@ -877,7 +877,7 @@ nonpos:
             let body = func.structurize().unwrap();
 
             assert!(matches!(body[0], Stmt::Loop { .. }));
-            assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(body)));
+            assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(body).expect("verify")));
         }
     */
     #[test]
@@ -902,6 +902,9 @@ nonpos:
         // assignment then the fork.
         assert!(matches!(body[0], Stmt::Let { .. }), "got {body:?}");
         assert!(matches!(body[1], Stmt::If { .. }), "got {body:?}");
-        assert!(are_equivalent(&func_imut.cfg, &structured_to_cfg(body)));
+        assert!(are_equivalent(
+            &func_imut.cfg,
+            &structured_to_cfg(body).expect("verify")
+        ));
     }
 }

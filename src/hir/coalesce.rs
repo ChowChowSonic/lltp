@@ -44,7 +44,7 @@ pub fn coalesce(func: &mut Function) -> usize {
     let copies: Vec<(String, String)> = func
         .blocks()
         .iter()
-        .flat_map(|b| b.stmts.iter().chain(std::iter::once(b.term())))
+        .flat_map(|b| b.stmts.iter().chain(b.term()))
         .filter_map(copy_pair)
         .collect();
 
@@ -88,7 +88,9 @@ pub fn coalesce(func: &mut Function) -> usize {
         for stmt in &mut block.stmts {
             rename_stmt(stmt, &rename);
         }
-        rename_stmt(block.term_mut(), &rename);
+        if let Some(t) = block.term_mut() {
+            rename_stmt(t, &rename);
+        }
         block.stmts.retain(|stmt| {
             !matches!(stmt, Stmt::Let(LetStmt { dest, src }) if
                     is_plain_var(dest) && same_name(dest, src))
@@ -108,7 +110,7 @@ fn fixed_names(func: &Function) -> Names {
                 collect_slots(e, &mut fixed);
             }
         }
-        for e in exprs(block.term()) {
+        for e in block.term().into_iter().flat_map(exprs) {
             collect_slots(e, &mut fixed);
         }
     }
@@ -269,7 +271,9 @@ fn add_uses(vals: Vec<&Expr>, live: &mut Names) {
 
 fn live_in_of(block: &Block, live_out: &Names) -> Names {
     let mut live = live_out.clone();
-    add_uses(uses(block.term()), &mut live);
+    if let Some(t) = block.term() {
+        add_uses(uses(t), &mut live);
+    }
     for stmt in block.stmts.iter().rev() {
         if let Some(d) = def_name(stmt) {
             live.remove(d);
@@ -324,7 +328,9 @@ fn interference(func: &Function, live_out: &[Names]) -> BTreeMap<String, Names> 
     let mut adj: BTreeMap<String, Names> = BTreeMap::new();
     for (block, out) in func.blocks().into_iter().zip(live_out) {
         let mut live = out.clone();
-        add_uses(uses(block.term()), &mut live);
+        if let Some(t) = block.term() {
+            add_uses(uses(t), &mut live);
+        }
         for stmt in block.stmts.iter().rev() {
             if let Some(d) = def_name(stmt) {
                 // The two ends of a copy are the pair this pass wants to merge,
@@ -539,9 +545,9 @@ mod tests {
                     .to_string();
                 env.insert(name, get(&env, src));
             }
-            match &block.term() {
-                Stmt::Branch(b) => label = b.then_block.clone(),
-                Stmt::Ret(RetStmt { value: Some(v) }) => return get(&env, v),
+            match block.term() {
+                Some(Stmt::Branch(b)) => label = b.then_block.clone(),
+                Some(Stmt::Ret(RetStmt { value: Some(v) })) => return get(&env, v),
                 other => panic!("unsupported terminator {other:?}"),
             }
         }

@@ -32,22 +32,27 @@ impl<'c> From<BasicTypeEnum<'c>> for Ty {
                 Ty::Array(Box::new(Ty::from(a.get_element_type())), a.len() as usize)
             }
             BasicTypeEnum::VectorType(v) => {
-                let size_res = match v.get_element_type().size_of() {
-                    Some(x) => {
-                        if let Some(y) = x.get_zero_extended_constant() {
-                            y
-                        } else {
-                            unreachable!("Error unpacking type size")
-                        }
+                // A vector whose element size is not a constant (an opaque-sized
+                // struct element) or is zero has no recoverable element count:
+                // report it the way the other unsupported shapes are, rather than
+                // panicking on the unpack.
+                let size_res = v
+                    .get_element_type()
+                    .size_of()
+                    .and_then(|x| x.get_zero_extended_constant());
+                match size_res {
+                    Some(0) | None => {
+                        warn!("unsupported type: vector element size unavailable");
+                        Ty::Opaque("Unsupported type".to_string())
                     }
-                    None => unreachable!("Error unpacking type size"),
-                };
-                let array_size = v.get_size();
-
-                Ty::Array(
-                    Box::new(Ty::from(v.get_element_type())),
-                    (array_size as u64 / size_res as u64) as usize,
-                )
+                    Some(y) => {
+                        let array_size = v.get_size();
+                        Ty::Array(
+                            Box::new(Ty::from(v.get_element_type())),
+                            (array_size as u64 / y) as usize,
+                        )
+                    }
+                }
             }
             BasicTypeEnum::StructType(_) => {
                 warn!("unsupported type: struct coerced to `Ty::Opaque`");

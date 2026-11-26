@@ -1,3 +1,4 @@
+use crate::errors::VerifyError;
 use crate::hir::flow::keep_reachable;
 use crate::hir::flow::{dominators, natural_loops};
 use crate::hir::loops::{block_test, is_test_point};
@@ -84,7 +85,7 @@ impl ReBuilder {
         brk: Option<&String>,
         cont: Option<&String>,
         labels: &mut HashMap<String, String>,
-    ) -> (String, Option<String>) {
+    ) -> Result<(String, Option<String>), VerifyError> {
         let mut cur = Some(entry.to_string());
         for s in stmts {
             match s {
@@ -96,14 +97,18 @@ impl ReBuilder {
                 Stmt::Ret { .. } | Stmt::Unreachable => cur = None,
                 Stmt::Break => {
                     if let Some(c) = &cur {
-                        let j: &str = brk.expect("Break outside any loop");
+                        let Some(j) = brk else {
+                            return Err(VerifyError::BreakOutsideLoop);
+                        };
                         self.edge(c, j);
                     }
                     cur = None;
                 }
                 Stmt::Continue => {
                     if let Some(c) = &cur {
-                        let j = cont.expect("Continue outside any loop");
+                        let Some(j) = cont else {
+                            return Err(VerifyError::ContinueOutsideLoop);
+                        };
                         self.edge(c, j);
                     }
                     cur = None;
@@ -112,16 +117,19 @@ impl ReBuilder {
                     if let Some(c) = &cur {
                         let t = labels
                             .get(target)
-                            .unwrap_or_else(|| panic!("goto unknown label {target}"));
+                            .ok_or_else(|| VerifyError::UnknownLabel(target.clone()))?;
                         self.edge(c, t);
                     }
                     cur = None;
                 }
                 Stmt::Label(LabelStmt { name }) => {
+                    let t = labels
+                        .get(name)
+                        .ok_or_else(|| VerifyError::UnknownLabel(name.clone()))?;
                     if let Some(c) = &cur {
-                        self.edge(c, &labels[name]);
+                        self.edge(c, t);
                     }
-                    cur = labels.get(name).cloned();
+                    cur = Some(t.clone());
                 }
                 Stmt::TryCatch(TryCatchStmt {
                     try_body,
@@ -130,7 +138,7 @@ impl ReBuilder {
                 }) => {
                     let Some(c) = &cur else { continue };
                     let n = self.fresh();
-                    let (te, tx) = self.region(&n, try_body, brk, cont, labels);
+                    let (te, tx) = self.region(&n, try_body, brk, cont, labels)?;
                     self.edge(c, &te);
 
                     let mut fallthrough_exits: Vec<String> = Vec::new();
@@ -139,7 +147,7 @@ impl ReBuilder {
                     }
                     for catch in catches {
                         let n = self.fresh();
-                        let (ce, cx) = self.region(&n, &catch.body, brk, cont, labels);
+                        let (ce, cx) = self.region(&n, &catch.body, brk, cont, labels)?;
                         self.edge(c, &ce);
                         if let Some(x) = cx {
                             fallthrough_exits.push(x.clone());
@@ -148,7 +156,7 @@ impl ReBuilder {
                     if let Some(fb) = finally_body.as_ref().filter(|b| !b.is_empty()) {
                         if !fallthrough_exits.is_empty() {
                             let n = self.fresh();
-                            let (fe, fx) = self.region(&n, fb, brk, cont, labels);
+                            let (fe, fx) = self.region(&n, fb, brk, cont, labels)?;
                             for x in &fallthrough_exits {
                                 self.edge(x, &fe);
                             }
@@ -173,7 +181,7 @@ impl ReBuilder {
                 }) => {
                     let Some(c) = &cur else { continue };
                     let n = self.fresh();
-                    let (te, tx) = self.region(&n, then_stmts, brk, cont, labels);
+                    let (te, tx) = self.region(&n, then_stmts, brk, cont, labels)?;
                     self.edge(c, &te);
                     let mut join: Option<String> = None;
                     if else_stmts.is_empty() {
@@ -182,7 +190,7 @@ impl ReBuilder {
                         join = Some(j);
                     } else {
                         let n = self.fresh();
-                        let (ee, ex) = self.region(&n, else_stmts, brk, cont, labels);
+                        let (ee, ex) = self.region(&n, else_stmts, brk, cont, labels)?;
                         self.edge(c, &ee);
                         if let Some(x) = ex {
                             let j = self.fresh();
@@ -211,7 +219,7 @@ impl ReBuilder {
                             let join = self.fresh();
                             let be = self.fresh();
                             let (be, bx) =
-                                self.region(&be, &node.body, Some(&join), Some(&test), labels);
+                                self.region(&be, &node.body, Some(&join), Some(&test), labels)?;
                             self.edge(c, &test);
                             self.edge(&test, &be);
                             if node.guard.is_some() {
@@ -227,7 +235,7 @@ impl ReBuilder {
                             let test = self.fresh();
                             let join = self.fresh();
                             let (be, bx) =
-                                self.region(&be, &node.body, Some(&join), Some(&test), labels);
+                                self.region(&be, &node.body, Some(&join), Some(&test), labels)?;
                             self.edge(c, &be);
                             if let Some(x) = bx {
                                 self.edge(&x, &test);
@@ -242,7 +250,7 @@ impl ReBuilder {
                             let be = self.fresh();
                             let join = self.fresh();
                             let (be, bx) =
-                                self.region(&be, &node.body, Some(&join), Some(&be), labels);
+                                self.region(&be, &node.body, Some(&join), Some(&be), labels)?;
                             self.edge(c, &be);
                             if let Some(x) = bx {
                                 self.edge(&x, &be);
@@ -256,7 +264,7 @@ impl ReBuilder {
                     let mut join: Option<String> = None;
                     for (_, b) in cases {
                         let n = self.fresh();
-                        let (ae, ax) = self.region(&n, b, brk, cont, labels);
+                        let (ae, ax) = self.region(&n, b, brk, cont, labels)?;
                         self.edge(c, &ae);
                         if let Some(x) = ax {
                             let j = join.get_or_insert_with(|| self.fresh());
@@ -268,7 +276,7 @@ impl ReBuilder {
                         self.edge(c, j);
                     } else {
                         let n = self.fresh();
-                        let (de, dx) = self.region(&n, default, brk, cont, labels);
+                        let (de, dx) = self.region(&n, default, brk, cont, labels)?;
                         self.edge(c, &de);
                         if let Some(x) = dx {
                             let j = join.get_or_insert_with(|| self.fresh());
@@ -286,14 +294,14 @@ impl ReBuilder {
                     }
                     cur = None;
                 }
-                Stmt::Branch { .. } => unreachable!("structured input must not contain Branch"),
+                Stmt::Branch { .. } => return Err(VerifyError::BranchInStructuredInput),
             }
         }
-        (entry.to_string(), cur)
+        Ok((entry.to_string(), cur))
     }
 }
 
-pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
+pub fn structured_to_cfg(body: &[Stmt]) -> Result<Cfg, VerifyError> {
     let mut b = ReBuilder {
         succ: HashMap::new(),
         stmts: HashMap::new(),
@@ -303,7 +311,7 @@ pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
     let mut labels = HashMap::new();
     b.collect_labels(body, &mut labels);
     let top = b.fresh();
-    let (entry, _) = b.region(&top, body, None, None, &mut labels);
+    let (entry, _) = b.region(&top, body, None, None, &mut labels)?;
     for n in &b.all {
         b.stmts.entry(n.clone()).or_default();
         b.succ.entry(n.clone()).or_default();
@@ -314,7 +322,7 @@ pub fn structured_to_cfg(body: &[Stmt]) -> Cfg {
             blk.stmts = s.clone();
         }
     }
-    cfg
+    Ok(cfg)
 }
 
 /// A graph view where each block is split into the statements it runs and the test
@@ -459,7 +467,7 @@ mod tests {
             then_stmts: vec![Stmt::Ret(RetStmt { value: None })],
             else_stmts: vec![Stmt::Ret(RetStmt { value: None })],
         })];
-        let cfg = structured_to_cfg(&body);
+        let cfg = structured_to_cfg(&body).expect("verify");
         assert_eq!(cfg.blocks.len(), 3);
         assert_eq!(cfg.blocks[&cfg.entry].succ.len(), 2);
         // no block has two preds → nothing joined
@@ -488,7 +496,7 @@ mod tests {
                 src: Box::new(Expr::Literal(Lit::Bool(true))),
             })],
         })];
-        let cfg = structured_to_cfg(&body);
+        let cfg = structured_to_cfg(&body).expect("verify");
         println!("GRAPH: {cfg:?}");
         // b0 entry, b1 header, b2 join, b3 body (falls out)
         assert_eq!(cfg.blocks.len(), 4);
@@ -522,7 +530,7 @@ mod tests {
             }),
             Stmt::Ret(RetStmt { value: None }),
         ];
-        let cfg = structured_to_cfg(&body);
+        let cfg = structured_to_cfg(&body).expect("verify");
         // b0 entry, b1 header, b2 join (holds the ret), b3 body entry (break)
         assert_eq!(cfg.blocks.len(), 4);
         assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b1".to_string()]);
@@ -560,7 +568,7 @@ mod tests {
                 Stmt::Ret(RetStmt { value: None }),
             ],
         })];
-        let cfg = structured_to_cfg(&body);
+        let cfg = structured_to_cfg(&body).expect("verify");
         // b0 entry, b1 header, b2 join, b3 body entry, b4 then arm (continue),
         // b5 after the if (ret)
         assert_eq!(cfg.blocks.len(), 6);
@@ -599,7 +607,7 @@ mod tests {
 
             body: vec![Stmt::Break],
         })];
-        let cfg = structured_to_cfg(&body);
+        let cfg = structured_to_cfg(&body).expect("verify");
         // b0 entry, b1 the body (break), b2 join
         assert_eq!(cfg.blocks.len(), 3);
         assert_eq!(cfg.blocks[&cfg.entry].succ, vec!["b1".to_string()]);
@@ -649,7 +657,7 @@ declare void @pers()
         assert_eq!(cfg.entry, "entry");
         assert_eq!(cfg.blocks["entry"].succ, vec!["ok".to_string()]);
         assert_eq!(
-            exception_targets(cfg.blocks["entry"].term()),
+            exception_targets(cfg.blocks["entry"].term().expect("entry terminator")),
             vec!["lp".to_string()]
         );
         assert!(cfg.blocks["lp"].pred.is_empty());
@@ -684,7 +692,10 @@ declare void @pers()
         let body = func.structurize().expect("structurization failed").to_vec();
         assert!(matches!(body[0], Stmt::Invoke { .. }), "got {body:?}");
         let control = crate::hir::flow::keep_reachable(&func_imut.cfg).collapse_chains();
-        assert!(are_equivalent(&control, &structured_to_cfg(&body)));
+        assert!(are_equivalent(
+            &control,
+            &structured_to_cfg(&body).expect("verify")
+        ));
     }
 
     /// The canonical recovery reports exception instructions as unsupported

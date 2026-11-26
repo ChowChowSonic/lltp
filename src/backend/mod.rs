@@ -88,14 +88,18 @@ pub trait LowerTarget {
         false
     }
     /// If false, the middle-end MUST rewrite all `Goto` HIR nodes into
-    /// structured control flow before reaching the backend. The backend may
-    /// panic if `emit_goto` is called and this returns false.
+    /// structured control flow before reaching the backend. A `Goto` that
+    /// survives to emission is reported as `PipelineError::DisallowedStmtError`,
+    /// so the emitter is never reached for it; `emit_goto` panics only when this
+    /// flag is true without an override, which is a bug in the backend.
     fn allows_goto(&self) -> bool {
         false
     }
     /// If false, the middle-end MUST rewrite all `Switch` HIR nodes into
-    /// if/else chains before reaching the backend. The backend may panic if
-    /// `emit_switch` is called and this returns false.
+    /// if/else chains before reaching the backend. A `Switch` that survives to
+    /// emission is reported as `PipelineError::DisallowedStmtError`, so the
+    /// emitter is never reached for it; `emit_switch` panics only when this flag
+    /// is true without an override, which is a bug in the backend.
     fn allows_switch(&self) -> bool {
         false
     }
@@ -140,6 +144,11 @@ pub trait Language: LowerTarget + ExprEmitter + StmtEmitter {
     /// that need bespoke lowering override this method (instead of or in
     /// addition to supplying `pipeline()`). `self` is a concrete backend, so
     /// it coerces to `&dyn LowerTarget` for the boxed passes.
+    ///
+    /// The capability check runs after every pass, so a pass may legitimately
+    /// introduce a node the target disallows as long as a later pass in the same
+    /// pipeline removes it; only what is still present when `lower` returns is
+    /// reported as `PipelineError::DisallowedStmtError`.
     fn lower(&self, func: &mut Function) -> Result<(), LowerError>
     where
         Self: Sized,

@@ -191,7 +191,7 @@ fn recovered_fixtures_structure_back_to_their_cfgs() {
             // Duplicating an arm or inserting a join changes the shape, so the
             // shape comparison only holds where structurize worked on the graph
             // as recovered; a tree that had to duplicate an arm is recorded.
-            let structured = structured_to_cfg(&body);
+            let structured = structured_to_cfg(&body).expect("verify");
             // A block that runs body work before its test is two nodes in the
             // shape, so the graph is read the same way before the lengths are compared.
             let graph = split_tests(&graph);

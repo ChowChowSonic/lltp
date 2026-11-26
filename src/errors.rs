@@ -9,6 +9,7 @@ use thiserror::Error;
 pub enum HirError {
     Lower(LowerError),
     Structurize(StructurizeError),
+    Verify(VerifyError),
 }
 
 impl fmt::Display for HirError {
@@ -16,6 +17,7 @@ impl fmt::Display for HirError {
         match self {
             HirError::Lower(e) => write!(f, "lowering error: {e}"),
             HirError::Structurize(e) => write!(f, "structurize error: {e}"),
+            HirError::Verify(e) => write!(f, "verify error: {e}"),
         }
     }
 }
@@ -25,6 +27,7 @@ impl std::error::Error for HirError {
         match self {
             HirError::Lower(e) => Some(e),
             HirError::Structurize(e) => Some(e),
+            HirError::Verify(e) => Some(e),
         }
     }
 }
@@ -39,6 +42,25 @@ impl From<StructurizeError> for HirError {
     fn from(e: StructurizeError) -> Self {
         HirError::Structurize(e)
     }
+}
+
+impl From<VerifyError> for HirError {
+    fn from(e: VerifyError) -> Self {
+        HirError::Verify(e)
+    }
+}
+
+/// Errors verifying a structured body against its control-flow shape.
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
+pub enum VerifyError {
+    #[error("break outside any loop")]
+    BreakOutsideLoop,
+    #[error("continue outside any loop")]
+    ContinueOutsideLoop,
+    #[error("goto to unknown label {0:?}")]
+    UnknownLabel(String),
+    #[error("structured input must not contain Branch")]
+    BranchInStructuredInput,
 }
 
 /// Errors occurring during lowering from LLVM IR into HIR.
@@ -96,6 +118,8 @@ pub enum StructurizeError {
     BadBranchEdge { block: String, target: String },
     #[error("region from {entry:?} to {exit:?} is not an acyclic region with a single exit")]
     NotAcyclicRegion { entry: String, exit: String },
+    #[error("switch arms empty for block {0:?}")]
+    EmptySwitchArms(String),
 }
 
 #[derive(Error, Debug)]

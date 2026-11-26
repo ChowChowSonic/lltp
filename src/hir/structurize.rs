@@ -783,7 +783,9 @@ fn structure_region(
                             dtype: Ty::Int(32, true),
                         })
                     });
-                let default: Vec<Stmt> = switch_arms.pop().unwrap().1;
+                let Some((_, default)) = switch_arms.pop() else {
+                    return Err(StructurizeError::EmptySwitchArms(entry.to_string()));
+                };
                 return Ok(vec![Stmt::Switch(SwitchStmt {
                     value: starting,
                     cases: switch_arms,
@@ -841,7 +843,9 @@ fn structure_region(
                         dtype: Ty::Int(32, true),
                     })
                 });
-            let default: Vec<Stmt> = switch_arms.pop().unwrap().1;
+            let Some((_, default)) = switch_arms.pop() else {
+                return Err(StructurizeError::EmptySwitchArms(entry.to_string()));
+            };
             let mut prefix: Vec<Stmt> = vec![Stmt::Switch(SwitchStmt {
                 value: starting,
                 cases: switch_arms,
@@ -1417,7 +1421,10 @@ mod test {
             &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "h")],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1427,7 +1434,10 @@ mod test {
             &[("entry", "h"), ("h", "b"), ("h", "ex"), ("b", "ex")],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1445,7 +1455,10 @@ mod test {
             ],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1465,7 +1478,10 @@ mod test {
             ],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1484,7 +1500,10 @@ mod test {
             ],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1500,7 +1519,10 @@ mod test {
             ],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1516,14 +1538,20 @@ mod test {
             ],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
     fn straight_line_round_trips() {
         let cfg = Cfg::cfg_from("a", &[("a", "b"), ("b", "c")]);
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1539,21 +1567,30 @@ mod test {
             ],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
     fn if_else_round_trips() {
         let cfg = Cfg::cfg_from("e", &[("e", "a"), ("e", "b")]);
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
     fn if_without_else_round_trips() {
         let cfg = Cfg::cfg_from("e", &[("e", "a"), ("e", "j"), ("a", "j")]);
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1573,7 +1610,10 @@ mod test {
             ],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1598,7 +1638,10 @@ mod test {
         let normalized = normalize_loop_exits(&cfg, &mut Vec::new(), &mut HashSet::new(), 64);
         let split = split_fork(&normalized, "e").unwrap();
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&split, &structured_to_cfg(&stmts)));
+        assert!(are_equivalent(
+            &split,
+            &structured_to_cfg(&stmts).expect("verify")
+        ));
     }
 
     #[test]
@@ -1654,6 +1697,9 @@ mod test {
             ],
         );
         let stmts = cfg.structurize().unwrap();
-        assert!(are_equivalent(&cfg, &structured_to_cfg(&stmts)))
+        assert!(are_equivalent(
+            &cfg,
+            &structured_to_cfg(&stmts).expect("verify")
+        ))
     }
 }

@@ -177,13 +177,16 @@ impl ExprEmitter for CLanguage {
 mod test {
     use std::fmt::Formatter;
 
-    use lltp::backend::{ExprEmitter, LowerTarget, StmtEmitter};
+    use lltp::backend::{ExprEmitter, Language, LowerTarget, StmtEmitter};
+    use lltp::errors::PipelineError;
     use lltp::hir::expr::{CallExpr, CastExpr, IndexExpr};
     use lltp::hir::op::{BinOp, CastKind};
     use lltp::hir::stmt::{
-        BranchStmt, CatchClause, GotoStmt, LabelStmt, LoopKind, LoopStmt, TryCatchStmt,
+        BranchStmt, CatchClause, GotoStmt, LabelStmt, LoopKind, LoopStmt, SwitchStmt, TryCatchStmt,
     };
-    use lltp::hir::{Expr, Lit, Stmt, Ty};
+    use lltp::hir::{Expr, Function, Lit, LowerError, Stmt, Ty};
+    use lltp::passes::Lowering;
+    use lltp::pipeline;
 
     use super::CLanguage;
 
@@ -233,6 +236,14 @@ mod test {
 
     fn int(value: u64) -> Expr {
         Expr::int(value, 32, true)
+    }
+
+    fn lit(value: u64) -> Lit {
+        Lit::Int {
+            value,
+            bits: 32,
+            signed: true,
+        }
     }
 
     fn binding(dest: &str, src: Expr) -> Stmt {
@@ -475,5 +486,91 @@ mod test {
             emit_block(&stmts),
             "{\n\tflag = true\n\twhile(flag & false){\n\tif (flag){\n\tbreak\n}\nelse{\n\tcontinue\n}\n\n}\n\n}\n"
         );
+    }
+
+    /// A capability claimed without an override is a bug in the backend, so the
+    /// default emitter exposes it immediately rather than handing back a value a
+    /// caller could ignore.
+    #[test]
+    #[should_panic = "has no override for this backend"]
+    fn claimed_capability_without_an_override_panics() {
+        struct ClaimsSwitch;
+
+        impl LowerTarget for ClaimsSwitch {
+            fn name(&self) -> &str {
+                "claims-switch"
+            }
+            fn allows_switch(&self) -> bool {
+                true
+            }
+        }
+        impl ExprEmitter for ClaimsSwitch {}
+        impl StmtEmitter for ClaimsSwitch {}
+        impl Language for ClaimsSwitch {}
+
+        let stmt = Stmt::Switch(SwitchStmt {
+            value: var("x"),
+            cases: vec![(lit(1), vec![Stmt::ret(int(0))])],
+            default: vec![Stmt::ret(int(0))],
+        });
+        let mut out = String::new();
+        // The default `emit_switch` panics before any value can be returned.
+        ClaimsSwitch
+            .emit_stmt(&stmt, &mut out)
+            .expect("unreachable: the default panics");
+    }
+
+    /// The other arm of the same policy: a pass may introduce a node the target
+    /// cannot represent as long as a later pass removes it. What is still present
+    /// when the pipeline reaches emission is reported as an error, so the caller
+    /// is expected to add the removing pass rather than take a panic.
+    #[test]
+    fn a_disallowed_node_left_by_the_passes_is_reported_not_panicked() {
+        struct AddsSwitch;
+
+        impl Lowering for AddsSwitch {
+            fn name(&self) -> &'static str {
+                "adds-switch"
+            }
+            fn apply(
+                &self,
+                func: &mut Function,
+                _target: &dyn LowerTarget,
+            ) -> Result<(), LowerError> {
+                func.body.push(Stmt::Switch(SwitchStmt {
+                    value: Expr::var("x", I32),
+                    cases: Vec::new(),
+                    default: Vec::new(),
+                }));
+                Ok(())
+            }
+        }
+
+        struct DisallowsSwitch;
+
+        impl ExprEmitter for DisallowsSwitch {}
+        impl StmtEmitter for DisallowsSwitch {}
+
+        impl LowerTarget for DisallowsSwitch {
+            fn name(&self) -> &str {
+                "disallows-switch"
+            }
+            // `allows_switch()` is false, and the pipeline above has no pass that
+            // removes what it adds.
+        }
+        impl Language for DisallowsSwitch {
+            fn pipeline(&self) -> Vec<Box<dyn Lowering>> {
+                vec![Box::new(AddsSwitch)]
+            }
+        }
+
+        let ir = "define i32 @f() {\nentry:\n  ret i32 0\n}\n";
+        match pipeline(&DisallowsSwitch, ir) {
+            Err(PipelineError::DisallowedStmtError(lang, node)) => {
+                assert_eq!(lang, "disallows-switch");
+                assert_eq!(node, "Switch");
+            }
+            other => panic!("expected a disallowed-statement error, got {other:?}"),
+        }
     }
 }

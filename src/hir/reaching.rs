@@ -123,12 +123,16 @@ fn join(a: Cond, b: Cond, is_and: bool) -> Cond {
     if terms.iter().any(|t| terms.contains(&!t.clone())) {
         return zero;
     }
-    match terms.len() {
+    let v: Vec<Cond> = terms.into_iter().collect();
+    match v.len() {
         0 => unit,
-        1 => terms.into_iter().next().unwrap(),
+        1 => v[0].clone(),
         _ => {
-            let v = terms.into_iter().collect();
-            if is_and { Cond::And(v) } else { Cond::Or(v) }
+            if is_and {
+                Cond::And(v)
+            } else {
+                Cond::Or(v)
+            }
         }
     }
 }
@@ -138,11 +142,18 @@ fn join(a: Cond, b: Cond, is_and: bool) -> Cond {
 /// the other its negation, so the two arms of an if/else cancel out where
 /// they meet. With more targets each edge is its own atom.
 fn edge_cond(cfg: &Cfg, from: &str, to: &str) -> Cond {
-    let targets: BTreeSet<&String> = cfg.blocks[from].succ.iter().collect();
+    // A name the graph does not hold has no edge condition to recover: treat the
+    // edge as its own atom rather than panicking on the lookup.
+    let Some(block) = cfg.get_block(from) else {
+        return Cond::edge(from, to);
+    };
+    let targets: BTreeSet<&String> = block.succ.iter().collect();
     match targets.len() {
         1 => Cond::True,
         2 => {
-            let first = targets.iter().next().unwrap();
+            let Some(first) = targets.iter().next() else {
+                return Cond::True;
+            };
             let atom = Cond::edge(from, first);
             if first.as_str() == to { atom } else { !atom }
         }
